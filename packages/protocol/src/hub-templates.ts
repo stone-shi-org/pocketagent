@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
-import { PlannerModelOptionalFields, PlannerProviderEndpoint } from './planner.js';
+import {
+  PlannerModelOptionalFields,
+  PlannerProviderEndpoint,
+  PlannerProviderKind,
+} from './planner.js';
 import { HubHostId } from './hub-registry.js';
 import { McpAuthKind, McpTransportKind } from './mcp-registry.js';
 import { CustomClaudeProviderKind } from './custom-claude-providers.js';
@@ -221,6 +225,8 @@ export function mcpRegistriesFromPayload(
  */
 export const ClaudeProviderTemplatePayload = z.object({
   name: z.string().min(1).max(128),
+  /** PA-154: ID of the linked Anthropic-enabled provider in planner_providers, or null if standalone. */
+  providerId: z.string().min(1).max(128).nullable().optional(),
   providerKind: CustomClaudeProviderKind,
   baseUrl: BASE_URL,
   models: z.array(MODEL_ID).min(1).max(50),
@@ -290,11 +296,8 @@ export type PlannerProviderTemplateModel = z.infer<typeof PlannerProviderTemplat
  */
 export const PlannerProviderTemplatePayload = z.object({
   label: z.string().min(1).max(128),
-  /** PA-147 / PA-154: API-key providers are templatable; subscription providers are not (an OAuth login is one person's account on one host). */
-  kind: z
-    .enum(['openai-compatible', 'deepseek', 'opencode-zen', 'opencode-go'])
-    .optional()
-    .default('openai-compatible'),
+  /** PA-147 / PA-154 / PA-155: API-key providers and subscription providers. */
+  kind: PlannerProviderKind.optional().default('openai-compatible'),
   baseUrl: BASE_URL,
   endpoints: z.array(PlannerProviderEndpoint).min(1).optional(),
   allowUnattended: z.boolean().optional().default(false),

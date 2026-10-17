@@ -7,8 +7,9 @@ import {
   OPENCODE_GO_PROVIDER_DEFAULTS,
   OPENCODE_ZEN_PROVIDER_DEFAULTS,
   defaultEndpointsForProviderKind,
-  isApiKeyProviderKind,
+  parseTemplatePayload,
   type ClaudeOAuthAuthorizeResponse,
+  type ClaudeProviderTemplatePayload,
   type ClaudeProviderUsageResponse,
   type CodexDeviceCodeStartResponse,
   type PlannerModel,
@@ -17,6 +18,7 @@ import {
   type PlannerProviderKind,
   type PlannerProviderTemplatePayload,
   type PlannerSettingsDto,
+  type ProvidersAndModelsExportData,
   type SettingsResponse,
   type TestPlannerEmbeddingResponse,
   type TestPlannerModelResponse,
@@ -30,7 +32,10 @@ import { Icon } from '../components/Icon.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
 import { unlockAudioContext } from '../audio/audio-context.js';
-import { exportPlannerProviderPayload } from '../agent/hub-template-export.js';
+import {
+  exportClaudeProviderPayload,
+  exportPlannerProviderPayload,
+} from '../agent/hub-template-export.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
 
@@ -545,63 +550,308 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   );
 
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  const [exportingAll, setExportingAll] = useState(false);
 
   const handleExportProvider = (provider: PlannerProvider): void => {
     try {
-      const payload = exportPlannerProviderPayload(provider, models ?? []);
+      const payload = exportPlannerProviderPayload(provider, models ?? [], {
+        allowSubscription: true,
+      });
       exportToJsonFile('planner-provider', payload, provider.label);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not export provider.');
     }
   };
 
+  const handleExportAll = async (): Promise<void> => {
+    try {
+      setExportingAll(true);
+      setError(null);
+      const [customClaudeRes, geminiLiveRes] = await Promise.all([
+        api.listCustomClaudeProviders().catch(() => null),
+        api.getGeminiLiveSettings().catch(() => null),
+      ]);
+
+      const currentProviders = providers ?? [];
+      const currentModels = models ?? [];
+
+      const exportedProviders: PlannerProviderTemplatePayload[] = currentProviders.map((p) =>
+        exportPlannerProviderPayload(p, currentModels, { allowSubscription: true }),
+      );
+
+      const embeddingsData =
+        plannerSettings?.embeddingBaseUrl || plannerSettings?.embeddingModelId
+          ? {
+              baseUrl: plannerSettings.embeddingBaseUrl || null,
+              modelId: plannerSettings.embeddingModelId || null,
+            }
+          : undefined;
+
+      const voiceData = runtimeSettings
+        ? {
+            liveSttUrl: runtimeSettings.liveSttUrl || undefined,
+            liveSttModel: runtimeSettings.liveSttModel || undefined,
+            liveSttTtsModel: runtimeSettings.liveSttTtsModel || undefined,
+            voiceTurnSensitivity: runtimeSettings.voiceTurnSensitivity,
+            voiceTurnSilenceMs: runtimeSettings.voiceTurnSilenceMs,
+            voiceSpokenSummaryEnabled: runtimeSettings.voiceSpokenSummaryEnabled,
+          }
+        : undefined;
+
+      const codeAgentsData = (customClaudeRes?.providers ?? []).map(exportClaudeProviderPayload);
+
+      const geminiLiveData = geminiLiveRes
+        ? {
+            model: geminiLiveRes.model,
+            voice: geminiLiveRes.voice,
+            idleMinutes: geminiLiveRes.idleMinutes,
+          }
+        : undefined;
+
+      const payload: ProvidersAndModelsExportData = {
+        providers: exportedProviders,
+        ...(embeddingsData ? { embeddings: embeddingsData } : {}),
+        ...(voiceData ? { voice: voiceData } : {}),
+        codeAgents: codeAgentsData,
+        ...(geminiLiveData ? { geminiLive: geminiLiveData } : {}),
+      };
+
+      exportToJsonFile('providers-and-models', payload, 'providers-and-models');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not export providers and models.');
+    } finally {
+      setExportingAll(false);
+    }
+  };
+
   const { trigger: triggerImportProvider, fileInputProps: providerFileInputProps } =
-    useJsonImport<PlannerProviderTemplatePayload>({
-      expectedKind: 'planner-provider',
-      onSuccess: async ({ data: imported }) => {
+    useJsonImport<unknown>({
+      expectedKind: 'providers-and-models',
+      onSuccess: async ({ envelope, data: rawData }) => {
         try {
           setError(null);
           setImportSuccess(null);
           setBusy(true);
-          const currentProviders = providers ?? [];
-          // Match an existing provider with the same label + baseUrl, or an
-          // unconfigured Default provider when importing "Default".
-          const existingProvider =
-            currentProviders.find(
-              (p) => p.label === imported.label && p.baseUrl === imported.baseUrl,
-            ) ??
-            (imported.label === 'Default'
-              ? currentProviders.find((p) => p.label === 'Default' && !p.baseUrl)
-              : undefined);
-          const targetProvider = existingProvider
-            ? await api.updatePlannerProvider(existingProvider.id, {
-                label: imported.label,
-                baseUrl: imported.baseUrl,
-                allowUnattended: imported.allowUnattended,
-                ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
-              })
-            : await api.createPlannerProvider({
-                label: imported.label,
-                kind: imported.kind ?? 'openai-compatible',
-                baseUrl: imported.baseUrl,
-                allowUnattended: imported.allowUnattended,
-                ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
+
+          let importedProvidersCount = 0;
+          let importedModelsCount = 0;
+          let importedEmbeddings = false;
+          let importedVoice = false;
+          let importedCodeAgentsCount = 0;
+          let importedGeminiLive = false;
+
+          const currentProvidersRes = await api.listPlannerProviders();
+          let currentProviders = currentProvidersRes.providers ?? [];
+          const currentModelsRes = await api.listPlannerModels();
+          let currentModels = currentModelsRes.models ?? [];
+
+          const importSinglePlannerProvider = async (
+            imported: PlannerProviderTemplatePayload,
+          ): Promise<PlannerProvider> => {
+            const existingProvider =
+              currentProviders.find(
+                (p) => p.label === imported.label && p.baseUrl === imported.baseUrl,
+              ) ??
+              (imported.label === 'Default'
+                ? currentProviders.find((p) => p.label === 'Default' && !p.baseUrl)
+                : undefined);
+            const targetProvider = existingProvider
+              ? await api.updatePlannerProvider(existingProvider.id, {
+                  label: imported.label,
+                  baseUrl: imported.baseUrl,
+                  allowUnattended: imported.allowUnattended,
+                  ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
+                })
+              : await api.createPlannerProvider({
+                  label: imported.label,
+                  kind: imported.kind ?? 'openai-compatible',
+                  baseUrl: imported.baseUrl,
+                  allowUnattended: imported.allowUnattended,
+                  ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
+                });
+
+            currentProviders = [
+              ...currentProviders.filter((p) => p.id !== targetProvider.id),
+              targetProvider,
+            ];
+
+            const existingModelIds = new Set(
+              currentModels
+                .filter((m) => m.providerId === targetProvider.id)
+                .map((m) => m.modelId),
+            );
+            for (const m of imported.models) {
+              if (!existingModelIds.has(m.modelId)) {
+                const created = await api.createPlannerModel({
+                  ...m,
+                  providerId: targetProvider.id,
+                });
+                currentModels = [...currentModels, created];
+                importedModelsCount++;
+              }
+            }
+            importedProvidersCount++;
+            return targetProvider;
+          };
+
+          if (envelope.kind === 'providers-and-models') {
+            const bundle = rawData as ProvidersAndModelsExportData;
+
+            // 1. Providers and models
+            for (const prov of bundle.providers ?? []) {
+              await importSinglePlannerProvider(prov);
+            }
+
+            // 2. Embeddings
+            if (bundle.embeddings && (bundle.embeddings.baseUrl || bundle.embeddings.modelId)) {
+              await api.updatePlannerSettings({
+                embeddingBaseUrl: bundle.embeddings.baseUrl ?? undefined,
+                embeddingModelId: bundle.embeddings.modelId ?? undefined,
               });
-          const existingModelIds = new Set(
-            (models ?? [])
-              .filter((m) => m.providerId === targetProvider.id)
-              .map((m) => m.modelId),
-          );
-          for (const m of imported.models) {
-            if (!existingModelIds.has(m.modelId)) {
-              await api.createPlannerModel({
-                ...m,
-                providerId: targetProvider.id,
+              importedEmbeddings = true;
+            }
+
+            // 3. Voice (TTS / STT)
+            if (bundle.voice) {
+              await api.updateSettings({
+                ...(bundle.voice.liveSttUrl !== undefined ? { liveSttUrl: bundle.voice.liveSttUrl } : {}),
+                ...(bundle.voice.liveSttModel !== undefined ? { liveSttModel: bundle.voice.liveSttModel } : {}),
+                ...(bundle.voice.liveSttTtsModel !== undefined ? { liveSttTtsModel: bundle.voice.liveSttTtsModel } : {}),
+                ...(bundle.voice.voiceTurnSensitivity !== undefined ? { voiceTurnSensitivity: bundle.voice.voiceTurnSensitivity } : {}),
+                ...(bundle.voice.voiceTurnSilenceMs !== undefined ? { voiceTurnSilenceMs: bundle.voice.voiceTurnSilenceMs } : {}),
+                ...(bundle.voice.voiceSpokenSummaryEnabled !== undefined ? { voiceSpokenSummaryEnabled: bundle.voice.voiceSpokenSummaryEnabled } : {}),
               });
+              importedVoice = true;
+            }
+
+            // 4. Code agents (Custom Claude providers)
+            if (bundle.codeAgents && bundle.codeAgents.length > 0) {
+              const existingCustomRes = await api.listCustomClaudeProviders().catch(() => null);
+              const existingCustom = existingCustomRes?.providers ?? [];
+
+              for (const agent of bundle.codeAgents) {
+                const existing = existingCustom.find(
+                  (c) =>
+                    c.name === agent.name ||
+                    (c.baseUrl === agent.baseUrl && c.providerKind === agent.providerKind),
+                );
+
+                const matchedProvider =
+                  (agent.providerId ? currentProviders.find((p) => p.id === agent.providerId) : undefined) ??
+                  currentProviders.find(
+                    (p) =>
+                      p.baseUrl === agent.baseUrl &&
+                      (p.endpoints?.length ? p.endpoints : defaultEndpointsForProviderKind(p.kind)).includes('anthropic'),
+                  ) ??
+                  currentProviders.find((p) =>
+                    (p.endpoints?.length ? p.endpoints : defaultEndpointsForProviderKind(p.kind)).includes('anthropic'),
+                  );
+
+                if (existing) {
+                  await api.updateCustomClaudeProvider(existing.id, {
+                    name: agent.name,
+                    providerId: matchedProvider?.id ?? existing.providerId,
+                    providerKind: agent.providerKind,
+                    baseUrl: agent.baseUrl,
+                    models: agent.models,
+                    defaultModel: agent.defaultModel,
+                    smallModel: agent.smallModel,
+                    allowUnattended: agent.allowUnattended,
+                    supportsEffort: agent.supportsEffort,
+                  });
+                  importedCodeAgentsCount++;
+                } else if (matchedProvider) {
+                  await api.createCustomClaudeProvider({
+                    name: agent.name,
+                    providerId: matchedProvider.id,
+                    providerKind: agent.providerKind,
+                    allowUnattended: agent.allowUnattended,
+                    supportsEffort: agent.supportsEffort,
+                    defaultModel: agent.defaultModel,
+                    smallModel: agent.smallModel,
+                  });
+                  importedCodeAgentsCount++;
+                }
+              }
+            }
+
+            // 5. Gemini Live
+            if (
+              bundle.geminiLive &&
+              (bundle.geminiLive.model || bundle.geminiLive.voice !== undefined || bundle.geminiLive.idleMinutes !== undefined)
+            ) {
+              await api
+                .updateGeminiLiveSettings({
+                  ...(bundle.geminiLive.model ? { model: bundle.geminiLive.model } : {}),
+                  ...(bundle.geminiLive.voice !== undefined ? { voice: bundle.geminiLive.voice } : {}),
+                  ...(bundle.geminiLive.idleMinutes !== undefined ? { idleMinutes: bundle.geminiLive.idleMinutes } : {}),
+                })
+                .catch(() => null);
+              importedGeminiLive = true;
+            }
+
+            const parts: string[] = [];
+            if (importedProvidersCount > 0) parts.push(`${importedProvidersCount} provider(s)`);
+            if (importedModelsCount > 0) parts.push(`${importedModelsCount} model(s)`);
+            if (importedEmbeddings) parts.push('embeddings');
+            if (importedVoice) parts.push('TTS/STT');
+            if (importedCodeAgentsCount > 0) parts.push(`${importedCodeAgentsCount} code agent(s)`);
+            if (importedGeminiLive) parts.push('Gemini Live');
+
+            await load();
+            setImportSuccess(
+              parts.length > 0
+                ? `Imported successfully: ${parts.join(', ')}.`
+                : 'Providers and models imported successfully.',
+            );
+          } else if (envelope.kind === 'planner-provider') {
+            if (Array.isArray(rawData)) {
+              for (const prov of rawData as PlannerProviderTemplatePayload[]) {
+                await importSinglePlannerProvider(prov);
+              }
+            } else {
+              await importSinglePlannerProvider(rawData as PlannerProviderTemplatePayload);
+            }
+            await load();
+            setImportSuccess(
+              `Imported ${importedProvidersCount} provider(s) and ${importedModelsCount} model(s).`,
+            );
+          } else if (envelope.kind === 'planner-endpoint') {
+            const parsed = parseTemplatePayload(
+              'planner-endpoint',
+              rawData,
+              envelope.name || 'Default',
+            );
+            if (parsed.ok && parsed.value.kind === 'planner-provider') {
+              await importSinglePlannerProvider(parsed.value.payload);
+            }
+            await load();
+            setImportSuccess(`Imported legacy LLM endpoint and ${importedModelsCount} model(s).`);
+          } else if (envelope.kind === 'claude-provider') {
+            const agent = rawData as ClaudeProviderTemplatePayload;
+            const matchedProvider = currentProviders.find((p) =>
+              (p.endpoints?.length ? p.endpoints : defaultEndpointsForProviderKind(p.kind)).includes(
+                'anthropic',
+              ),
+            );
+            if (matchedProvider) {
+              await api.createCustomClaudeProvider({
+                name: agent.name,
+                providerId: matchedProvider.id,
+                providerKind: agent.providerKind,
+                allowUnattended: agent.allowUnattended,
+                supportsEffort: agent.supportsEffort,
+                defaultModel: agent.defaultModel,
+                smallModel: agent.smallModel,
+              });
+              await load();
+              setImportSuccess(`Imported code agent "${agent.name}".`);
+            } else {
+              setImportSuccess(
+                `Could not link code agent "${agent.name}": no Anthropic-enabled provider found.`,
+              );
             }
           }
-          await load();
-          setImportSuccess(`Pocket Agent provider "${targetProvider.label}" imported successfully.`);
         } catch (err) {
           setError(err instanceof ApiError ? err.message : 'Could not import provider settings.');
         } finally {
@@ -616,9 +866,6 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 
   const runtimeBusy = (key: string): boolean => pendingRuntime.has(key);
   const runtimeSettings = runtimeData?.settings;
-  const exportableProvider = (providers ?? []).find(
-    (p) => isApiKeyProviderKind(p.kind) && p.baseUrl.trim().length > 0,
-  );
 
   return (
     <div className="planner-page">
@@ -634,19 +881,20 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
           <button
             type="button"
             className="planner-btn icon-only"
-            disabled={!exportableProvider || !exportableProvider.baseUrl}
-            onClick={() => exportableProvider && handleExportProvider(exportableProvider)}
-            title="Export Pocket Agent provider and models to JSON"
-            aria-label="Export Pocket Agent provider and models to JSON"
+            disabled={exportingAll || busy || (providers !== null && providers.length === 0)}
+            onClick={() => void handleExportAll()}
+            title="Export all providers, models, embeddings, voice, and code agents to JSON"
+            aria-label="Export all providers, models, embeddings, voice, and code agents to JSON"
           >
             <Icon name="download" size={16} />
           </button>
           <button
             type="button"
             className="planner-btn icon-only"
+            disabled={busy}
             onClick={triggerImportProvider}
-            title="Import Pocket Agent provider and models from JSON"
-            aria-label="Import Pocket Agent provider and models from JSON"
+            title="Import providers and models from JSON"
+            aria-label="Import providers and models from JSON"
           >
             <Icon name="upload" size={16} />
           </button>

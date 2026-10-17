@@ -58,6 +58,7 @@ export function exportClaudeProviderPayload(
 ): ClaudeProviderTemplatePayload {
   return {
     name: provider.name,
+    ...(provider.providerId ? { providerId: provider.providerId } : {}),
     providerKind: provider.providerKind,
     baseUrl: provider.baseUrl,
     models: provider.models,
@@ -106,13 +107,23 @@ export function exportPlannerProviderPayload(
     endpoints?: PlannerProvider['endpoints'];
   },
   models: PlannerModel[],
+  options?: { allowSubscription?: boolean },
 ): PlannerProviderTemplatePayload {
-  if (!isApiKeyProviderKind(provider.kind)) {
+  if (!options?.allowSubscription && !isApiKeyProviderKind(provider.kind)) {
     throw new Error(
       `Provider "${provider.label}" is a subscription provider (${provider.kind}) and cannot be exported as a Hub template.`,
     );
   }
-  if (!provider.baseUrl) {
+  const baseUrl =
+    provider.baseUrl ||
+    (provider.kind === 'claude-oauth'
+      ? 'https://api.anthropic.com'
+      : provider.kind === 'codex-oauth'
+        ? 'https://chatgpt.com/backend-api'
+        : provider.kind === 'antigravity-oauth'
+          ? 'https://autopush-cloudaicompanion.sandbox.googleapis.com'
+          : '');
+  if (!baseUrl) {
     throw new Error(`Provider "${provider.label}" has no baseUrl configured.`);
   }
   const providerModels = models.filter(
@@ -121,7 +132,7 @@ export function exportPlannerProviderPayload(
   return {
     label: provider.label,
     kind: provider.kind,
-    baseUrl: provider.baseUrl,
+    baseUrl,
     allowUnattended: provider.allowUnattended,
     ...(provider.endpoints !== undefined ? { endpoints: provider.endpoints } : {}),
     models: providerModels.map(exportPlannerModelToTemplate),

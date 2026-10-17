@@ -55,6 +55,8 @@ describe('ProvidersAndModelsPage (PA-132, PA-148, PA-152)', () => {
     expect(html).toContain('<h3>Embeddings</h3>');
     expect(html).toContain('<h3>TTS / STT</h3>');
     expect(html).toContain('<h3>Gemini Live</h3>');
+    expect(html).toContain('title="Export all providers, models, embeddings, voice, and code agents to JSON"');
+    expect(html).toContain('title="Import providers and models from JSON"');
   });
 
   it('exposes ModelLabelEditor and computeModelSuggestions', () => {

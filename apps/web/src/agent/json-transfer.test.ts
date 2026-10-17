@@ -239,5 +239,97 @@ describe('json-transfer', () => {
       expect((parseRes.data as typeof multiJobs)[1]!.name).toBe('Morning Sync');
     }
   });
+
+  it('validates comprehensive providers-and-models export envelopes (PA-155)', () => {
+    const bundle = {
+      providers: [
+        {
+          label: 'DeepSeek',
+          kind: 'deepseek',
+          baseUrl: 'https://api.deepseek.com',
+          endpoints: ['openai', 'anthropic'],
+          models: [{ modelId: 'deepseek-chat', label: 'DeepSeek Chat' }],
+        },
+      ],
+      embeddings: {
+        baseUrl: 'https://api.openai.com/v1',
+        modelId: 'text-embedding-3-small',
+      },
+      voice: {
+        liveSttUrl: 'http://10.0.0.50:8000',
+        liveSttModel: 'whisper-large-v3',
+        liveSttTtsModel: 'kokoro-82m-v1',
+        voiceTurnSensitivity: 7,
+        voiceTurnSilenceMs: 800,
+        voiceSpokenSummaryEnabled: true,
+      },
+      codeAgents: [
+        {
+          name: 'Claude Code (DeepSeek)',
+          providerKind: 'deepseek',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          models: ['deepseek-chat'],
+          defaultModel: 'deepseek-chat',
+          smallModel: null,
+          allowUnattended: false,
+        },
+      ],
+      geminiLive: {
+        model: 'gemini-2.0-flash-exp',
+        voice: 'Puck',
+        idleMinutes: 15,
+      },
+    };
+
+    const envelope = createExportEnvelope('providers-and-models', bundle, 'all');
+    const parseRes = parseExportEnvelope(envelope, 'providers-and-models');
+    expect(parseRes.ok).toBe(true);
+    if (parseRes.ok) {
+      const data = parseRes.data as typeof bundle;
+      expect(data.providers).toHaveLength(1);
+      expect(data.providers[0]!.label).toBe('DeepSeek');
+      expect(data.embeddings?.modelId).toBe('text-embedding-3-small');
+      expect(data.voice?.liveSttUrl).toBe('http://10.0.0.50:8000');
+      expect(data.codeAgents).toHaveLength(1);
+      expect(data.codeAgents[0]!.name).toBe('Claude Code (DeepSeek)');
+      expect(data.geminiLive?.model).toBe('gemini-2.0-flash-exp');
+    }
+
+    const templates = exportEnvelopeToHubTemplates(envelope);
+    expect(templates).toHaveLength(2);
+    expect(templates[0]!.kind).toBe('planner-provider');
+    expect(templates[0]!.name).toBe('DeepSeek');
+    expect(templates[1]!.kind).toBe('claude-provider');
+    expect(templates[1]!.name).toBe('Claude Code (DeepSeek)');
+  });
+
+  it('allows backwards-compatible import of planner-provider, planner-endpoint, and claude-provider when expectedKind is providers-and-models (PA-155)', () => {
+    const singleProvider = createExportEnvelope('planner-provider', {
+      label: 'Local vLLM',
+      baseUrl: 'http://localhost:8000/v1',
+      models: [],
+    });
+    const res1 = parseExportEnvelope(singleProvider, 'providers-and-models');
+    expect(res1.ok).toBe(true);
+
+    const legacyEndpoint = createExportEnvelope('planner-endpoint', {
+      baseUrl: 'http://localhost:8000/v1',
+      models: [],
+    });
+    const res2 = parseExportEnvelope(legacyEndpoint, 'providers-and-models');
+    expect(res2.ok).toBe(true);
+
+    const claudeProv = createExportEnvelope('claude-provider', {
+      name: 'Custom Claude',
+      providerKind: 'claude-compatible',
+      baseUrl: 'https://api.example.com',
+      models: ['claude-3-5-sonnet'],
+      defaultModel: 'claude-3-5-sonnet',
+      smallModel: null,
+      allowUnattended: false,
+    });
+    const res3 = parseExportEnvelope(claudeProv, 'providers-and-models');
+    expect(res3.ok).toBe(true);
+  });
 });
 

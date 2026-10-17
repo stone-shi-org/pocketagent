@@ -33,6 +33,7 @@ export const PocketAgentExportKind = z.enum([
   'mcp-registry',
   'claude-provider',
   'skill',
+  'providers-and-models',
 ]);
 export type PocketAgentExportKind = z.infer<typeof PocketAgentExportKind>;
 
@@ -113,6 +114,42 @@ const LegacyHubTemplateExportData = z.object({
   payload: z.unknown(),
 });
 
+/** PA-155: Voice (TTS / STT) settings export */
+export const ProvidersAndModelsVoiceExportData = z.object({
+  liveSttUrl: z.string().max(2048).optional(),
+  liveSttModel: z.string().max(200).optional(),
+  liveSttTtsModel: z.string().max(200).optional(),
+  voiceTurnSensitivity: z.number().int().min(1).max(10).optional(),
+  voiceTurnSilenceMs: z.number().int().min(200).max(3000).optional(),
+  voiceSpokenSummaryEnabled: z.boolean().optional(),
+});
+export type ProvidersAndModelsVoiceExportData = z.infer<typeof ProvidersAndModelsVoiceExportData>;
+
+/** PA-155: Embeddings endpoint export */
+export const ProvidersAndModelsEmbeddingsExportData = z.object({
+  baseUrl: z.string().max(2048).nullable().optional(),
+  modelId: z.string().max(200).nullable().optional(),
+});
+export type ProvidersAndModelsEmbeddingsExportData = z.infer<typeof ProvidersAndModelsEmbeddingsExportData>;
+
+/** PA-155: Gemini Live settings export */
+export const ProvidersAndModelsGeminiLiveExportData = z.object({
+  model: z.string().max(200).optional(),
+  voice: z.string().max(100).nullable().optional(),
+  idleMinutes: z.number().int().min(0).max(120).optional(),
+});
+export type ProvidersAndModelsGeminiLiveExportData = z.infer<typeof ProvidersAndModelsGeminiLiveExportData>;
+
+/** PA-155: Unified export for all providers, models, voice, embeddings, and code agents */
+export const ProvidersAndModelsExportData = z.object({
+  providers: z.array(PlannerProviderTemplatePayload).optional().default([]),
+  embeddings: ProvidersAndModelsEmbeddingsExportData.optional(),
+  voice: ProvidersAndModelsVoiceExportData.optional(),
+  codeAgents: z.array(ClaudeProviderTemplatePayload).optional().default([]),
+  geminiLive: ProvidersAndModelsGeminiLiveExportData.optional(),
+});
+export type ProvidersAndModelsExportData = z.infer<typeof ProvidersAndModelsExportData>;
+
 /** Create a standard export envelope. */
 export function createExportEnvelope<T>(
   kind: PocketAgentExportKind,
@@ -166,7 +203,17 @@ export function parseExportEnvelope<T = unknown>(
   const actualKind = kindParsed.data;
   const compatibleLegacyPlanner =
     expectedKind === 'planner-provider' && actualKind === 'planner-endpoint';
-  if (expectedKind && actualKind !== expectedKind && !compatibleLegacyPlanner) {
+  const compatibleWithProvidersAndModels =
+    expectedKind === 'providers-and-models' &&
+    (actualKind === 'planner-provider' ||
+      actualKind === 'planner-endpoint' ||
+      actualKind === 'claude-provider');
+  if (
+    expectedKind &&
+    actualKind !== expectedKind &&
+    !compatibleLegacyPlanner &&
+    !compatibleWithProvidersAndModels
+  ) {
     return {
       ok: false,
       error: `Cannot import: this file contains a "${actualKind}" export, but this page expects a "${expectedKind}" export.`,
@@ -299,6 +346,13 @@ function validateExportPayload(
       const parsed = SkillTemplatePayload.safeParse(data);
       if (!parsed.success) {
         return { ok: false, error: `Invalid skill data: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
+      }
+      return { ok: true, data: parsed.data };
+    }
+    case 'providers-and-models': {
+      const parsed = ProvidersAndModelsExportData.safeParse(data);
+      if (!parsed.success) {
+        return { ok: false, error: `Invalid providers and models export data: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
       }
       return { ok: true, data: parsed.data };
     }

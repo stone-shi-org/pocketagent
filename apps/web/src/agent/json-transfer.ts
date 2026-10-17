@@ -224,6 +224,30 @@ export function exportEnvelopeToHubTemplates(
       payload: reg,
     }));
   }
+  if (envelope.kind === 'providers-and-models') {
+    const data = envelope.data as {
+      providers?: Array<{ label?: string }>;
+      codeAgents?: Array<{ name?: string }>;
+    };
+    const drafts: HubTemplateDraft[] = [];
+    for (const p of data.providers ?? []) {
+      drafts.push({
+        kind: 'planner-provider',
+        name: p.label || 'Imported Pocket Agent Provider',
+        description: 'Imported from providers-and-models export',
+        payload: p,
+      });
+    }
+    for (const a of data.codeAgents ?? []) {
+      drafts.push({
+        kind: 'claude-provider',
+        name: a.name || 'Imported Claude Provider',
+        description: 'Imported from providers-and-models export',
+        payload: a,
+      });
+    }
+    return drafts;
+  }
   const single = exportEnvelopeToHubTemplate(envelope);
   return single !== null ? [single] : [];
 }
