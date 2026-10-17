@@ -92,6 +92,8 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   const [confirmingDeleteAllForProvider, setConfirmingDeleteAllForProvider] = useState<PlannerProvider | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
   const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
+  const [draggingProviderId, setDraggingProviderId] = useState<string | null>(null);
+  const [dragOverProviderId, setDragOverProviderId] = useState<string | null>(null);
 
   // Embeddings state (PA-29, PA-132)
   const [embeddingBaseUrlInput, setEmbeddingBaseUrlInput] = useState('');
@@ -454,6 +456,93 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
       setTestingProviderId(null),
     );
   };
+
+  const handleReorderProviders = useCallback(
+    (orderedIds: string[]) => {
+      const currentProviders = providers ?? [];
+      const map = new Map(currentProviders.map((p) => [p.id, p]));
+      const next: PlannerProvider[] = [];
+      for (const id of orderedIds) {
+        const p = map.get(id);
+        if (p) next.push(p);
+      }
+      for (const p of currentProviders) {
+        if (!orderedIds.includes(p.id)) next.push(p);
+      }
+      setProviders(next);
+
+      void (async () => {
+        try {
+          await api.reorderPlannerProviders(orderedIds);
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not reorder providers.');
+          await load();
+        }
+      })();
+    },
+    [api, providers, onApiError, load],
+  );
+
+  const handleMoveProvider = useCallback(
+    (providerId: string, direction: 'up' | 'down') => {
+      const currentProviders = providers ?? [];
+      const idx = currentProviders.findIndex((p) => p.id === providerId);
+      if (idx === -1) return;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= currentProviders.length) return;
+      const next = [...currentProviders];
+      const [moved] = next.splice(idx, 1);
+      if (!moved) return;
+      next.splice(targetIdx, 0, moved);
+      handleReorderProviders(next.map((p) => p.id));
+    },
+    [providers, handleReorderProviders],
+  );
+
+  const handleReorderModels = useCallback(
+    (providerId: string, orderedModelIds: string[]) => {
+      const currentModels = models ?? [];
+      const providerModels = currentModels.filter(
+        (m) =>
+          m.providerId === providerId ||
+          (!m.providerId && (providers ?? [])[0]?.id === providerId),
+      );
+      const providerModelMap = new Map(providerModels.map((m) => [m.id, m]));
+      const reorderedForProvider: PlannerModel[] = [];
+      for (const id of orderedModelIds) {
+        const m = providerModelMap.get(id);
+        if (m) reorderedForProvider.push(m);
+      }
+      for (const m of providerModels) {
+        if (!orderedModelIds.includes(m.id)) reorderedForProvider.push(m);
+      }
+
+      let idx = 0;
+      const nextModels: PlannerModel[] = currentModels.map((m) => {
+        if (
+          m.providerId === providerId ||
+          (!m.providerId && (providers ?? [])[0]?.id === providerId)
+        ) {
+          const replacement = reorderedForProvider[idx++];
+          return replacement ?? m;
+        }
+        return m;
+      });
+      setModels(nextModels);
+
+      void (async () => {
+        try {
+          await api.reorderPlannerProviderModels(providerId, orderedModelIds);
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not reorder models.');
+          await load();
+        }
+      })();
+    },
+    [api, models, providers, onApiError, load],
+  );
 
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
 
@@ -879,6 +968,51 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                 busy={busy}
                 testingAll={testingProviderId === provider.id}
                 testResults={testResults}
+                isDragging={draggingProviderId === provider.id}
+                isDragOver={dragOverProviderId === provider.id}
+                onDragStartProvider={(e) => {
+                  e.dataTransfer.setData('text/plain', provider.id);
+                  e.dataTransfer.setData('application/x-pocketagent-provider-id', provider.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  setDraggingProviderId(provider.id);
+                }}
+                onDragOverProvider={(e) => {
+                  if (Array.from(e.dataTransfer.types).includes('application/x-pocketagent-provider-id')) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (dragOverProviderId !== provider.id) {
+                      setDragOverProviderId(provider.id);
+                    }
+                  }
+                }}
+                onDragLeaveProvider={() => {
+                  if (dragOverProviderId === provider.id) {
+                    setDragOverProviderId(null);
+                  }
+                }}
+                onDropProvider={(e) => {
+                  e.preventDefault();
+                  const sourceProviderId = e.dataTransfer.getData('application/x-pocketagent-provider-id');
+                  setDraggingProviderId(null);
+                  setDragOverProviderId(null);
+                  if (!sourceProviderId || sourceProviderId === provider.id) return;
+                  const currentProviders = providers ?? [];
+                  const sourceIdx = currentProviders.findIndex((p) => p.id === sourceProviderId);
+                  const targetIdx = currentProviders.findIndex((p) => p.id === provider.id);
+                  if (sourceIdx === -1 || targetIdx === -1) return;
+                  const next = [...currentProviders];
+                  const [moved] = next.splice(sourceIdx, 1);
+                  if (!moved) return;
+                  next.splice(targetIdx, 0, moved);
+                  handleReorderProviders(next.map((p) => p.id));
+                }}
+                onDragEndProvider={() => {
+                  setDraggingProviderId(null);
+                  setDragOverProviderId(null);
+                }}
+                onMoveProviderUp={() => handleMoveProvider(provider.id, 'up')}
+                onMoveProviderDown={() => handleMoveProvider(provider.id, 'down')}
+                onReorderModels={handleReorderModels}
                 onSaveProvider={(patch) =>
                   withBusy(() => api.updatePlannerProvider(provider.id, patch))
                 }
@@ -1157,6 +1291,16 @@ export interface PlannerProviderSectionProps {
   testResults: Record<string, TestPlannerModelResponse | 'testing'>;
   initialExpanded?: boolean;
   initialModelsExpanded?: boolean;
+  isDragging?: boolean;
+  isDragOver?: boolean;
+  onDragStartProvider?: (e: React.DragEvent) => void;
+  onDragOverProvider?: (e: React.DragEvent) => void;
+  onDragLeaveProvider?: (e: React.DragEvent) => void;
+  onDropProvider?: (e: React.DragEvent) => void;
+  onDragEndProvider?: (e: React.DragEvent) => void;
+  onMoveProviderUp?: () => void;
+  onMoveProviderDown?: () => void;
+  onReorderModels?: (providerId: string, orderedModelIds: string[]) => void;
   onSaveProvider: (patch: {
     label?: string;
     baseUrl?: string;
@@ -1191,6 +1335,16 @@ export function PlannerProviderSection({
   testResults,
   initialExpanded = true,
   initialModelsExpanded = true,
+  isDragging = false,
+  isDragOver = false,
+  onDragStartProvider,
+  onDragOverProvider,
+  onDragLeaveProvider,
+  onDropProvider,
+  onDragEndProvider,
+  onMoveProviderUp,
+  onMoveProviderDown,
+  onReorderModels,
   onSaveProvider,
   onReload,
   onDeleteProvider,
@@ -1205,6 +1359,21 @@ export function PlannerProviderSection({
   onApiError,
   onError,
 }: PlannerProviderSectionProps): JSX.Element {
+  const sectionRef = useRef<HTMLDivElement | null>(null);
+  const [draggingModelId, setDraggingModelId] = useState<string | null>(null);
+  const [dragOverModelId, setDragOverModelId] = useState<string | null>(null);
+
+  const handleMoveModel = (modelId: string, direction: 'up' | 'down') => {
+    const idx = models.findIndex((m) => m.id === modelId);
+    if (idx === -1) return;
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= models.length) return;
+    const next = [...models];
+    const [moved] = next.splice(idx, 1);
+    if (!moved) return;
+    next.splice(targetIdx, 0, moved);
+    onReorderModels?.(provider.id, next.map((m) => m.id));
+  };
   const isClaudeOAuth = provider.kind === 'claude-oauth';
   const isCodexOAuth = provider.kind === 'codex-oauth';
   const isAntigravityOAuth = provider.kind === 'antigravity-oauth';
@@ -1621,27 +1790,62 @@ export function PlannerProviderSection({
             }`;
 
   return (
-    <div className="planner-section" data-provider-id={provider.id}>
+    <div
+      ref={sectionRef}
+      className={`planner-section${isDragging ? ' is-dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+      data-provider-id={provider.id}
+      onDragOver={onDragOverProvider}
+      onDragLeave={onDragLeaveProvider}
+      onDrop={onDropProvider}
+    >
       <div className="planner-section-header">
-        <button
-          type="button"
-          className="planner-collapsible-toggle"
-          onClick={() => setProviderExpanded((v) => !v)}
-          aria-expanded={providerExpanded}
-          aria-label={`${providerExpanded ? 'Collapse' : 'Expand'} provider ${provider.label}`}
-        >
-          <Icon name={providerExpanded ? 'chevron-down' : 'chevron-right'} size={14} />
-          <h3>
-            {provider.label}{' '}
-            <span className="planner-row-meta" style={{ fontWeight: 400 }}>
-              ({provider.kind})
-            </span>
-          </h3>
-          <span className="planner-row-meta">
-            · {models.length} model{models.length === 1 ? '' : 's'}
-            {!providerExpanded ? ` · ${statusSummary}` : ''}
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, flexWrap: 'wrap' }}>
+          <span
+            className="planner-drag-handle"
+            role="button"
+            tabIndex={0}
+            aria-label={`Drag to reorder provider ${provider.label}`}
+            title="Drag to reorder"
+            draggable={!busy}
+            onDragStart={(e) => {
+              if (sectionRef.current && e.dataTransfer.setDragImage) {
+                e.dataTransfer.setDragImage(sectionRef.current, 20, 20);
+              }
+              onDragStartProvider?.(e);
+            }}
+            onDragEnd={onDragEndProvider}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                onMoveProviderUp?.();
+              } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                onMoveProviderDown?.();
+              }
+            }}
+          >
+            <Icon name="grip" size={14} />
           </span>
-        </button>
+          <button
+            type="button"
+            className="planner-collapsible-toggle"
+            onClick={() => setProviderExpanded((v) => !v)}
+            aria-expanded={providerExpanded}
+            aria-label={`${providerExpanded ? 'Collapse' : 'Expand'} provider ${provider.label}`}
+          >
+            <Icon name={providerExpanded ? 'chevron-down' : 'chevron-right'} size={14} />
+            <h3>
+              {provider.label}{' '}
+              <span className="planner-row-meta" style={{ fontWeight: 400 }}>
+                ({provider.kind})
+              </span>
+            </h3>
+            <span className="planner-row-meta">
+              · {models.length} model{models.length === 1 ? '' : 's'}
+              {!providerExpanded ? ` · ${statusSummary}` : ''}
+            </span>
+          </button>
+        </div>
         <div className="planner-section-actions">
           {!isSubscriptionOAuth && (
             <button
@@ -2302,6 +2506,56 @@ export function PlannerProviderSection({
                 busy={busy}
                 testingAll={testingAll}
                 testResult={testResults[m.id]}
+                isDragging={draggingModelId === m.id}
+                isDragOver={dragOverModelId === m.id}
+                onDragStartModel={(e) => {
+                  e.dataTransfer.setData('text/plain', m.id);
+                  e.dataTransfer.setData('application/x-pocketagent-model-id', m.id);
+                  e.dataTransfer.setData('application/x-pocketagent-model-provider-id', provider.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  setDraggingModelId(m.id);
+                }}
+                onDragOverModel={(e) => {
+                  if (Array.from(e.dataTransfer.types).includes('application/x-pocketagent-model-id')) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (dragOverModelId !== m.id) {
+                      setDragOverModelId(m.id);
+                    }
+                  }
+                }}
+                onDragLeaveModel={() => {
+                  if (dragOverModelId === m.id) {
+                    setDragOverModelId(null);
+                  }
+                }}
+                onDropModel={(e) => {
+                  e.preventDefault();
+                  const sourceModelId = e.dataTransfer.getData('application/x-pocketagent-model-id');
+                  const sourceProviderId = e.dataTransfer.getData('application/x-pocketagent-model-provider-id');
+                  setDraggingModelId(null);
+                  setDragOverModelId(null);
+
+                  if (sourceProviderId !== provider.id || !sourceModelId || sourceModelId === m.id) {
+                    return;
+                  }
+
+                  const sourceIdx = models.findIndex((item) => item.id === sourceModelId);
+                  const targetIdx = models.findIndex((item) => item.id === m.id);
+                  if (sourceIdx === -1 || targetIdx === -1) return;
+
+                  const next = [...models];
+                  const [moved] = next.splice(sourceIdx, 1);
+                  if (!moved) return;
+                  next.splice(targetIdx, 0, moved);
+                  onReorderModels?.(provider.id, next.map((item) => item.id));
+                }}
+                onDragEndModel={() => {
+                  setDraggingModelId(null);
+                  setDragOverModelId(null);
+                }}
+                onMoveModelUp={() => handleMoveModel(m.id, 'up')}
+                onMoveModelDown={() => handleMoveModel(m.id, 'down')}
                 onSave={(patch) => onSetModelLimit(m.id, patch)}
                 onTest={() => onTestModel(m.id)}
                 onRemove={() => onRemoveModel(m.id)}
@@ -2387,6 +2641,15 @@ export interface PlannerModelRowProps {
   testingAll?: boolean;
   testResult?: TestPlannerModelResponse | 'testing';
   initialEditing?: boolean;
+  isDragging?: boolean;
+  isDragOver?: boolean;
+  onDragStartModel?: (e: React.DragEvent) => void;
+  onDragOverModel?: (e: React.DragEvent) => void;
+  onDragLeaveModel?: (e: React.DragEvent) => void;
+  onDropModel?: (e: React.DragEvent) => void;
+  onDragEndModel?: (e: React.DragEvent) => void;
+  onMoveModelUp?: () => void;
+  onMoveModelDown?: () => void;
   onSave: (patch: UpdatePlannerModelRequest) => void;
   onTest: () => void;
   onRemove: () => void;
@@ -2406,11 +2669,21 @@ export function PlannerModelRow({
   testingAll = false,
   testResult,
   initialEditing = false,
+  isDragging = false,
+  isDragOver = false,
+  onDragStartModel,
+  onDragOverModel,
+  onDragLeaveModel,
+  onDropModel,
+  onDragEndModel,
+  onMoveModelUp,
+  onMoveModelDown,
   onSave,
   onTest,
   onRemove,
   onError,
 }: PlannerModelRowProps): JSX.Element {
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const [editing, setEditing] = useState(initialEditing);
   const [labelDraft, setLabelDraft] = useState(model.label);
   const [supportsEffortDraft, setSupportsEffortDraft] = useState(model.supportsEffort !== false);
@@ -2562,9 +2835,42 @@ export function PlannerModelRow({
   };
 
   return (
-    <div className="planner-model-item" data-model-id={model.id}>
+    <div
+      ref={rowRef}
+      className={`planner-model-item${isDragging ? ' is-dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+      data-model-id={model.id}
+      onDragOver={onDragOverModel}
+      onDragLeave={onDragLeaveModel}
+      onDrop={onDropModel}
+    >
       <div className="planner-model-row">
         <span className="planner-model-summary">
+          <span
+            className="planner-drag-handle"
+            role="button"
+            tabIndex={0}
+            aria-label={`Drag to reorder model ${model.label}`}
+            title="Drag to reorder"
+            draggable={!busy}
+            onDragStart={(e) => {
+              if (rowRef.current && e.dataTransfer.setDragImage) {
+                e.dataTransfer.setDragImage(rowRef.current, 20, 20);
+              }
+              onDragStartModel?.(e);
+            }}
+            onDragEnd={onDragEndModel}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                onMoveModelUp?.();
+              } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                onMoveModelDown?.();
+              }
+            }}
+          >
+            <Icon name="grip" size={14} />
+          </span>
           <span className="planner-model-name">{model.label}</span>{' '}
           <span className="planner-row-meta">({model.modelId})</span>
           {testResult === 'testing' && <span className="planner-row-meta"> — testing…</span>}

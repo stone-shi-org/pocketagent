@@ -67,6 +67,36 @@ describe('planner-models (PA-148)', () => {
     expect(groups[1]!.models.map((m) => m.id)).toEqual(['pm-2']);
   });
 
+  it('respects provider sortOrder and model sortOrder within provider (PA-158)', () => {
+    const reorderedProviders: PlannerProvider[] = [
+      { ...PROVIDERS[0]!, sortOrder: 1 },
+      { ...PROVIDERS[1]!, sortOrder: 0 },
+    ];
+    const multipleModels: PlannerModel[] = [
+      {
+        id: 'pm-a',
+        providerId: 'pp-local',
+        modelId: 'model-a',
+        label: 'Model A',
+        supportsEffort: false,
+        createdAt: 1000,
+        sortOrder: 1,
+      },
+      {
+        id: 'pm-b',
+        providerId: 'pp-local',
+        modelId: 'model-b',
+        label: 'Model B',
+        supportsEffort: false,
+        createdAt: 1001,
+        sortOrder: 0,
+      },
+    ];
+    const groups = groupPlannerModelsByProvider(multipleModels, reorderedProviders);
+    expect(groups[0]!.providerLabel).toBe('Local vLLM');
+    expect(groups[0]!.models.map((m) => m.id)).toEqual(['pm-b', 'pm-a']);
+  });
+
   it('resolves model selection by row id first, then by bare modelId, and preserves unmatched refs', () => {
     expect(resolvePlannerModelSelection(MODELS, 'pm-2')).toBe('pm-2');
     expect(resolvePlannerModelSelection(MODELS, 'gpt-4o')).toBe('pm-1');

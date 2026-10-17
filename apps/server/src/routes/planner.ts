@@ -26,6 +26,8 @@ import {
   ExportPlannerSkillRequest,
   ImportPlannerSkillRequest,
   RegisterPlannerSkillRequest,
+  ReorderPlannerModelsRequest,
+  ReorderPlannerProvidersRequest,
   SetPlannerAgentMcpRegistryRequest,
   SetPlannerAgentSkillRequest,
   SetPlannerAgentToolRequest,
@@ -153,6 +155,8 @@ import {
   readPlannerProviders,
   readPlannerSettings,
   readPlannerToolApprovals,
+  reorderPlannerModels,
+  reorderPlannerProviders,
   requirePlannerProviderEncKey,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
@@ -1077,6 +1081,25 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     );
   });
 
+  app.put('/api/planner/providers/order', async (request, reply) => {
+    const parsed = ReorderPlannerProvidersRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db, config } = app.pocket;
+    const updated = reorderPlannerProviders(db, parsed.data.providerIds);
+    app.pocket.customClaudeProviders?.syncFromPlannerProviders();
+    auditConfigChange(request, 'planner providers reordered', {
+      order: parsed.data.providerIds,
+    });
+    const response: PlannerProviderListResponse = {
+      providers: updated.map((p) => toPlannerProviderDto(p, config.settingsEncKey)),
+      encryptionAvailable: config.settingsEncKey !== undefined,
+      hasLocalAgyAuth: hasLocalAgyCliToken(),
+    };
+    return reply.send(response);
+  });
+
   app.delete('/api/planner/providers/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const removed = deletePlannerProvider(app.pocket.db, id);
@@ -1191,6 +1214,28 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!removed) return notFound(reply, 'Model not found.');
     app.pocket.customClaudeProviders?.syncFromPlannerProviders();
     return reply.code(204).send();
+  });
+
+  app.put('/api/planner/providers/:id/models/order', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const provider = readPlannerProvider(app.pocket.db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+
+    const parsed = ReorderPlannerModelsRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db } = app.pocket;
+    const updated = reorderPlannerModels(db, id, parsed.data.modelIds);
+    app.pocket.customClaudeProviders?.syncFromPlannerProviders();
+    auditConfigChange(request, 'planner models reordered', {
+      provider: id,
+      order: parsed.data.modelIds,
+    });
+    const response: PlannerModelListResponse = {
+      models: updated,
+    };
+    return reply.send(response);
   });
 
   // A static segment ('discover'), not a param — Fastify routes it distinctly

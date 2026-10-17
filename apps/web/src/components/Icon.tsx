@@ -65,7 +65,8 @@ export type IconName =
   | 'broadcast'
   | 'brain'
   | 'file'
-  | 'info';
+  | 'info'
+  | 'grip';
 
 interface Props {
   name: IconName;
@@ -556,6 +557,18 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="12" cy="12" r="9" />
       <path d="M12 11v5" />
       <path d="M12 7.75v.01" />
+    </>
+  ),
+
+  // PA-158: 6-dot vertical drag grip for reordering providers and models.
+  grip: (
+    <>
+      <circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none" />
     </>
   ),
 };

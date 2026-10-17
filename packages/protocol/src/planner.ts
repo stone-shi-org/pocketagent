@@ -426,6 +426,16 @@ export const UpdatePlannerProviderRequest = z.object({
 });
 export type UpdatePlannerProviderRequest = z.infer<typeof UpdatePlannerProviderRequest>;
 
+/**
+ * PA-158: Reorders providers in `planner_providers`. The server assigns
+ * sequential `sort_order` values (0..n-1) to the provided IDs in a single
+ * transaction.
+ */
+export const ReorderPlannerProvidersRequest = z.object({
+  providerIds: z.array(z.string().min(1).max(128)),
+});
+export type ReorderPlannerProvidersRequest = z.infer<typeof ReorderPlannerProvidersRequest>;
+
 export const ClaudeOAuthAuthorizeResponse = z.object({
   authorizeUrl: z.string(),
   state: z.string(),
@@ -626,6 +636,16 @@ export const UpdatePlannerModelRequest = z.object({
   ...PlannerModelOptionalFields,
 });
 export type UpdatePlannerModelRequest = z.infer<typeof UpdatePlannerModelRequest>;
+
+/**
+ * PA-158: Reorders models within a provider in `planner_models`. The server
+ * assigns sequential `sort_order` values (0..n-1) to the provided model row
+ * UUIDs for that provider in a single transaction.
+ */
+export const ReorderPlannerModelsRequest = z.object({
+  modelIds: z.array(z.string().min(1).max(128)),
+});
+export type ReorderPlannerModelsRequest = z.infer<typeof ReorderPlannerModelsRequest>;
 
 /**
  * `GET /api/planner/models/discover` queries the configured endpoint's own

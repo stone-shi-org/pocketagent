@@ -9179,6 +9179,43 @@ button.chat-rate-limit-badge {
 .planner-model-detail .planner-model-prices { gap: 8px 12px; margin-top: 0; }
 .planner-model-detail-actions { gap: 8px; }
 
+/* PA-158: Drag and drop handles and indicators for reordering providers and models */
+.planner-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin-right: 4px;
+  color: var(--text-dim);
+  cursor: grab;
+  border-radius: 4px;
+  user-select: none;
+  touch-action: none;
+  flex: none;
+}
+.planner-drag-handle:hover {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+.planner-drag-handle:active {
+  cursor: grabbing;
+}
+.planner-section.is-dragging {
+  opacity: 0.45;
+  border-style: dashed;
+}
+.planner-section.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle, rgba(59, 130, 246, 0.2));
+}
+.planner-model-item.is-dragging {
+  opacity: 0.45;
+  background: var(--bg-elev);
+}
+.planner-model-item.drag-over {
+  border-top: 2px solid var(--accent);
+}
+
 
 /* ---- Page headers on a phone (PA-131) ----------------------------------
    Cron, Webhooks, Pocket Agent settings and Settings each put a title, a

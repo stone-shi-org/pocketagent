@@ -43,6 +43,8 @@ describe('PA-148: multiple OpenAI-compatible Pocket Agent providers and models',
     });
   const patch = (app: TestApp, url: string, payload: unknown) =>
     app.app.inject({ method: 'PATCH', url, headers: authHeaders(app.cookie), payload });
+  const put = (app: TestApp, url: string, payload: unknown) =>
+    app.app.inject({ method: 'PUT', url, headers: authHeaders(app.cookie), payload });
   const del = (app: TestApp, url: string) =>
     app.app.inject({ method: 'DELETE', url, headers: authHeaders(app.cookie) });
 
@@ -653,4 +655,139 @@ describe('PA-148: multiple OpenAI-compatible Pocket Agent providers and models',
     expect(mmCall.headers['user-agent']).toBe('pocketagent/1.0');
     expect(mmCall.headers['x-opencode-session']).toBe(chatGo.id);
   });
+
+  it('PA-158: reorders providers and models within a provider with sort_order updates and Custom Claude sync', async () => {
+    t = await createTestApp({ POCKETAGENT_SETTINGS_ENC_KEY: ENC_KEY_A });
+
+    // Create 3 providers
+    const p1 = (
+      await post(t, '/api/planner/providers', {
+        label: 'Provider 1',
+        baseUrl: 'http://127.0.0.1:8001/v1',
+      })
+    ).json();
+    const p2 = (
+      await post(t, '/api/planner/providers', {
+        label: 'Provider 2',
+        kind: 'deepseek',
+        apiKey: 'sk-ds-test',
+      })
+    ).json();
+    const p3 = (
+      await post(t, '/api/planner/providers', {
+        label: 'Provider 3',
+        baseUrl: 'http://127.0.0.1:8003/v1',
+      })
+    ).json();
+
+    // Verify initial sort_order is 0, 1, 2
+    const initialList = (await get(t, '/api/planner/providers')).json().providers;
+    expect(initialList.map((p: { id: string }) => p.id)).toEqual([p1.id, p2.id, p3.id]);
+    expect(initialList.map((p: { sortOrder: number }) => p.sortOrder)).toEqual([0, 1, 2]);
+
+    // Reorder providers to [p3, p1, p2]
+    const reorderProvidersRes = await put(t, '/api/planner/providers/order', {
+      providerIds: [p3.id, p1.id, p2.id],
+    });
+    expect(reorderProvidersRes.statusCode).toBe(200);
+    const reorderedProviders = reorderProvidersRes.json().providers;
+    expect(reorderedProviders.map((p: { id: string }) => p.id)).toEqual([p3.id, p1.id, p2.id]);
+    expect(reorderedProviders.map((p: { sortOrder: number }) => p.sortOrder)).toEqual([0, 1, 2]);
+
+    // Subsequent GET returns the new order
+    const getReorderedProviders = (await get(t, '/api/planner/providers')).json().providers;
+    expect(getReorderedProviders.map((p: { id: string }) => p.id)).toEqual([p3.id, p1.id, p2.id]);
+
+    // Partial reorder appends unmentioned providers
+    const partialReorderRes = await put(t, '/api/planner/providers/order', {
+      providerIds: [p2.id],
+    });
+    expect(partialReorderRes.statusCode).toBe(200);
+    const partialProviders = partialReorderRes.json().providers;
+    // p2 is first, then p3 and p1 in their existing relative order
+    expect(partialProviders.map((p: { id: string }) => p.id)).toEqual([p2.id, p3.id, p1.id]);
+
+    // Add 3 models to provider 1
+    const m1 = (
+      await post(t, '/api/planner/models', {
+        providerId: p1.id,
+        modelId: 'model-a',
+        label: 'Model A',
+      })
+    ).json();
+    const m2 = (
+      await post(t, '/api/planner/models', {
+        providerId: p1.id,
+        modelId: 'model-b',
+        label: 'Model B',
+      })
+    ).json();
+    const m3 = (
+      await post(t, '/api/planner/models', {
+        providerId: p1.id,
+        modelId: 'model-c',
+        label: 'Model C',
+      })
+    ).json();
+
+    // Verify initial model order
+    const initialModels = (await get(t, `/api/planner/models?providerId=${p1.id}`)).json().models;
+    expect(initialModels.map((m: { id: string }) => m.id)).toEqual([m1.id, m2.id, m3.id]);
+    expect(initialModels.map((m: { sortOrder: number }) => m.sortOrder)).toEqual([0, 1, 2]);
+
+    // Reorder models to [m3, m1, m2]
+    const reorderModelsRes = await put(t, `/api/planner/providers/${p1.id}/models/order`, {
+      modelIds: [m3.id, m1.id, m2.id],
+    });
+    expect(reorderModelsRes.statusCode).toBe(200);
+    const reorderedModels = reorderModelsRes.json().models;
+    expect(reorderedModels.map((m: { id: string }) => m.id)).toEqual([m3.id, m1.id, m2.id]);
+    expect(reorderedModels.map((m: { sortOrder: number }) => m.sortOrder)).toEqual([0, 1, 2]);
+
+    // Subsequent GET returns new model order
+    const getReorderedModels = (await get(t, `/api/planner/models?providerId=${p1.id}`)).json().models;
+    expect(getReorderedModels.map((m: { id: string }) => m.id)).toEqual([m3.id, m1.id, m2.id]);
+
+    // Reordering models on non-existent provider returns 404
+    const notFoundRes = await put(t, '/api/planner/providers/non-existent-id/models/order', {
+      modelIds: [m1.id],
+    });
+    expect(notFoundRes.statusCode).toBe(404);
+
+    // Linked Custom Claude provider reflects reordered models
+    // Create linked custom claude provider referencing deepseek (p2)
+    const mDs1 = (
+      await post(t, '/api/planner/models', {
+        providerId: p2.id,
+        modelId: 'deepseek-v4-pro',
+        label: 'DeepSeek Pro',
+      })
+    ).json();
+    const mDs2 = (
+      await post(t, '/api/planner/models', {
+        providerId: p2.id,
+        modelId: 'deepseek-v4-flash',
+        label: 'DeepSeek Flash',
+      })
+    ).json();
+
+    const customClaude = (
+      await post(t, '/api/custom-claude-providers', {
+        name: 'Linked DeepSeek',
+        providerId: p2.id,
+      })
+    ).json();
+    expect(customClaude.models).toEqual(['deepseek-v4-pro', 'deepseek-v4-flash']);
+
+    // Reorder deepseek models: flash first, then pro
+    await put(t, `/api/planner/providers/${p2.id}/models/order`, {
+      modelIds: [mDs2.id, mDs1.id],
+    });
+
+    const updatedCustomClaude = (await get(t, '/api/custom-claude-providers'))
+      .json()
+      .providers.find((p: { id: string }) => p.id === customClaude.id);
+    expect(updatedCustomClaude.models).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro']);
+  });
 });
+

@@ -158,4 +158,72 @@ describe('ProvidersAndModelsPage (PA-132, PA-148, PA-152)', () => {
     expect(providerCollapsedHtml).not.toContain('>Base URL<');
     expect(providerCollapsedHtml).not.toContain('Claude Sonnet 4.6');
   });
+
+  it('renders drag handles and supports is-dragging and drag-over states for providers and models (PA-158)', () => {
+    const stubApi = {} as ApiClient;
+    const baseProps = {
+      api: stubApi,
+      provider: sampleProvider,
+      hasLocalAgyAuth: false,
+      models: [sampleModel],
+      busy: false,
+      testingAll: false,
+      testResults: {},
+      onSaveProvider: vi.fn(),
+      onReload: vi.fn(async () => {}),
+      onDeleteProvider: vi.fn(),
+      onExportProvider: vi.fn(),
+      onDiscoverModels: vi.fn(async () => ({ modelIds: [] })),
+      onAddModel: vi.fn(),
+      onSetModelLimit: vi.fn(),
+      onRemoveModel: vi.fn(),
+      onDeleteAllModels: vi.fn(),
+      onTestModel: vi.fn(),
+      onTestAllModels: vi.fn(),
+      onApiError: vi.fn(),
+      onError: vi.fn(),
+    };
+
+    const defaultHtml = renderToStaticMarkup(<PlannerProviderSection {...baseProps} />);
+    expect(defaultHtml).toContain('aria-label="Drag to reorder provider OpenRouter"');
+    expect(defaultHtml).toContain('aria-label="Drag to reorder model Claude Sonnet 4.6"');
+    expect(defaultHtml).toContain('planner-drag-handle');
+    expect(defaultHtml).not.toContain('is-dragging');
+    expect(defaultHtml).not.toContain('drag-over');
+
+    const draggingProviderHtml = renderToStaticMarkup(
+      <PlannerProviderSection {...baseProps} isDragging={true} />,
+    );
+    expect(draggingProviderHtml).toContain('planner-section is-dragging');
+
+    const dragOverProviderHtml = renderToStaticMarkup(
+      <PlannerProviderSection {...baseProps} isDragOver={true} />,
+    );
+    expect(dragOverProviderHtml).toContain('planner-section drag-over');
+
+    const modelRowDraggingHtml = renderToStaticMarkup(
+      <PlannerModelRow
+        model={sampleModel}
+        busy={false}
+        isDragging={true}
+        onSave={vi.fn()}
+        onTest={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(modelRowDraggingHtml).toContain('planner-model-item is-dragging');
+
+    const modelRowDragOverHtml = renderToStaticMarkup(
+      <PlannerModelRow
+        model={sampleModel}
+        busy={false}
+        isDragOver={true}
+        onSave={vi.fn()}
+        onTest={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(modelRowDragOverHtml).toContain('planner-model-item drag-over');
+  });
 });
+

@@ -1035,6 +1035,43 @@ export function deletePlannerProvider(db: Db, id: string): boolean {
   return db.prepare('DELETE FROM planner_providers WHERE id = ?').run(id).changes > 0;
 }
 
+/**
+ * PA-158: Reorders providers by assigning sequential sort_order (0..n-1).
+ * Any existing providers not listed in `providerIds` are preserved after the
+ * specified IDs in their existing relative order.
+ */
+export function reorderPlannerProviders(
+  db: Db,
+  providerIds: readonly string[],
+): PlannerProviderRow[] {
+  const existing = readPlannerProviders(db);
+  const existingMap = new Map(existing.map((p) => [p.id, p]));
+
+  const seen = new Set<string>();
+  const orderedIds: string[] = [];
+  for (const id of providerIds) {
+    if (existingMap.has(id) && !seen.has(id)) {
+      seen.add(id);
+      orderedIds.push(id);
+    }
+  }
+  for (const p of existing) {
+    if (!seen.has(p.id)) {
+      orderedIds.push(p.id);
+    }
+  }
+
+  const updateStmt = db.prepare('UPDATE planner_providers SET sort_order = ? WHERE id = ?');
+  const runTx = db.transaction(() => {
+    for (let i = 0; i < orderedIds.length; i++) {
+      updateStmt.run(i, orderedIds[i]);
+    }
+  });
+  runTx();
+
+  return readPlannerProviders(db);
+}
+
 export function requirePlannerProviderEncKey(encKey: Buffer | undefined): Buffer {
   if (encKey === undefined) {
     throw new PlannerProviderStoreError(
@@ -1459,6 +1496,47 @@ export function nextPlannerModelSortOrder(db: Db): number {
     maxOrder: number | null;
   };
   return (row.maxOrder ?? -1) + 1;
+}
+
+/**
+ * PA-158: Reorders models within a single provider by assigning sequential
+ * sort_order (0..n-1). Any models belonging to `providerId` not listed in
+ * `modelIds` are preserved after the specified IDs in their existing relative
+ * order.
+ */
+export function reorderPlannerModels(
+  db: Db,
+  providerId: string,
+  modelIds: readonly string[],
+): PlannerModelRow[] {
+  const existing = readPlannerModels(db, providerId);
+  const existingMap = new Map(existing.map((m) => [m.id, m]));
+
+  const seen = new Set<string>();
+  const orderedIds: string[] = [];
+  for (const id of modelIds) {
+    if (existingMap.has(id) && !seen.has(id)) {
+      seen.add(id);
+      orderedIds.push(id);
+    }
+  }
+  for (const m of existing) {
+    if (!seen.has(m.id)) {
+      orderedIds.push(m.id);
+    }
+  }
+
+  const updateStmt = db.prepare(
+    'UPDATE planner_models SET sort_order = ? WHERE id = ? AND provider_id = ?',
+  );
+  const runTx = db.transaction(() => {
+    for (let i = 0; i < orderedIds.length; i++) {
+      updateStmt.run(i, orderedIds[i], providerId);
+    }
+  });
+  runTx();
+
+  return readPlannerModels(db, providerId);
 }
 
 // ---- planner LLM provider settings ------------------------------------------

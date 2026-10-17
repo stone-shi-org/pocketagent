@@ -62,6 +62,7 @@ import type {
   PlannerProviderListResponse,
   CreatePlannerProviderRequest,
   UpdatePlannerProviderRequest,
+  ReorderPlannerProvidersRequest,
   ClaudeOAuthAuthorizeResponse,
   ClaudeOAuthExchangeRequest,
   ClaudeProviderUsageResponse,
@@ -73,6 +74,7 @@ import type {
   PlannerModelListResponse,
   CreatePlannerModelRequest,
   UpdatePlannerModelRequest,
+  ReorderPlannerModelsRequest,
   DiscoverPlannerModelsResponse,
   TestPlannerModelResponse,
   PlannerEmbeddingApiKeyRevealResponse,
@@ -1004,6 +1006,12 @@ export function createApiClient(endpoint: HostEndpoint) {
     listPlannerProviders: () =>
       request<PlannerProviderListResponse>('/api/planner/providers'),
 
+    reorderPlannerProviders: (providerIds: string[]) =>
+      request<PlannerProviderListResponse>('/api/planner/providers/order', {
+        method: 'PUT',
+        body: JSON.stringify({ providerIds } satisfies ReorderPlannerProvidersRequest),
+      }),
+
     createPlannerProvider: (body: CreatePlannerProviderRequest) =>
       request<PlannerProvider>('/api/planner/providers', {
         method: 'POST',
@@ -1070,6 +1078,15 @@ export function createApiClient(endpoint: HostEndpoint) {
         providerId
           ? `/api/planner/models?providerId=${encodeURIComponent(providerId)}`
           : '/api/planner/models',
+      ),
+
+    reorderPlannerProviderModels: (providerId: string, modelIds: string[]) =>
+      request<PlannerModelListResponse>(
+        `/api/planner/providers/${encodeURIComponent(providerId)}/models/order`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ modelIds } satisfies ReorderPlannerModelsRequest),
+        },
       ),
 
     createPlannerModel: (body: CreatePlannerModelRequest) =>

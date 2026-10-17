@@ -18,8 +18,14 @@ export function groupPlannerModelsByProvider(
   const groups: PlannerModelProviderGroup[] = [];
   const assigned = new Set<string>();
 
-  for (const provider of providers) {
-    const providerModels = models.filter((m) => m.providerId === provider.id);
+  const sortedProviders = [...providers].sort(
+    (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt - b.createdAt,
+  );
+
+  for (const provider of sortedProviders) {
+    const providerModels = models
+      .filter((m) => m.providerId === provider.id)
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt - b.createdAt);
     if (providerModels.length === 0) continue;
     for (const m of providerModels) assigned.add(m.id);
     groups.push({
@@ -29,7 +35,9 @@ export function groupPlannerModelsByProvider(
     });
   }
 
-  const remaining = models.filter((m) => !assigned.has(m.id));
+  const remaining = models
+    .filter((m) => !assigned.has(m.id))
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt - b.createdAt);
   if (remaining.length > 0) {
     groups.push({
       provider: null,
