@@ -146,9 +146,9 @@ export interface AgentAdapter {
    * instead of a real credentialed CLI.
    *
    * Undefined is the honest answer when a CLI cannot be asked cheaply and
-   * non-interactively: `pi` has no auth/login/status subcommand at all, and
-   * `opencode auth list` emits ANSI-decorated box drawing with no JSON option.
-   * Those report `unknown` rather than a guess — see `AgentSetupState`.
+   * non-interactively: `pi` has no auth/login/status subcommand at all (while
+   * `opencode auth list --standalone --format json` was added in OpenCode v2,
+   * PA-159). That reports `unknown` rather than a guess — see `AgentSetupState`.
    */
   authProbe?: AgentAuthProbe;
 }

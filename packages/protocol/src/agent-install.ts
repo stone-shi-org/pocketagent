@@ -188,9 +188,10 @@ export type AgentBinaryCopy = z.infer<typeof AgentBinaryCopy>;
  * `unknown` is the fourth, and it is a real answer rather than a gap. Only
  * some of these CLIs can be asked about their login state non-interactively:
  * `claude auth status` answers JSON, `codex login status` answers a line of
- * text, and `agy models` lists models when signed in and errors with
- * "Please sign in" when signed out (PA-146), while `pi` has no such subcommand
- * at all and `opencode auth list` only prints a decorated table. Reporting
+ * text, `opencode auth list --standalone --format json` answers a JSON array
+ * of authenticated integrations (PA-159), and `agy models` lists models when
+ * signed in and errors with "Please sign in" when signed out (PA-146), while
+ * `pi` has no such subcommand at all. Reporting
  * `ready` for an agent nobody probed (or whose network call failed) would
  * recreate the failure above, and reporting `signed-out` would nag an operator
  * who is authenticated through an environment variable — which is a real third

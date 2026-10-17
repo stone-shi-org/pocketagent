@@ -27,6 +27,7 @@ import {
 import { agyFileTokenStorageEnv, createAgyAdapter } from '../src/agents/agy.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
+import { createOpencodeAdapter } from '../src/agents/opencode.js';
 import { authHeaders, createTestApp, makeConfig, makeWorkspace, TEST_TOKEN, type TestApp } from './helpers.js';
 
 /**
@@ -587,6 +588,7 @@ describe('auth probe interpretation', () => {
   const agy = createAgyAdapter('agy');
   const claude = createClaudeAdapter('claude');
   const codex = createCodexAdapter('codex');
+  const opencode = createOpencodeAdapter('opencode');
 
   /**
    * Driven with recorded output rather than a real credentialed CLI, which is
@@ -688,11 +690,104 @@ describe('auth probe interpretation', () => {
     }
   });
 
+  /**
+   * PA-159: OpenCode v2 adds `opencode auth list --standalone --format json`,
+   * answering a JSON array of integrations and their connections in-process
+   * without requiring `opencode serve`. Tested with recorded v2 outputs for
+   * signed-in (single and multiple integrations, plus connection-label
+   * fallback), signed-out (`[]`, `No authenticated integrations`, and
+   * empty-connections entries), and empty/malformed/error/timeout cases that
+   * must degrade to `unknown`.
+   */
+  it('interprets opencode auth list JSON for signed-in, signed-out, empty, and malformed output (PA-159)', () => {
+    expect(opencode.authProbe?.args).toEqual(['auth', 'list', '--standalone', '--format', 'json']);
+
+    const readySingle = opencode.authProbe?.interpret({
+      stdout: JSON.stringify([
+        {
+          id: 'opencode',
+          name: 'OpenCode Console',
+          connections: [{ type: 'credential', label: 'Default', method: 'oauth' }],
+        },
+      ]),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    expect(readySingle).toEqual({ state: 'ready', detail: 'Signed in (OpenCode Console)' });
+
+    const readyMultiple = opencode.authProbe?.interpret({
+      stdout: JSON.stringify([
+        {
+          id: 'google',
+          name: 'Google',
+          connections: [{ type: 'env', name: 'GEMINI_API_KEY' }],
+        },
+        {
+          id: 'opencode',
+          name: 'OpenCode Console',
+          connections: [{ type: 'credential', id: 'cred_1', label: 'OpenCode Console', method: 'key' }],
+        },
+      ]),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    expect(readyMultiple).toEqual({ state: 'ready', detail: 'Signed in (Google, OpenCode Console)' });
+
+    const readyConnectionFallback = opencode.authProbe?.interpret({
+      stdout: JSON.stringify([{ connections: [{ type: 'credential', label: 'Default', method: 'oauth' }] }]),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    expect(readyConnectionFallback).toEqual({ state: 'ready', detail: 'Signed in (Default)' });
+
+    for (const sample of [
+      { stdout: '[]\n', stderr: '', code: 0, timedOut: false },
+      { stdout: 'No authenticated integrations\n', stderr: '', code: 0, timedOut: false },
+      {
+        stdout: JSON.stringify([{ id: 'opencode', name: 'OpenCode Console', connections: [] }]),
+        stderr: '',
+        code: 0,
+        timedOut: false,
+      },
+    ]) {
+      const res = opencode.authProbe?.interpret(sample);
+      expect(res, JSON.stringify(sample)).toEqual({
+        state: 'signed-out',
+        detail: 'Not signed in. Run `opencode auth login` in a shell session on this host.',
+      });
+    }
+
+    for (const sample of [
+      { stdout: '', stderr: '', code: 0, timedOut: false },
+      { stdout: '', stderr: '', code: null, timedOut: true },
+      { stdout: '┌  Credentials\n│  opencode (oauth)\n└', stderr: '', code: 0, timedOut: false },
+      { stdout: 'not json at all', stderr: '', code: 0, timedOut: false },
+      { stdout: '{"loggedIn":true}', stderr: '', code: 0, timedOut: false },
+      { stdout: '[123]', stderr: '', code: 0, timedOut: false },
+      { stdout: '[{}]', stderr: '', code: 0, timedOut: false },
+      { stdout: '[{"id":"opencode","connections":"invalid"}]', stderr: '', code: 0, timedOut: false },
+      { stdout: '', stderr: 'Unknown argument: standalone', code: 1, timedOut: false },
+      {
+        stdout: JSON.stringify([
+          { id: 'opencode', name: 'OpenCode Console', connections: [{ type: 'credential', label: 'Default' }] },
+        ]),
+        stderr: 'Error: failed to read credentials',
+        code: 1,
+        timedOut: false,
+      },
+    ]) {
+      const res = opencode.authProbe?.interpret(sample);
+      expect(res?.state, JSON.stringify(sample)).toBe('unknown');
+      expect(res?.detail && res.detail.length > 0, JSON.stringify(sample)).toBe(true);
+    }
+  });
+
   /** The agents that genuinely cannot be asked declare no probe at all. */
   it('declares no probe for agents with no non-interactive way to answer', async () => {
-    const { createOpencodeAdapter } = await import('../src/agents/opencode.js');
     const { createPiAdapter } = await import('../src/agents/pi.js');
-    expect(createOpencodeAdapter('opencode').authProbe).toBeUndefined();
     expect(createPiAdapter('pi').authProbe).toBeUndefined();
   });
 
@@ -1357,6 +1452,52 @@ describe('agent setup state over HTTP', () => {
       agyRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'agy');
       expect(agyRow?.setupState).toBe('signed-out');
       expect(agyRow?.setupDetail).toContain('Run `agy`');
+    } finally {
+      vi.unstubAllGlobals();
+      host.restore();
+    }
+  });
+
+  it('reports ready for a signed-in opencode and signed-out for a signed-out one after Refresh (PA-159)', async () => {
+    const host = fakeHost();
+    vi.stubGlobal('fetch', async () => new Response('{}', { status: 404 }));
+    try {
+      const opencodeBin = path.join(host.home, '.opencode/bin/opencode');
+      mkdirSync(path.dirname(opencodeBin), { recursive: true });
+
+      // Signed-in opencode: `opencode auth list --standalone --format json` exits 0 with JSON integrations.
+      writeFileSync(
+        opencodeBin,
+        '#!/bin/sh\nif [ "$1" = "auth" ] && [ "$2" = "list" ] && [ "$3" = "--standalone" ] && [ "$4" = "--format" ] && [ "$5" = "json" ]; then\n  printf \'[{"id":"opencode","name":"OpenCode Console","connections":[{"type":"credential","label":"Default","method":"oauth"}]}]\\n\'\n  exit 0\nfi\necho "2.0.2"\n',
+        { mode: 0o755 },
+      );
+
+      let res = await t.app.inject({
+        method: 'POST',
+        url: '/api/agents/refresh',
+        headers: authHeaders(t.cookie),
+      });
+      expect(res.statusCode).toBe(200);
+      let opencodeRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'opencode');
+      expect(opencodeRow?.setupState).toBe('ready');
+      expect(opencodeRow?.setupDetail).toBe('Signed in (OpenCode Console)');
+
+      // Signed-out opencode: `opencode auth list --standalone --format json` exits 0 with `[]`.
+      writeFileSync(
+        opencodeBin,
+        '#!/bin/sh\nif [ "$1" = "auth" ] && [ "$2" = "list" ]; then\n  printf "[]\\n"\n  exit 0\nfi\necho "2.0.2"\n',
+        { mode: 0o755 },
+      );
+
+      res = await t.app.inject({
+        method: 'POST',
+        url: '/api/agents/refresh',
+        headers: authHeaders(t.cookie),
+      });
+      expect(res.statusCode).toBe(200);
+      opencodeRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'opencode');
+      expect(opencodeRow?.setupState).toBe('signed-out');
+      expect(opencodeRow?.setupDetail).toContain('Run `opencode auth login`');
     } finally {
       vi.unstubAllGlobals();
       host.restore();

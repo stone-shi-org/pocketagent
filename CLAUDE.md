@@ -457,11 +457,12 @@ there and nothing else does, so a host with a perfectly working `opencode` repor
 What was *not* free is that **installed is not authenticated**. `AgentSetupState` has four values,
 not the three the ticket asked for, and the fourth is the interesting one. Only some of these CLIs
 can be asked non-interactively — `claude auth status` answers JSON in ~0.2s, `codex login status`
-a line of text in ~0.1s, and `agy models` (PA-146; `agy` has no `auth`/`login` subcommand, so its
-probe runs `agy models`, which exits 0 with `<id>\t<label>` model lines when signed in, exits 1 in
-~0.4s with `"Please sign in"` when signed out, and maps any network error or unexpected output to
-`unknown`), while `pi` has no such subcommand at all and `opencode auth list` only prints an
-ANSI-decorated table — so `unknown` is a real answer rather than a gap. Rounding it to `ready`
+a line of text in ~0.1s, `opencode auth list --standalone --format json` a JSON array of
+authenticated integrations in ~0.2s (PA-159; v1 only printed an ANSI-decorated table), and
+`agy models` (PA-146; `agy` has no `auth`/`login` subcommand, so its probe runs `agy models`,
+which exits 0 with `<id>\t<label>` model lines when signed in, exits 1 in ~0.4s with
+`"Please sign in"` when signed out, and maps any network error or unexpected output to `unknown`),
+while `pi` has no such subcommand at all — so `unknown` is a real answer rather than a gap. Rounding it to `ready`
 would recreate exactly the "sees claude ✓, first session fails cryptically" failure the feature
 exists to prevent, and rounding it to `signed-out` would nag an operator authenticated through
 `ANTHROPIC_API_KEY` (a real third path: opencode reads `HF_TOKEN` the same way) or offline when
