@@ -455,14 +455,17 @@ sha256 of what actually ran instead.
 there and nothing else does, so a host with a perfectly working `opencode` reported it missing.)
 
 What was *not* free is that **installed is not authenticated**. `AgentSetupState` has four values,
-not the three the ticket asked for, and the fourth is the interesting one. Only some of these CLIs
-can be asked non-interactively — `claude auth status` answers JSON in ~0.2s, `codex login status`
+not the three the ticket asked for, and the fourth is the interesting one. Each of the five coding
+CLIs is probed non-interactively — `claude auth status` answers JSON in ~0.2s, `codex login status`
 a line of text in ~0.1s, `opencode auth list --standalone --format json` a JSON array of
-authenticated integrations in ~0.2s (PA-159; v1 only printed an ANSI-decorated table), and
-`agy models` (PA-146; `agy` has no `auth`/`login` subcommand, so its probe runs `agy models`,
-which exits 0 with `<id>\t<label>` model lines when signed in, exits 1 in ~0.4s with
-`"Please sign in"` when signed out, and maps any network error or unexpected output to `unknown`),
-while `pi` has no such subcommand at all — so `unknown` is a real answer rather than a gap. Rounding it to `ready`
+authenticated integrations in ~0.2s (PA-159; v1 only printed an ANSI-decorated table),
+`pi --offline --list-models` a `provider`/`model` table in ~0.35s when any credential or provider
+env var is active and `"No models available"` when none are (PA-160; `pi auth check` requires an
+explicit `--provider` or `--model`), and `agy models` (PA-146; `agy` has no `auth`/`login`
+subcommand, so its probe runs `agy models`, which exits 0 with `<id>\t<label>` model lines when
+signed in, exits 1 in ~0.4s with `"Please sign in"` when signed out, and maps any network error or
+unexpected output to `unknown`) — while an unprobed agent or an unrecognised/failed probe output
+reports `unknown` as a real answer rather than a gap. Rounding it to `ready`
 would recreate exactly the "sees claude ✓, first session fails cryptically" failure the feature
 exists to prevent, and rounding it to `signed-out` would nag an operator authenticated through
 `ANTHROPIC_API_KEY` (a real third path: opencode reads `HF_TOKEN` the same way) or offline when

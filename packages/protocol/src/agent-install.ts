@@ -185,18 +185,19 @@ export type AgentBinaryCopy = z.infer<typeof AgentBinaryCopy>;
  * operator who sees a tick and then gets a cryptic first-session failure has
  * been told the wrong thing.
  *
- * `unknown` is the fourth, and it is a real answer rather than a gap. Only
- * some of these CLIs can be asked about their login state non-interactively:
- * `claude auth status` answers JSON, `codex login status` answers a line of
- * text, `opencode auth list --standalone --format json` answers a JSON array
- * of authenticated integrations (PA-159), and `agy models` lists models when
- * signed in and errors with "Please sign in" when signed out (PA-146), while
- * `pi` has no such subcommand at all. Reporting
- * `ready` for an agent nobody probed (or whose network call failed) would
- * recreate the failure above, and reporting `signed-out` would nag an operator
- * who is authenticated through an environment variable — which is a real third
- * path (`ANTHROPIC_API_KEY`, and opencode reads `HF_TOKEN`), so the absence of
- * a credential file proves nothing either. `unknown` is rendered as a neutral
+ * `unknown` is the fourth, and it is a real answer rather than a gap. Each
+ * coding CLI is asked about its login state non-interactively: `claude auth
+ * status` answers JSON, `codex login status` answers a line of text,
+ * `opencode auth list --standalone --format json` answers a JSON array of
+ * authenticated integrations (PA-159), `pi --offline --list-models` prints a
+ * provider/model table when configured and "No models available" when signed
+ * out (PA-160), and `agy models` lists models when signed in and errors with
+ * "Please sign in" when signed out (PA-146). Reporting `ready` for an agent
+ * nobody probed yet (or whose probe failed or returned unrecognised output)
+ * would recreate the failure above, and reporting `signed-out` would nag an
+ * operator who is authenticated through an environment variable — which is a
+ * real third path (`ANTHROPIC_API_KEY`, and opencode reads `HF_TOKEN`), so the
+ * absence of a credential file proves nothing either. `unknown` is rendered as a neutral
  * state with its reason, never as a green tick, the same way a host whose
  * protocol version has not been observed yet is `unknown` rather than assumed
  * compatible.

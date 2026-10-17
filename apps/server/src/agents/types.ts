@@ -145,10 +145,11 @@ export interface AgentAdapter {
    * output — is a pure function a unit test can drive with recorded output
    * instead of a real credentialed CLI.
    *
-   * Undefined is the honest answer when a CLI cannot be asked cheaply and
-   * non-interactively: `pi` has no auth/login/status subcommand at all (while
-   * `opencode auth list --standalone --format json` was added in OpenCode v2,
-   * PA-159). That reports `unknown` rather than a guess — see `AgentSetupState`.
+   * Undefined is the honest answer when an adapter cannot be asked cheaply and
+   * non-interactively (e.g. `shell`, or a CLI before it gained a non-interactive
+   * probe — `opencode auth list --standalone --format json` in PA-159, and
+   * `pi --offline --list-models` in PA-160). That reports `unknown` rather than
+   * a guess — see `AgentSetupState`.
    */
   authProbe?: AgentAuthProbe;
 }

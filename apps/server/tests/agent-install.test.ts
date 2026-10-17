@@ -28,6 +28,8 @@ import { agyFileTokenStorageEnv, createAgyAdapter } from '../src/agents/agy.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
 import { createOpencodeAdapter } from '../src/agents/opencode.js';
+import { createPiAdapter } from '../src/agents/pi.js';
+import { createShellAdapter } from '../src/agents/shell.js';
 import { authHeaders, createTestApp, makeConfig, makeWorkspace, TEST_TOKEN, type TestApp } from './helpers.js';
 
 /**
@@ -589,6 +591,7 @@ describe('auth probe interpretation', () => {
   const claude = createClaudeAdapter('claude');
   const codex = createCodexAdapter('codex');
   const opencode = createOpencodeAdapter('opencode');
+  const pi = createPiAdapter('pi');
 
   /**
    * Driven with recorded output rather than a real credentialed CLI, which is
@@ -785,10 +788,104 @@ describe('auth probe interpretation', () => {
     }
   });
 
-  /** The agents that genuinely cannot be asked declare no probe at all. */
-  it('declares no probe for agents with no non-interactive way to answer', async () => {
-    const { createPiAdapter } = await import('../src/agents/pi.js');
-    expect(createPiAdapter('pi').authProbe).toBeUndefined();
+  /**
+   * PA-160: `pi auth check` requires `--provider` or `--model`, so `pi`'s probe
+   * runs `pi --offline --list-models` to evaluate all configured credentials
+   * (`~/.pi/agent/auth.json`, `~/.pi/agent/models.json`, and provider env vars)
+   * without network access. Tested with recorded v1.3.0 outputs for signed-out
+   * (`No models available...`), signed-in with a single provider, signed-in
+   * with multiple providers, and timeout/malformed/error cases that must
+   * degrade to `unknown`.
+   */
+  it('interprets pi --offline --list-models for signed-in, signed-out, timeout, and malformed output (PA-160)', () => {
+    expect(pi.authProbe?.args).toEqual(['--offline', '--list-models']);
+
+    const readySingle = pi.authProbe?.interpret({
+      stdout: [
+        'provider  model                           context  max-out  thinking  images',
+        'google    gemini-2.5-flash                1.0M     65.5K    yes       yes   ',
+        'google    gemini-2.5-pro                  1.0M     65.5K    yes       yes   ',
+        '',
+      ].join('\n'),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    expect(readySingle).toEqual({ state: 'ready', detail: 'Signed in (google)' });
+
+    const readyMultiple = pi.authProbe?.interpret({
+      stdout: [
+        'provider   model                                    context  max-out  thinking  images',
+        'deepseek   deepseek-flash                           1M       384K     yes       yes   ',
+        'deepseek   deepseek-v4-pro                          1M       384K     yes       no    ',
+        'google     gemini-2.5-flash                         1.0M     65.5K    yes       yes   ',
+        'google     gemini-3.7-flash                         1.0M     65.5K    yes       yes   ',
+        'omniroute  agent-local-light                        128K     16.4K    no        no    ',
+        'omniroute  deepseek-v4-pro                          128K     16.4K    no        no    ',
+        '',
+      ].join('\n'),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    expect(readyMultiple).toEqual({ state: 'ready', detail: 'Signed in (deepseek, google, omniroute)' });
+
+    for (const sample of [
+      {
+        stdout: [
+          'No models available. Use /login to log into a provider via OAuth or API key. See:',
+          '  /opt/pocketagent-agents/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/docs/providers.md',
+          '  /opt/pocketagent-agents/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/docs/models.md',
+          '',
+        ].join('\n'),
+        stderr: '',
+        code: 0,
+        timedOut: false,
+      },
+      {
+        stdout: '',
+        stderr: 'No models available. Use /login to log into a provider via OAuth or API key.',
+        code: 1,
+        timedOut: false,
+      },
+    ]) {
+      const res = pi.authProbe?.interpret(sample);
+      expect(res, JSON.stringify(sample)).toEqual({
+        state: 'signed-out',
+        detail: 'Not signed in. Run `pi` in a shell session or configure provider API keys.',
+      });
+    }
+
+    const timedOutRes = pi.authProbe?.interpret({ stdout: '', stderr: '', code: null, timedOut: true });
+    expect(timedOutRes).toEqual({
+      state: 'unknown',
+      detail: 'pi --list-models did not respond in time.',
+    });
+
+    for (const sample of [
+      { stdout: '', stderr: '', code: 0, timedOut: false },
+      { stdout: 'provider  model  context  max-out  thinking  images\n', stderr: '', code: 0, timedOut: false },
+      { stdout: 'unexpected format with no table header\nanother line\n', stderr: '', code: 0, timedOut: false },
+      { stdout: 'Error: Auth checks require --provider <provider> or --model <model>', stderr: '', code: 1, timedOut: false },
+      {
+        stdout: 'provider  model  context  max-out  thinking  images\ngoogle    gemini-2.5-pro  1.0M  65.5K  yes  yes\n',
+        stderr: 'Error: Failed to load extension',
+        code: 1,
+        timedOut: false,
+      },
+    ]) {
+      const res = pi.authProbe?.interpret(sample);
+      expect(res?.state, JSON.stringify(sample)).toBe('unknown');
+      expect(res?.detail && res.detail.length > 0, JSON.stringify(sample)).toBe(true);
+    }
+  });
+
+  /** Adapters that genuinely cannot be asked (e.g. shell) declare no probe at all. */
+  it('declares no probe for adapters with no non-interactive way to answer', async () => {
+    const shell = createShellAdapter('/bin/sh');
+    expect(shell.authProbe).toBeUndefined();
+    const res = await probeAgentAuth(shell);
+    expect(res.state).toBe('unknown');
   });
 
   /**
@@ -1498,6 +1595,52 @@ describe('agent setup state over HTTP', () => {
       opencodeRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'opencode');
       expect(opencodeRow?.setupState).toBe('signed-out');
       expect(opencodeRow?.setupDetail).toContain('Run `opencode auth login`');
+    } finally {
+      vi.unstubAllGlobals();
+      host.restore();
+    }
+  });
+
+  it('reports ready for a signed-in pi and signed-out for a signed-out one after Refresh (PA-160)', async () => {
+    const host = fakeHost();
+    vi.stubGlobal('fetch', async () => new Response('{}', { status: 404 }));
+    try {
+      const piBin = path.join(host.home, '.local/bin/pi');
+      mkdirSync(path.dirname(piBin), { recursive: true });
+
+      // Signed-in pi: `pi --offline --list-models` exits 0 with provider/model table.
+      writeFileSync(
+        piBin,
+        '#!/bin/sh\nif [ "$1" = "--offline" ] && [ "$2" = "--list-models" ]; then\n  printf "provider   model            context  max-out  thinking  images\\ndeepseek   deepseek-flash   1M       384K     yes       yes\\ngoogle     gemini-2.5-pro   1.0M     65.5K    yes       yes\\n"\n  exit 0\nfi\necho "1.3.0"\n',
+        { mode: 0o755 },
+      );
+
+      let res = await t.app.inject({
+        method: 'POST',
+        url: '/api/agents/refresh',
+        headers: authHeaders(t.cookie),
+      });
+      expect(res.statusCode).toBe(200);
+      let piRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'pi');
+      expect(piRow?.setupState).toBe('ready');
+      expect(piRow?.setupDetail).toBe('Signed in (deepseek, google)');
+
+      // Signed-out pi: `pi --offline --list-models` exits 0 with `No models available...`.
+      writeFileSync(
+        piBin,
+        '#!/bin/sh\nif [ "$1" = "--offline" ] && [ "$2" = "--list-models" ]; then\n  printf "No models available. Use /login to log into a provider via OAuth or API key.\\n"\n  exit 0\nfi\necho "1.3.0"\n',
+        { mode: 0o755 },
+      );
+
+      res = await t.app.inject({
+        method: 'POST',
+        url: '/api/agents/refresh',
+        headers: authHeaders(t.cookie),
+      });
+      expect(res.statusCode).toBe(200);
+      piRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'pi');
+      expect(piRow?.setupState).toBe('signed-out');
+      expect(piRow?.setupDetail).toContain('Run `pi`');
     } finally {
       vi.unstubAllGlobals();
       host.restore();

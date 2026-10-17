@@ -39,6 +39,60 @@ export function createPiAdapter(bin: string): AgentAdapter {
 
     bin,
 
+    /**
+     * `pi auth check` (added in v1.3.0) requires `--provider <provider>` or
+     * `--model <model>`, so a static probe argv cannot ask it across a
+     * multi-provider CLI without guessing which provider the operator
+     * configured. `pi --offline --list-models` evaluates all active credential
+     * sources at once (`~/.pi/agent/auth.json`, `~/.pi/agent/models.json`, and
+     * provider environment variables) in ~0.35s with no network traffic (PA-160):
+     *   - signed out (zero providers configured): exits 0 with
+     *     `No models available. Use /login to log into a provider via OAuth or API key.`
+     *   - signed in: exits 0 after printing a `provider  model  context  max-out  thinking  images`
+     *     table listing every available model and its provider in column 1.
+     */
+    authProbe: {
+      args: ['--offline', '--list-models'],
+      interpret({ stdout, stderr, code, timedOut }) {
+        if (timedOut) return { state: 'unknown', detail: 'pi --list-models did not respond in time.' };
+        const text = `${stdout}\n${stderr}`.trim();
+        if (/\bno\s+models\s+available\b/i.test(text)) {
+          return {
+            state: 'signed-out',
+            detail: 'Not signed in. Run `pi` in a shell session or configure provider API keys.',
+          };
+        }
+        if (code === 0) {
+          const lines = stdout.split(/\r?\n/);
+          const headerIdx = lines.findIndex((line) => /^\s*provider\s+model(?:\s+|$)/i.test(line));
+          if (headerIdx !== -1) {
+            const providers: string[] = [];
+            for (const rawLine of lines.slice(headerIdx + 1)) {
+              const trimmed = rawLine.trim();
+              if (trimmed === '' || /^[-=\s]+$/.test(trimmed)) continue;
+              const cols = trimmed.split(/\s+/);
+              const provider = cols[0];
+              if (cols.length >= 2 && provider && !/^[-=]+$/.test(provider)) {
+                if (!providers.includes(provider)) {
+                  providers.push(provider);
+                }
+              }
+            }
+            if (providers.length > 0) {
+              return {
+                state: 'ready',
+                detail: `Signed in (${providers.join(', ')})`,
+              };
+            }
+          }
+        }
+        return {
+          state: 'unknown',
+          detail: text === '' ? 'pi --list-models printed nothing.' : text.slice(0, 200),
+        };
+      },
+    },
+
     isAvailable() {
       return resolveExecutable(bin) !== null;
     },

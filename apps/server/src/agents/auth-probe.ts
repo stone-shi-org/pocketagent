@@ -11,10 +11,11 @@ import type { AgentRegistry } from './registry.js';
 /**
  * Generous for a read-only status call. `claude auth status` answers in ~0.2s,
  * `codex login status` in ~0.1s, `opencode auth list --standalone --format json`
- * in ~0.2s (PA-159), and `agy models` in ~0.4s when signed out (or after one
- * model-list fetch when signed in, PA-146); anything hitting this budget means
- * the CLI is wedged on a network call or waiting on a TTY, and `unknown` is
- * the right answer for that.
+ * in ~0.2s (PA-159), `pi --offline --list-models` in ~0.35s (PA-160), and
+ * `agy models` in ~0.4s when signed out (or after one model-list fetch when
+ * signed in, PA-146); anything hitting this budget means the CLI is wedged on
+ * a network call or waiting on a TTY, and `unknown` is the right answer for
+ * that.
  */
 const AUTH_PROBE_TIMEOUT_MS = 10_000;
 
