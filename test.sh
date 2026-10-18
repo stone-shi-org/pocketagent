@@ -79,6 +79,15 @@ if [[ ! -x "${repo_root}/node_modules/.bin/claude" ]]; then
     fi
 fi
 
+# Ensure agent fixtures are linked into node_modules/.bin for tests if executables are not on PATH
+for agent_pair in "codex:fake-codex-app-server.mjs" "agy:fake-agy.mjs" "opencode:fake-opencode-server.mjs" "pi:fake-pi-rpc.mjs"; do
+    bin_name="${agent_pair%%:*}"
+    fixture_name="${agent_pair##*:}"
+    if ! command -v "$bin_name" >/dev/null 2>&1; then
+        ln -sf "${repo_root}/apps/server/tests/fixtures/${fixture_name}" "${repo_root}/node_modules/.bin/${bin_name}"
+    fi
+done
+
 # `packages/protocol` is consumed as compiled output, so it must exist before
 # anything typechecks, lints or tests against it. Same reason the root
 # package.json scripts each start with `pnpm protocol`.

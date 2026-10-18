@@ -25,6 +25,10 @@ const OPENCODE_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   'fixtures/fake-opencode-server.mjs',
 );
+const CODEX_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-codex-app-server.mjs',
+);
 
 /**
  * The inbound webhook surface.
@@ -46,7 +50,9 @@ let ctx: TestApp;
 const SLUG = 'triage';
 
 beforeEach(async () => {
-  ctx = await createTestApp();
+  ctx = await createTestApp({
+    POCKETAGENT_CODEX_BIN: CODEX_FIXTURE,
+  });
 });
 
 afterEach(async () => {
