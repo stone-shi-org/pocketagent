@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdoptableTarget } from '@pocketagent/protocol';
+import { systemdScopeCommand } from '../backends/systemd-scope.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -27,6 +28,12 @@ export interface AdoptionOptions {
   bin: string;
   workspaces: WorkspaceRegistry;
   env: Record<string, string>;
+  /**
+   * Same setting as `TmuxBackendOptions.sessionScopeSlice`. A session created
+   * here on a socket with no server yet starts that server, and a server
+   * forked from this process lives in its cgroup and dies with the service.
+   */
+  sessionScopeSlice?: string;
 }
 
 /**
@@ -191,9 +198,16 @@ export class AdoptionService {
       throw new Error(`A tmux session named "${trimmed}" already exists.`);
     }
 
-    await execFileAsync(this.opts.bin, [...this.socketArgs(socket), 'new-session', '-d', '-s', trimmed, '-c', cwd], {
-      env: this.opts.env,
-    });
+    const newSession = [...this.socketArgs(socket), 'new-session', '-d', '-s', trimmed, '-c', cwd];
+    // Only the call that creates the server needs the scope; one joining a
+    // server that is already running (the user's own, say) would just mint a
+    // throwaway unit. `list-sessions` does not start a server, so probing with
+    // it cannot create one outside the scope.
+    const scoped =
+      this.opts.sessionScopeSlice && !(await this.serverRunning(socket))
+        ? systemdScopeCommand(this.opts.sessionScopeSlice, this.opts.bin, newSession)
+        : { file: this.opts.bin, args: newSession };
+    await execFileAsync(scoped.file, scoped.args, { env: this.opts.env });
 
     // Re-resolve rather than constructing the target by hand: this reads back
     // whatever tmux actually did (size, resolved cwd) instead of assuming our
@@ -214,6 +228,15 @@ export class AdoptionService {
       throw new Error('The tmux session was created but could not be found afterward.');
     }
     return target;
+  }
+
+  private async serverRunning(socket: string): Promise<boolean> {
+    try {
+      await execFileAsync(this.opts.bin, [...this.socketArgs(socket), 'list-sessions'], { env: this.opts.env });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async hasSession(socket: string, name: string): Promise<boolean> {
