@@ -1,7 +1,13 @@
+import os from 'node:os';
 import { defineConfig } from 'vitest/config';
+
+const maxForks = Math.max(1, Math.min(os.availableParallelism?.() ?? os.cpus().length, 4));
 
 export default defineConfig({
   test: {
+    poolOptions: {
+      forks: { maxForks },
+    },
     projects: [
       {
         test: {

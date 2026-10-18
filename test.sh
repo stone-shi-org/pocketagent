@@ -28,6 +28,13 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_root"
 
+# Ensure standard binary locations are on PATH in case the CI runner has a minimal PATH.
+for bin_dir in /usr/local/bin /usr/bin "$HOME/.local/share/pnpm" "$HOME/.cargo/bin"; do
+    if [[ -d "$bin_dir" && ":$PATH:" != *":$bin_dir:"* ]]; then
+        export PATH="$bin_dir:$PATH"
+    fi
+done
+
 install=1
 [[ "${1:-}" == '--no-install' ]] && install=0
 
@@ -56,6 +63,22 @@ if [[ "$install" == '1' ]]; then
     fi
 fi
 
+# Ensure node_modules/.bin is on PATH
+mkdir -p "${repo_root}/node_modules/.bin"
+export PATH="${repo_root}/node_modules/.bin:$PATH"
+
+# Ensure Claude Code CLI is available for tests that exercise default agent sessions.
+# @anthropic-ai/claude-agent-sdk includes a platform-specific native binary in node_modules;
+# link it to node_modules/.bin/claude if not already present.
+if [[ ! -x "${repo_root}/node_modules/.bin/claude" ]]; then
+    sdk_claude="$(find "${repo_root}/node_modules" -path "*/@anthropic-ai/claude-agent-sdk-*/claude" -type f 2>/dev/null | head -n 1)"
+    if [[ -n "$sdk_claude" && -f "$sdk_claude" ]]; then
+        chmod +x "$sdk_claude"
+        ln -sf "$sdk_claude" "${repo_root}/node_modules/.bin/claude"
+        echo "==> Linked bundled Claude binary to node_modules/.bin/claude"
+    fi
+fi
+
 # `packages/protocol` is consumed as compiled output, so it must exist before
 # anything typechecks, lints or tests against it. Same reason the root
 # package.json scripts each start with `pnpm protocol`.
@@ -69,6 +92,7 @@ fi
 # point of running this first. `default` is kept alongside it so a human
 # reading the build log still sees the normal progress output.
 run 'pnpm test (vitest)' pnpm exec vitest run \
+    --poolOptions.forks.maxForks=4 \
     --reporter=default \
     --reporter=junit \
     --outputFile.junit="${reports_dir}/junit.xml"

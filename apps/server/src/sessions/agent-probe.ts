@@ -157,6 +157,10 @@ export function probePiModels(
       }
     });
 
+    child.stdin.on('error', () => {
+      // Prevent unhandled EPIPE if the subprocess exits before writing to stdin.
+    });
+
     child.stdin.write(`${JSON.stringify({ id: 'refresh', type: 'get_available_models' })}\n`);
   });
 }

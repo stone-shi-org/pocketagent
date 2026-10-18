@@ -1229,13 +1229,13 @@ describe('PA-150: Codex (ChatGPT) subscription provider (device-code login, Resp
     });
     expect(mcpChatId).toBeTruthy();
 
-    // 5. Hub template schema rejects kind: 'codex-oauth'.
+    // 5. Hub template schema accepts kind: 'codex-oauth' (PA-155 unified export/import).
     const tplParse = PlannerProviderTemplatePayload.safeParse({
       label: 'Codex Sub',
       kind: 'codex-oauth',
       baseUrl: 'https://chatgpt.com/backend-api/codex',
       models: [],
     });
-    expect(tplParse.success).toBe(false);
+    expect(tplParse.success).toBe(true);
   });
 });

@@ -1050,14 +1050,14 @@ describe('PA-151: Antigravity (Google) subscription provider (reuse agy login, C
     });
     expect(cronAllowed.statusCode).toBe(201);
 
-    // 5. Hub template schema rejects kind: 'antigravity-oauth'.
+    // 5. Hub template schema accepts kind: 'antigravity-oauth' (PA-155 unified export/import).
     const tplParse = PlannerProviderTemplatePayload.safeParse({
       label: 'Antigravity Sub',
       kind: 'antigravity-oauth',
       baseUrl: 'https://cloudcode-pa.googleapis.com',
       models: [],
     });
-    expect(tplParse.success).toBe(false);
+    expect(tplParse.success).toBe(true);
     expect(ANTIGRAVITY_OAUTH_STATIC_MODELS.some((m) => m.id === 'gemini-3.7-flash-high')).toBe(
       true,
     );

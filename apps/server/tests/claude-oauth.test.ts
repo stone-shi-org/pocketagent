@@ -925,13 +925,13 @@ describe('PA-149: Claude subscription provider (setup-token / OAuth, Anthropic M
     });
     expect(mcpChatId).toBeTruthy();
 
-    // 4. Hub template schema rejects kind: 'claude-oauth'.
+    // 4. Hub template schema accepts kind: 'claude-oauth' (PA-155 unified export/import).
     const tplParse = PlannerProviderTemplatePayload.safeParse({
       label: 'Claude Sub',
       kind: 'claude-oauth',
       baseUrl: 'https://api.anthropic.com',
       models: [],
     });
-    expect(tplParse.success).toBe(false);
+    expect(tplParse.success).toBe(true);
   });
 });

@@ -1611,7 +1611,7 @@ describe('agent setup state over HTTP', () => {
       // Signed-in pi: `pi --offline --list-models` exits 0 with provider/model table.
       writeFileSync(
         piBin,
-        '#!/bin/sh\nif [ "$1" = "--offline" ] && [ "$2" = "--list-models" ]; then\n  printf "provider   model            context  max-out  thinking  images\\ndeepseek   deepseek-flash   1M       384K     yes       yes\\ngoogle     gemini-2.5-pro   1.0M     65.5K    yes       yes\\n"\n  exit 0\nfi\necho "1.3.0"\n',
+        '#!/bin/sh\nif [ "$1" = "--offline" ] && [ "$2" = "--list-models" ]; then\n  printf "provider   model            context  max-out  thinking  images\\ndeepseek   deepseek-flash   1M       384K     yes       yes\\ngoogle     gemini-2.5-pro   1.0M     65.5K    yes       yes\\n"\n  exit 0\nfi\nif [ "$1" = "--mode" ]; then\n  printf \'{"id":"refresh","type":"response","data":{"models":[]}}\\n\'\n  exit 0\nfi\necho "1.3.0"\n',
         { mode: 0o755 },
       );
 
@@ -1628,7 +1628,7 @@ describe('agent setup state over HTTP', () => {
       // Signed-out pi: `pi --offline --list-models` exits 0 with `No models available...`.
       writeFileSync(
         piBin,
-        '#!/bin/sh\nif [ "$1" = "--offline" ] && [ "$2" = "--list-models" ]; then\n  printf "No models available. Use /login to log into a provider via OAuth or API key.\\n"\n  exit 0\nfi\necho "1.3.0"\n',
+        '#!/bin/sh\nif [ "$1" = "--offline" ] && [ "$2" = "--list-models" ]; then\n  printf "No models available. Use /login to log into a provider via OAuth or API key.\\n"\n  exit 0\nfi\nif [ "$1" = "--mode" ]; then\n  printf \'{"id":"refresh","type":"response","data":{"models":[]}}\\n\'\n  exit 0\nfi\necho "1.3.0"\n',
         { mode: 0o755 },
       );
 
