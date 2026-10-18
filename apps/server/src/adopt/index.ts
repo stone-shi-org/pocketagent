@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdoptableTarget } from '@pocketagent/protocol';
-import { systemdScopeCommand } from '../backends/systemd-scope.js';
+import { scopedCommandOrPlain } from '../backends/systemd-scope.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -34,6 +34,8 @@ export interface AdoptionOptions {
    * forked from this process lives in its cgroup and dies with the service.
    */
   sessionScopeSlice?: string;
+  /** Warns when the slice is set but `systemd-run` is missing. */
+  logger?: { warn: (o: object, m?: string) => void };
 }
 
 /**
@@ -205,7 +207,10 @@ export class AdoptionService {
     // it cannot create one outside the scope.
     const scoped =
       this.opts.sessionScopeSlice && !(await this.serverRunning(socket))
-        ? systemdScopeCommand(this.opts.sessionScopeSlice, this.opts.bin, newSession)
+        ? scopedCommandOrPlain(this.opts.sessionScopeSlice, this.opts.bin, newSession, {
+            pathEnv: this.opts.env.PATH ?? process.env.PATH,
+            warn: (o, m) => this.opts.logger?.warn(o, m),
+          })
         : { file: this.opts.bin, args: newSession };
     await execFileAsync(scoped.file, scoped.args, { env: this.opts.env });
 

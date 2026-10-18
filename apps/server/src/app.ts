@@ -444,6 +444,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     bin: config.tmuxBin,
     workspaces,
     env: childEnv,
+    logger: app.log,
     ...(config.tmuxSessionScopeSlice !== null ? { sessionScopeSlice: config.tmuxSessionScopeSlice } : {}),
   });
   if (adoption.isEnabled()) {

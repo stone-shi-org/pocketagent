@@ -469,9 +469,24 @@ function resolveAgentInstallPrefix(raw: string | undefined): string {
 export function tmuxSessionScopeSliceProblem(
   slice: string | null | undefined,
   platform: NodeJS.Platform = process.platform,
+  /**
+   * Whether `systemd-run` must also be on PATH. Linux is not enough: a container
+   * has no systemd. Off for `loadConfig`, where a missing binary degrades to an
+   * unscoped server with a warning (`scopedCommandOrPlain`) rather than refusing
+   * the boot; on for the Settings route and `update_settings`, where saving a
+   * value that cannot work is the mistake to catch.
+   */
+  findSystemdRunFn: (() => string | null) | null = null,
 ): string | null {
   const trimmed = slice?.trim() ?? '';
-  if (!trimmed || platform === 'linux') return null;
+  if (!trimmed) return null;
+  if (platform === 'linux') {
+    if (findSystemdRunFn === null || findSystemdRunFn() !== null) return null;
+    return (
+      `tmuxSessionScopeSlice (${JSON.stringify(trimmed)}) needs \`systemd-run\`, which is not on this host's PATH ` +
+      `(a container, or a Linux host without systemd). Leave it empty here.`
+    );
+  }
   return (
     `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE (${JSON.stringify(trimmed)}) is only supported on Linux ` +
     `(current platform: ${platform}). It wraps the tmux server in \`systemd-run --user --scope\`, which requires systemd. ` +

@@ -41,6 +41,7 @@ import { applyEdits, normalizeEditsArgument } from './edit-file.js';
 import type { Db } from '../db/index.js';
 import { readMcpOwnedWork } from '../db/index.js';
 import { tmuxSessionScopeSliceProblem, type Config } from '../config/index.js';
+import { findSystemdRun } from '../backends/systemd-scope.js';
 import {
   SETTINGS_FIELDS,
   dtoKeyFor,
@@ -4463,6 +4464,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const validated = parsed.data as Record<string, unknown>;
       const sliceProblem = tmuxSessionScopeSliceProblem(
         validated.tmuxSessionScopeSlice as string | null | undefined,
+        process.platform,
+        findSystemdRun,
       );
       if (sliceProblem !== null) {
         return `Refusing: ${sliceProblem}`;

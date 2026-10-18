@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
-import { systemdScopeCommand } from './systemd-scope.js';
+import { scopedCommandOrPlain } from './systemd-scope.js';
 import type { ExitListener, ProcessBackend, ProcessHandle, ProcessSpec } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -349,7 +349,10 @@ export class TmuxBackend implements ProcessBackend {
    */
   private async startServer(args: string[]): Promise<string> {
     if (!this.sessionScopeSlice) return this.tmux(args);
-    const scoped = systemdScopeCommand(this.sessionScopeSlice, this.bin, [...this.socketArgs(), ...args]);
+    const scoped = scopedCommandOrPlain(this.sessionScopeSlice, this.bin, [...this.socketArgs(), ...args], {
+      pathEnv: this.serverEnv.PATH ?? process.env.PATH,
+      warn: (o, m) => this.logger?.warn(o, m),
+    });
     const { stdout } = await execFileAsync(scoped.file, scoped.args, {
       env: this.serverEnv,
       maxBuffer: 16 * 1024 * 1024,
