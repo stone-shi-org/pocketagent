@@ -155,6 +155,29 @@ describe('GET /api/usage', () => {
       expect(claude.resetsAtLabel).toBe('Aug 13, 4:29pm');
       expect(claude.timezone).toBe('America/Los_Angeles');
       expect(claude.error).toBeNull();
+      // PA-162: a session-only account (e.g. an Enterprise seat) has no weekly
+      // limit, and none may be invented for it.
+      const windows = claude.windows as Array<{ label: string }>;
+      expect(windows).toHaveLength(1);
+      expect(windows.some((w) => /week/i.test(w.label))).toBe(false);
+    });
+
+    it('keeps a real weekly window spelled "Current week (…)"', async () => {
+      const fake = makeFakeClaude(
+        'Current session: 46% used · resets Aug 13, 4:29pm (America/Los_Angeles)\n' +
+          'Current week (all models): 30% used · resets Aug 20, 4:29pm (America/Los_Angeles)\n' +
+          'Current week (Opus): 12% used · resets Aug 20, 4:29pm (America/Los_Angeles)\n',
+      );
+      fakes.push(fake);
+      t = await createTestApp({ ...NO_CODEX, ...NO_AGY, POCKETAGENT_CLAUDE_BIN: fake.bin });
+
+      const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
+      const claude = findAgent(res.json().usage, 'claude') as Record<string, unknown>;
+      const windows = claude.windows as Array<{ label: string; percentUsed: number; resetsAtLabel: string }>;
+      expect(windows).toHaveLength(3);
+      expect(windows[0]).toMatchObject({ label: '5-hour', percentUsed: 46 });
+      expect(windows[1]).toMatchObject({ label: 'Weekly', percentUsed: 30, resetsAtLabel: 'Aug 20, 4:29pm' });
+      expect(windows[2]).toMatchObject({ label: 'Weekly (Opus)', percentUsed: 12 });
     });
 
     it('parses multiple windows out of /usage output when present', async () => {
@@ -172,7 +195,7 @@ describe('GET /api/usage', () => {
       const windows = claude.windows as Array<{ label: string; percentUsed: number }>;
       expect(windows.length).toBe(2);
       expect(windows[0]).toMatchObject({ label: '5-hour', percentUsed: 46 });
-      expect(windows[1]).toMatchObject({ label: 'Weekly', percentUsed: 30 });
+      expect(windows[1]).toMatchObject({ label: 'Weekly', percentUsed: 30, resetsAtLabel: 'Aug 20, 4:29pm' });
     });
 
     it('probes from the temp directory, never from a workspace', async () => {

@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
 import { buildChildEnv } from '../sessions/env.js';
-import { formatResetLabel } from './format.js';
 import { createPolled, type Polled } from './poll.js';
 import { usageProbeCwd } from './probe-cwd.js';
 
@@ -14,10 +13,13 @@ const DEFAULT_REFRESH_MS = 5 * 60 * 1000;
 const TIMEOUT_MS = 15_000;
 
 // Matches rate limit lines `/usage` prints, e.g.
-// "Current session: 46% used · resets Aug 13, 4:29pm (America/Los_Angeles)"
-// or "Weekly limit: 30% used · resets Aug 20, 4:29pm (America/Los_Angeles)".
+// "Current session: 46% used · resets Aug 13, 4:29pm (America/Los_Angeles)",
+// "Weekly limit: 30% used · resets Aug 20, 4:29pm (America/Los_Angeles)" or
+// "Current week (all models): 30% used · resets …". The parenthesised scope of
+// a "Current week" line is captured so a per-model weekly limit stays
+// distinguishable from the all-models one.
 const USAGE_LINE_GLOBAL =
-  /(Current session|Session limit|Weekly limit|7-day limit|5-hour limit|Weekly):\s*(\d+)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)/gi;
+  /(Current session|Session limit|Current week(?:\s*\(([^)]*)\))?|Weekly limit|7-day limit|5-hour limit|Weekly):\s*(\d+)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)/gi;
 
 function unavailable(error: string | null = null): AgentUsageInfo {
   return {
@@ -68,15 +70,16 @@ export function createClaudeUsageSource(opts: ClaudeUsageSourceOptions): Polled<
 
       const windows: UsageWindowInfo[] = matches.map((match) => {
         const rawName = match[1] ?? '';
-        const percent = match[2] ?? '0';
-        const resetsAtLabel = (match[3] ?? '').trim();
-        const timezone = (match[4] ?? '').trim();
+        const scope = (match[2] ?? '').trim();
+        const percent = match[3] ?? '0';
+        const resetsAtLabel = (match[4] ?? '').trim();
+        const timezone = (match[5] ?? '').trim();
 
         let label = rawName;
         if (/Current session|Session|5-hour/i.test(rawName)) {
           label = '5-hour';
-        } else if (/Weekly|7-day/i.test(rawName)) {
-          label = 'Weekly';
+        } else if (/Weekly|7-day|Current week/i.test(rawName)) {
+          label = scope && !/^all models$/i.test(scope) ? `Weekly (${scope})` : 'Weekly';
         }
 
         return {
@@ -87,27 +90,14 @@ export function createClaudeUsageSource(opts: ClaudeUsageSourceOptions): Polled<
         };
       });
 
-      const has5h = windows.some((w) => w.label === '5-hour');
-      const hasWeekly = windows.some((w) => w.label === 'Weekly');
-
-      if (has5h && !hasWeekly) {
-        const window5h = windows.find((w) => w.label === '5-hour')!;
-        let weeklyResetLabel: string | null = null;
-        if (window5h.resetsAtLabel) {
-          const parsedDate = new Date(window5h.resetsAtLabel);
-          if (!Number.isNaN(parsedDate.getTime())) {
-            const weeklyDate = new Date(parsedDate.getTime() + 6 * 86400 * 1000);
-            weeklyResetLabel = formatResetLabel(weeklyDate);
-          }
-        }
-
-        windows.push({
-          label: 'Weekly',
-          percentUsed: Math.max(0, Math.min(100, Math.round(window5h.percentUsed * 0.75))),
-          resetsAtLabel: weeklyResetLabel ?? window5h.resetsAtLabel,
-          timezone: window5h.timezone,
-        });
-      }
+      // Only windows `/usage` actually printed are reported (PA-162). This
+      // used to synthesize a "Weekly" window (75% of the session figure, reset
+      // = session reset + 6 days) whenever none was printed, on the assumption
+      // that every account has one. It doesn't: an Enterprise seat can have a
+      // session limit and no weekly cap at all, and the invented bar then
+      // reads as a real limit. Codex's synthetic 5-hour window was removed for
+      // the same reason (see `codex-source.ts`); `collapsedWindows()` in
+      // `UsageBar.tsx` already copes with a single window.
 
       const primary = windows[0]!;
       return {
