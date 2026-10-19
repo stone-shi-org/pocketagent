@@ -366,4 +366,23 @@ describe('renderJiraTemplate: sanitization', () => {
       expect(preset.description, preset.id).toContain('approve/approved/approval');
     }
   });
+
+  // PA-161: once a ticket is transitioned to "In Review" (code complete), the
+  // workflow removes the `agent-ready` trigger label so subsequent review
+  // activity does not re-trigger the agent automatically.
+  it('approval presets remove the agent-ready label after putting the ticket in review', async () => {
+    const { JIRA_PROMPT_TEMPLATES } = await import('@pocketagent/protocol');
+    const approvalPresets = JIRA_PROMPT_TEMPLATES.filter((p) => p.id !== 'triage-only');
+    expect(approvalPresets.length).toBeGreaterThanOrEqual(4);
+    for (const preset of approvalPresets) {
+      const reviewIdx = preset.template.indexOf(
+        'Transition/mark the Jira ticket status as "In Review" (or "in-review").',
+      );
+      const removeIdx = preset.template.indexOf(
+        'Remove the "agent-ready" label from the Jira ticket {{issue.key}}.',
+      );
+      expect(reviewIdx, `${preset.id} review step`).toBeGreaterThan(-1);
+      expect(removeIdx, `${preset.id} remove agent-ready step`).toBeGreaterThan(reviewIdx);
+    }
+  });
 });

@@ -361,6 +361,7 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+      - Remove the "agent-ready" label from the Jira ticket {{issue.key}}.
 3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.
 
 ${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
@@ -405,6 +406,7 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+      - Remove the "agent-ready" label from the Jira ticket {{issue.key}}.
 
 ${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
@@ -447,6 +449,7 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+      - Remove the "agent-ready" label from the Jira ticket {{issue.key}}.
    - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.
 
 ${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
@@ -490,6 +493,7 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+      - Remove the "agent-ready" label from the Jira ticket {{issue.key}}.
    - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.
 
 ${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
