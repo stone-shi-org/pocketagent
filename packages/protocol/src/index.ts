@@ -30,6 +30,7 @@ export * from './push.js';
 export * from './admin.js';
 export * from './export-import.js';
 export * from './capabilities.js';
+export * from './chat-status.js';
 
 /** Name of the HttpOnly cookie holding the server-side session id. */
 export const AUTH_COOKIE_NAME = 'pocketagent_sid';

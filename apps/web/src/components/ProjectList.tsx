@@ -8,7 +8,8 @@ import type {
   QueuedRunSummary,
   ShellSessionSummary,
 } from '@pocketagent/protocol';
-import { describeCron, usesClaudeTranscripts } from '@pocketagent/protocol';
+import { chatDotState, describeCron, usesClaudeTranscripts } from '@pocketagent/protocol';
+import { ChatStatusDot } from './ChatStatusDot.js';
 import { hostDotClass, type HostStatus } from '../hosts/host-status.js';
 import type { HostCompatibilityState } from '../api/negotiate.js';
 import { ApiError, type ApiClient } from '../api/client.js';
@@ -1254,7 +1255,7 @@ function ProjectSection({
                     title={chat.title}
                   >
                     <span className="chat-title">
-                      {chat.live && <span className="live-dot" aria-label="running" />}
+                      <ChatStatusDot state={chatDotState(chat)} />
                       {/* Inline, beside `live-dot`, rather than a corner
                           overlay: a chat row has no icon to pin a badge to. */}
                       {chat.cronJobId !== null && (
@@ -1407,7 +1408,7 @@ function ProjectSection({
                   title={chat.title}
                 >
                   <span className="chat-title">
-                    {chat.live && <span className="live-dot" aria-label="running" />}
+                    <ChatStatusDot state={chatDotState(chat)} />
                     {chat.plannerChatId !== null && (
                       <span
                         className="chat-planner-badge"

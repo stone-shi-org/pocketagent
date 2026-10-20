@@ -23,6 +23,7 @@ import { GitStatusTracker } from '../git/status.js';
 // `findWorktreeRoot` lives in a pure path module rather than here, so the run
 // queue can roll a cwd up to its working tree without importing this service.
 import { findWorktreeRoot } from '../git/worktree-paths.js';
+import { isUnread, readChatReadMarks, type ReadMarks } from '../chats/read-marks.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
   AUTO_HIDDEN_DIRS,
@@ -199,19 +200,20 @@ export class ProjectService {
    * whole point of the category; each row carries its own `cwd`/`cwdLabel`
    * so the directory is still visible where it matters.
    *
-   * No disk I/O and no database read: a shell has no transcript to reconcile
-   * (nothing writes one) and nothing here is hideable, so unlike `list()`
-   * this is a pure transform of the session list it is handed.
+   * No disk I/O: a shell has no transcript to reconcile (nothing writes one)
+   * and nothing here is hideable, so unlike `list()` this is a transform of
+   * the session list it is handed plus one read-mark query (PA-165).
    */
   shells(sessions: SessionInfo[]): ShellSessionSummary[] {
     const rows: ShellSessionSummary[] = [];
+    const readMarks = readChatReadMarks(this.db, 'session');
     // Same collapse `list()` applies, and it earns its keep here rather than
     // there: detaching and re-attaching a pane leaves several session rows
     // sharing one `adoptTargetId`, and they are one terminal.
     for (const session of representativeSessions(sessions)) {
       if (!isShellSession(session)) continue;
       rows.push({
-        ...chatFromSession(session),
+        ...chatFromSession(session, readMarks),
         cwd: session.cwd,
         cwdLabel: this.workspaces.labelFor(session.cwd),
         adopted: session.adopted,
@@ -235,6 +237,7 @@ export class ProjectService {
     const conversations = await this.conversations.list(this.conversationLimit);
     const removedChats = readHiddenChats(this.db);
     const visibility = readProjectVisibility(this.db);
+    const readMarks = readChatReadMarks(this.db, 'session');
     const byCwd = new Map<string, ChatSummary[]>();
 
     // A resumed session and the transcript it came from are one chat, not two.
@@ -359,6 +362,7 @@ export class ProjectService {
       push(byCwd, session.cwd, {
         ...chatFromSession(
           session,
+          readMarks,
           liveConversation?.title,
           session.agentSessionId ? (cronByConversation.get(session.agentSessionId) ?? null) : null,
           session.agentSessionId
@@ -621,6 +625,7 @@ function describeWebhookTrigger(type: WebhookType, filterJson: string): string {
 
 function chatFromSession(
   session: SessionInfo,
+  readMarks: ReadMarks,
   transcriptTitle?: string,
   cronJobId: string | null = null,
   webhookId: string | null = null,
@@ -648,7 +653,28 @@ function chatFromSession(
     adoptTargetId: session.adoptTargetId,
     adoptSessionName: session.adoptSessionName ?? null,
     rateLimit: session.rateLimit,
+    ...chatAttention(session, readMarks),
   };
+}
+
+/**
+ * PA-165: the two facts the status dot needs beyond `live`/`busySince` — see
+ * `chatDotState`. Unread only for a structured session: a terminal's output
+ * never settles, so it has no "finished turn" to have not read.
+ */
+function chatAttention(
+  session: SessionInfo,
+  readMarks: ReadMarks,
+): { awaitingApproval: boolean; unread: boolean } {
+  const live = !TERMINAL.has(session.status);
+  const awaitingApproval = live && session.pendingApprovalsCount > 0;
+  const unread =
+    live &&
+    session.transport === 'structured' &&
+    !awaitingApproval &&
+    session.busySince === null &&
+    isUnread(session.lastTurnEndedAt, readMarks.readAt(session.id));
+  return { awaitingApproval, unread };
 }
 
 /**

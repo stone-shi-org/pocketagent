@@ -31,6 +31,7 @@ import { Icon } from '../components/Icon.js';
 import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
+import { useMarkChatRead } from '../agent/chat-read.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
 import { unlockAudioContext } from '../audio/audio-context.js';
@@ -54,6 +55,11 @@ interface Props {
   onApiError: (error: unknown) => void;
   /** Navigates to a newly created session — see `resumeAndSend` below. */
   onResumed: (sessionId: string) => void;
+  /**
+   * PA-165: false while this page sits in a hidden desktop tab, so it does not
+   * mark the session read. Phone pages are only mounted while shown.
+   */
+  active?: boolean;
 }
 
 const CODING_STARTER_PROMPTS = [
@@ -69,8 +75,12 @@ const CODING_STARTER_PROMPTS = [
  * difference is that events are rendered as components instead of written into
  * a terminal emulator.
  */
-export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
+export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = true }: Props): JSX.Element {
   const api = useHostApi();
+  // PA-165: bumped on every finished turn, so a turn that ends while this page
+  // is on screen is marked read — see `useMarkChatRead`.
+  const [turnsFinished, setTurnsFinished] = useState(0);
+  useMarkChatRead('session', sessionId, { active, turnSignal: turnsFinished });
   const endpoint = useHostEndpoint();
   const connRef = useRef<TerminalConnection | null>(null);
   /**
@@ -513,6 +523,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
             void notifyApproval(event.title, sessionId, endpoint.id);
           }
           if (event.kind === 'turn_complete') {
+            setTurnsFinished((n) => n + 1);
             // Same tab-hidden gate as the approval alert above; a fully
             // detached client is covered by the server's own push instead.
             void notifyTurnComplete(latestTitle ?? 'Session', sessionId, endpoint.id);

@@ -75,6 +75,7 @@ import { docWorkspaceRoutes } from './routes/doc-workspaces.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { telegramRoutes } from './routes/telegram.js';
 import { capabilitiesRoutes } from './routes/capabilities.js';
+import { chatReadRoutes } from './routes/chat-read.js';
 import { AdminService } from './admin/index.js';
 import { GeminiLiveService } from './planner/gemini-live.js';
 import { TelegramBotStore } from './telegram/bots-store.js';
@@ -218,6 +219,12 @@ export interface BuildAppOptions {
   telegramAlbumWindowMs?: number;
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
+  /**
+   * PA-165: model-written titles for new Pocket Agent chats. On unless set to
+   * false; the test harness turns it off so a scripted fake LLM is not sent a
+   * request it did not script (a test that wants it turns it back on).
+   */
+  plannerAiTitles?: boolean;
   /**
    * Where log lines go, instead of the configured transport.
    *
@@ -586,6 +593,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // this, so it threads through the constructor like everything else here.
     // `webhooks`/`cron` cannot — see `attachRunServices` below.
     config,
+    aiTitles: options.plannerAiTitles ?? true,
     customClaudeProviders,
     workspaces,
     plannerWorkspaces,
@@ -1061,6 +1069,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(authRoutes);
   await app.register(mcpServerRoutes);
   await app.register(sessionRoutes);
+  await app.register(chatReadRoutes);
   await app.register(attachmentRoutes);
   await app.register(agentInstallRoutes);
   await app.register(adminRoutes);

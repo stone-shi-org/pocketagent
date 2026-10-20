@@ -3526,6 +3526,21 @@ button.chat-rate-limit-badge {
   vertical-align: 1px;
 }
 
+/* PA-165: the status dot's four states (`chatDotState`). After both `.live-dot`
+   rules, so these win on source order at equal specificity. The three that
+   want attention pulse; a live-but-read session is the steady yellow the
+   Agents view already uses for idle, because most live sessions sit there and
+   a flashing dot on each would bury the ones that matter. */
+.live-dot--running { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.live-dot--approval { background: var(--warn); animation: pulse 0.9s ease-in-out infinite; }
+.live-dot--unread { background: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+.live-dot--idle { background: var(--idle); animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .live-dot--running,
+  .live-dot--approval,
+  .live-dot--unread { animation: none; }
+}
+
 .chat-row.pending .chat-title {
   color: var(--text-dim);
 }
@@ -5121,7 +5136,9 @@ button.chat-rate-limit-badge {
 /* Reuses `@keyframes pulse` (defined above, next to `.tool-dot`) rather than
    a second copy of the same glow. */
 .agent-dot--busy {
-  background: var(--ok);
+  /* Blue, the same "turn running" colour as a chat row's dot (PA-165), so
+     green means one thing everywhere: finished and not read yet. */
+  background: var(--accent);
   animation: pulse 1.2s ease-in-out infinite;
 }
 .agent-dot--idle { background: var(--idle); }

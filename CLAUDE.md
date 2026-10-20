@@ -954,8 +954,20 @@ heuristic, deliberately mirroring rather than reusing `conversations/index.ts`'s
 function's Jira-webhook-specific parsing (extracting `[KEY] Summary`, stripping an untrusted
 fence's preamble) doesn't apply to a prompt a human typed directly into a chat, and importing it
 anyway would leave a Pocket Agent chat's title deriver carrying logic a future reader would have
-to puzzle out the relevance of. No LLM call — the title needs to exist before the turn's own LLM
-call even starts, and a chat with a bad auto-title is one edit away from a better one.
+to puzzle out the relevance of. That title needs to exist before the turn's own LLM call even
+starts, so it is never the model's — but since PA-165 it is only *provisional*:
+`scheduleAiTitle` then asks a model for a 3–7 word title in the background
+(`planner/chat-title.ts`: the prompt fenced as data, the reply sanitised to one line of at most
+60 characters) and swaps it in **only if the title is still the provisional one**, so a rename
+made in the meantime always wins. The model is Settings → Providers and Models → "Title model"
+(`titleModelId`, a `planner_models` row; must be catalogued, or the PATCH is a 400) else the
+chat's own; the settings card says so when that sends the first message to another provider.
+It never delays or fails a turn: any failure keeps the first-line title and logs one line. A
+chat created *with* a title — a webhook's `[KEY] Summary`, a cron run, an MCP chat — is never
+re-titled, which is also why no unattended trigger can spend a subscription provider on it.
+`BuildAppOptions.plannerAiTitles` (on in the app, off in `createTestApp`) exists because the
+extra request would otherwise consume a scripted fake LLM's replies; `settleAiTitles()` lets a
+test wait for one.
 `PlannerChatPage`'s header has an edit icon next to the title (new `edit` `IconName` — a bare
 pencil, distinct from `compose`'s square-plus-pencil "write something new" glyph, which reads
 wrong next to a title that already has text) that swaps it for an input; saving with an empty
@@ -1890,6 +1902,28 @@ there is no card above it to inherit them from. Clearing is `POST
 `virtual:webhooks` is still a synthetic project and is untouched by this. Known limitation:
 the category is flat and unpaginated — no `CHAT_PAGE_SIZE` "show more" row — so "Clear
 finished" is the answer to a long list rather than a page size.
+
+**Every chat row carries one status dot, and it has four states** (PA-165,
+`packages/protocol/src/chat-status.ts`): blue pulsing while a turn runs, amber pulsing while a
+tool call waits on a human, green pulsing when a turn finished after anyone last looked, and a
+steady yellow (the Agents view's idle colour) for a coding session that is alive, idle and
+read. Approval beats running beats unread. The reporter's draft flashed the idle-read state
+too; it is steady because most live sessions sit there, and it had no approval state at all,
+which is the one where nothing happens until you act. A Pocket Agent chat has no process, so it
+has no idle state — an idle one draws nothing. `chatDotState`/`plannerChatDotState` are the one
+rule; `ChatStatusDot` draws it for the project tree, Pocket Agents, Shell and the desktop tab
+strip, each with a label so colour is never the only signal. The facts are the server's:
+`ChatSummary`/`PlannerChat` gain `awaitingApproval` and `unread`. **Read state is server-side**
+(`chat_read_marks`, `chats/read-marks.ts`), so reading on the phone clears the desktop too: a
+page that is on screen (`active` *and* `document.visibilityState`, via `useMarkChatRead`) posts
+`POST /api/chats/read` on open, on becoming visible and on each `turn_complete`, and the server
+stamps its own clock. Unread compares a turn-end time against the mark: for a coding session
+`SessionManager.lastTurnEndedAt` (in memory, structured only — a terminal never settles — so a
+restart reads as "nothing unread", the safe direction), for a Pocket Agent chat
+`lastActivityAt`, which only a finished turn moves (creation, `/clear` and a Gemini Live turn
+stamp a mark in the same breath). A chat with no mark is read up to `chat_read_marks_epoch`,
+written once when the table first exists, so the upgrade lit nothing up. Orphaned marks are
+swept at boot. The Agents view's busy dot is blue now too, so green means one thing everywhere.
 
 Inbound webhooks surface the same way, as `ProjectInfo.webhooks`, and the argument for it is a
 sharper version of the one below: a cron job will fire tonight whether or not anyone looks,
@@ -3742,8 +3776,9 @@ These are load-bearing. Several were bugs first.
 - **`--console` is the one dark surface in a light app, so anything using it as a background
   must also set `color: var(--console-text)`** — inheriting the body colour renders
   dark-on-dark, which is exactly how the code blocks broke once.
-- The home screen carries no metadata per row on purpose — a chat is its title and, if
-  running, a green dot. Structure comes from weight and whitespace, not borders and badges.
+- The home screen carries no metadata per row on purpose — a chat is its title and its status
+  dot (PA-165: running, waiting for approval, unread, or live-and-idle). Structure comes from
+  weight and whitespace, not borders and badges.
 - `eslint.config.js` scopes browser globals to the Playwright demo scripts by filename — add
   new browser-driving scripts to that list.
 

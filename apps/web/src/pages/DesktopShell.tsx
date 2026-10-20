@@ -1,3 +1,4 @@
+import { chatDotState, plannerChatDotState, type ChatDotState } from '@pocketagent/protocol';
 import { Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { Route } from '../hooks/useHashRoute.js';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
@@ -494,7 +495,7 @@ export function DesktopShell({
   // by *tab id*, which is host-qualified, so two hosts' identically-titled
   // chats (or identical session ids) cannot overwrite each other's entry.
   const chatById = useMemo(() => {
-    const map = new Map<string, { title: string; live: boolean }>();
+    const map = new Map<string, { title: string; status: ChatDotState | null }>();
     for (const host of hosts) {
       const hostId = host.endpoint.id;
       const state = fleet.stateFor(hostId);
@@ -509,20 +510,18 @@ export function DesktopShell({
         if (chat.sessionId) {
           map.set(tabIdFor({ name: 'terminal', sessionId: chat.sessionId }, hostId), {
             title: chat.title,
-            live: chat.live,
+            status: chatDotState(chat),
           });
         }
         if (chat.conversationId) {
           map.set(tabIdFor({ name: 'chat', conversationId: chat.conversationId }, hostId), {
             title: chat.title,
-            live: chat.live,
+            status: chatDotState(chat),
           });
         }
       }
-      // A planner chat has no "live" concept at all — see `PlannerChat`'s own
-      // doc comment: a turn runs over a one-way SSE response, not a process
-      // anything can observe as "still running" — so this is always `false`,
-      // same as `PocketAgentsSection`'s own rows render no live dot either.
+      // A planner chat has no process, so no "live but idle" state; it gets
+      // the running/approval/unread dot its sidebar row draws (PA-165).
       // Unlike `state.projects` (bounded to the 60 most recently touched
       // conversations), `listPlannerChats()` returns every chat, so a planner
       // tab's title never ages out of this map the way an old project chat's
@@ -530,7 +529,7 @@ export function DesktopShell({
       for (const chat of planner.chats) {
         map.set(tabIdFor({ name: 'planner-chat', chatId: chat.id }, hostId), {
           title: chat.title ?? 'Untitled chat',
-          live: false,
+          status: plannerChatDotState(chat),
         });
       }
     }
@@ -549,7 +548,7 @@ export function DesktopShell({
   // updating it must never itself trigger a render, only make the next one
   // (already scheduled by the `state.projects` change that fed `chatById`)
   // more informed.
-  const knownTitles = useRef(new Map<string, { title: string; live: boolean }>());
+  const knownTitles = useRef(new Map<string, { title: string; status: ChatDotState | null }>());
   useEffect(() => {
     for (const [id, entry] of chatById) knownTitles.current.set(id, entry);
   }, [chatById]);
@@ -572,7 +571,7 @@ export function DesktopShell({
       return {
         id: tab.id,
         title: utilityTabTitle(tab.route),
-        live: false,
+        status: null,
         preview: tab.preview ?? false,
         hostLabel: hostLabelFor(tab.hostId),
       };
@@ -582,7 +581,9 @@ export function DesktopShell({
       return {
         id: tab.id,
         title: found.title,
-        live: found.live,
+        // A cached entry's dot is however old the cache is, so only a chat in
+        // the current poll draws one.
+        status: chatById.has(tab.id) ? found.status : null,
         preview: tab.preview ?? false,
         hostLabel: hostLabelFor(tab.hostId),
       };
@@ -604,7 +605,7 @@ export function DesktopShell({
     return {
       id: tab.id,
       title: fallback,
-      live: tab.route.name === 'terminal',
+      status: tab.route.name === 'terminal' ? 'idle' : null,
       preview: tab.preview ?? false,
       hostLabel: hostLabelFor(tab.hostId),
     };
@@ -1005,6 +1006,7 @@ export function DesktopShell({
                 {tab.route.name === 'terminal' ? (
                   <SessionRoute
                     sessionId={tab.route.sessionId}
+                    active={tab.id === activeTabId}
                     onBack={() => closeTab(tab.id)}
                     onApiError={onApiError}
                     onResumed={(sessionId) => {

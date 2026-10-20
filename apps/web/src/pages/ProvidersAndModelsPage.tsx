@@ -390,6 +390,12 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     );
   };
 
+  /** PA-165: see `PlannerSettingsDto.titleModelId`. Saved on change, like
+      the other one-control settings here. */
+  const saveTitleModel = (value: string): void => {
+    void withBusy(() => api.updatePlannerSettings({ titleModelId: value || null }));
+  };
+
   const testEmbeddings = (): void => {
     setTestingEmbeddings(true);
     setEmbeddingTestResult(null);
@@ -1291,6 +1297,44 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
         </div>
 
         <div className="planner-col">
+          <div className="planner-section">
+            <h3>Chat titles</h3>
+            <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+              A new Pocket Agent chat is titled from its first line right away, then a model writes a
+              short title in the background. A small, fast model is all this needs. Renaming a chat
+              yourself always wins.
+            </p>
+            <div className="planner-field">
+              <label htmlFor="planner-title-model">Title model</label>
+              <select
+                id="planner-title-model"
+                value={plannerSettings?.titleModelId ?? ''}
+                disabled={busy || !plannerSettings}
+                onChange={(e) => saveTitleModel(e.target.value)}
+              >
+                <option value="">Same as the chat</option>
+                {(providers ?? []).map((provider) => {
+                  const providerModels = (models ?? []).filter((m) => m.providerId === provider.id);
+                  if (providerModels.length === 0) return null;
+                  return (
+                    <optgroup key={provider.id} label={provider.label}>
+                      {providerModels.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  );
+                })}
+              </select>
+            </div>
+            {titleModelDisclosure(plannerSettings?.titleModelId ?? null, models, providers) && (
+              <p className="planner-row-meta" style={{ marginTop: 8 }}>
+                {titleModelDisclosure(plannerSettings?.titleModelId ?? null, models, providers)}
+              </p>
+            )}
+          </div>
+
           <div className="planner-section">
             <h3>Embeddings</h3>
             <p className="planner-row-meta" style={{ marginBottom: 10 }}>
@@ -3576,4 +3620,20 @@ function BoolRow({
       </div>
     </div>
   );
+}
+
+/**
+ * PA-165: the one thing a title model changes about where data goes — a chat
+ * whose own model is on another provider still sends its first message here.
+ */
+function titleModelDisclosure(
+  titleModelId: string | null,
+  models: PlannerModel[] | null,
+  providers: PlannerProvider[] | null,
+): string | null {
+  if (!titleModelId) return null;
+  const model = models?.find((m) => m.id === titleModelId);
+  if (!model) return 'This model is no longer in the catalog, so each chat titles itself with its own model.';
+  const provider = providers?.find((p) => p.id === model.providerId);
+  return `Each new chat's first message is sent to ${provider?.label ?? 'this provider'} to be titled, whichever provider the chat itself uses.`;
 }

@@ -819,6 +819,16 @@ export const PlannerSettingsDto = z.object({
    * `0` never inlines. Default 8000.
    */
   attachmentInlineExtractMaxTokens: z.number().int().min(0).max(MAX_INLINE_EXTRACT_MAX_TOKENS),
+  /**
+   * PA-165: the model (`PlannerModel.id`) that writes a new chat's title from
+   * its first prompt — a "light" model is the point, since the job is a few
+   * words. Null means the chat's own model. The title is generated in the
+   * background and never delays the turn; until it arrives (or if it fails)
+   * the chat keeps the first-line title it gets immediately. If this model
+   * belongs to a different provider than the chat's, the first prompt is sent
+   * to that provider too. Optional so an older backend's response still parses.
+   */
+  titleModelId: z.string().nullable().optional(),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -872,6 +882,9 @@ export const UpdatePlannerSettingsRequest = z.object({
   /** PA-137: see `PlannerSettingsDto.attachmentInlineTextMaxBytes`. */
   attachmentInlineTextMaxBytes: z.number().int().min(0).max(MAX_INLINE_TEXT_MAX_BYTES).optional(),
   attachmentInlineExtractMaxTokens: z.number().int().min(0).max(MAX_INLINE_EXTRACT_MAX_TOKENS).optional(),
+  /** PA-165: see `PlannerSettingsDto.titleModelId`. `null` (or `''`) means
+      "same as the chat". */
+  titleModelId: z.string().max(200).nullable().optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 
@@ -985,6 +998,16 @@ export const PlannerChat = z.object({
    * PA-76: true when a turn is currently executing or waiting for a decision on this chat.
    */
   busy: z.boolean().default(false),
+  /**
+   * PA-165: a tool call in this chat is parked on a human. A subset of
+   * `busy`, split out because it is the one busy state that waits on you.
+   */
+  awaitingApproval: z.boolean().optional(),
+  /**
+   * PA-165: the chat's last turn finished after anyone last looked at it
+   * (`POST /api/chats/read`). See `plannerChatDotState`.
+   */
+  unread: z.boolean().optional(),
   /** PA-113: The effort level this chat last used or was explicitly configured with. */
   lastEffort: EffortLevel.nullable().optional(),
   /** PA-113: Whether reasoning/thinking is enabled for this chat. */

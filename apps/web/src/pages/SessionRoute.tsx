@@ -15,11 +15,14 @@ export function SessionRoute({
   onBack,
   onApiError,
   onResumed,
+  active = true,
 }: {
   sessionId: string;
   onBack: () => void;
   onApiError: (error: unknown) => void;
   onResumed: (sessionId: string) => void;
+  /** PA-165: see `AgentPage`'s `active`. */
+  active?: boolean;
 }): JSX.Element {
   const api = useHostApi();
   const [transport, setTransport] = useState<'terminal' | 'structured' | null>(null);
@@ -70,7 +73,13 @@ export function SessionRoute({
   if (transport === null) return <div className="spinner">Opening session…</div>;
   if (transport === 'structured') {
     return (
-      <AgentPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} onResumed={onResumed} />
+      <AgentPage
+        sessionId={sessionId}
+        onBack={onBack}
+        onApiError={onApiError}
+        onResumed={onResumed}
+        active={active}
+      />
     );
   }
   return (

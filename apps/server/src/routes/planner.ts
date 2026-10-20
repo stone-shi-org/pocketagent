@@ -191,6 +191,8 @@ import {
   writePlannerWebSearchBaseUrl,
   writePlannerWebSearchEnabled,
   writePlannerYoloEnabled,
+  writePlannerTitleModelId,
+  readPlannerModelById,
 } from '../planner/store.js';
 
 function badRequest(reply: FastifyReply, message: string): FastifyReply {
@@ -1311,7 +1313,14 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       compactionKeepRecentTokens,
       attachmentInlineTextMaxBytes,
       attachmentInlineExtractMaxTokens,
+      titleModelId,
     } = parsed.data;
+    // PA-165: a title model must be a catalogued model, or a typo would
+    // silently fall back to the chat's own model on every new chat.
+    const titleModelRef = titleModelId === undefined ? undefined : titleModelId?.trim() || null;
+    if (titleModelRef && !readPlannerModelById(db, titleModelRef)) {
+      return badRequest(reply, 'Title model not found. Pick one from Providers and Models.');
+    }
     try {
       if (apiKey !== undefined) {
         writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null, config.settingsEncKey);
@@ -1371,6 +1380,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       ...(attachmentInlineTextMaxBytes !== undefined ? { textMaxBytes: attachmentInlineTextMaxBytes } : {}),
       ...(attachmentInlineExtractMaxTokens !== undefined ? { extractMaxTokens: attachmentInlineExtractMaxTokens } : {}),
     });
+    if (titleModelRef !== undefined) writePlannerTitleModelId(db, titleModelRef);
     // Field names only: API keys may be among them.
     auditConfigChange(request, 'planner settings updated', {
       fields: Object.keys(parsed.data),

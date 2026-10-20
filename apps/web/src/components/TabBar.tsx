@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ChatDotState } from '@pocketagent/protocol';
+import { ChatStatusDot } from './ChatStatusDot.js';
 import { Icon } from './Icon.js';
 
 export interface Tab {
   id: string;
   title: string;
-  /** Shows the same live-dot the sidebar uses — a tab is its title and,
-      if running, a green dot, same as a chat row. */
-  live: boolean;
+  /** The same status dot the sidebar row draws (PA-165) — see
+      `chatDotState` — or null for none. */
+  status: ChatDotState | null;
   /** VS Code's name for the strip's one reusable, unpinned tab — a single
       click on a project-tree row lands here instead of opening a new tab.
       Shown in italics, same affordance VS Code uses. */
@@ -192,7 +194,7 @@ export function TabBar({
                       onSelect(tab.id);
                     }}
                   >
-                    {tab.live && <span className="live-dot" aria-label="running" />}
+                    <ChatStatusDot state={tab.status} />
                     <span className="tab-list-item-title">
                       {tab.hostLabel ? `${tab.hostLabel} · ${tab.title}` : tab.title}
                     </span>
@@ -228,7 +230,7 @@ export function TabBar({
             }}
             title={tab.title}
           >
-            {tab.live && <span className="live-dot" aria-label="running" />}
+            <ChatStatusDot state={tab.status} />
             {tab.hostLabel && <span className="tab-host">{tab.hostLabel}</span>}
             <span className="tab-title">{tab.title}</span>
             <button

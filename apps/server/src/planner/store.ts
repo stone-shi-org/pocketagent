@@ -1627,6 +1627,10 @@ export const PLANNER_MCP_ENABLED_KEY = 'planner_mcp_enabled';
  */
 export const PLANNER_ME_INSTRUCTION_KEY = 'planner_me_instruction';
 
+/** PA-165: see `PlannerSettingsDto.titleModelId`. Empty/absent means "the
+    chat's own model". */
+export const PLANNER_TITLE_MODEL_ID_KEY = 'planner_title_model_id';
+
 /**
  * PA-45 (reporter: "add 'tools' instruction, for environment settings, like
  * ssh key, url for certain things, which environment variable has
@@ -1726,6 +1730,7 @@ export interface PlannerSettingsSnapshot {
   compactionKeepRecentTokens: number;
   attachmentInlineTextMaxBytes: number;
   attachmentInlineExtractMaxTokens: number;
+  titleModelId: string | null;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -1786,6 +1791,7 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
       0,
       MAX_INLINE_EXTRACT_MAX_TOKENS,
     ),
+    titleModelId: readSetting(db, PLANNER_TITLE_MODEL_ID_KEY) || null,
   };
 }
 
@@ -1862,6 +1868,11 @@ export function writePlannerMcpEnabled(db: Db, enabled: boolean): void {
 /** PA-45: see `PLANNER_ME_INSTRUCTION_KEY`'s own doc comment. */
 export function writePlannerMeInstruction(db: Db, text: string | null): void {
   writeSetting(db, PLANNER_ME_INSTRUCTION_KEY, text ?? '');
+}
+
+/** PA-165: see `PLANNER_TITLE_MODEL_ID_KEY`. */
+export function writePlannerTitleModelId(db: Db, modelId: string | null): void {
+  writeSetting(db, PLANNER_TITLE_MODEL_ID_KEY, modelId ?? '');
 }
 
 /** PA-45: see `PLANNER_TOOLS_INSTRUCTION_KEY`'s own doc comment. */

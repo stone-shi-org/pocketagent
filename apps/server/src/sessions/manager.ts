@@ -41,6 +41,7 @@ import { CodexSession } from './codex-session.js';
 import { CodexServerManager } from './codex-server.js';
 import { PiSession } from './pi-session.js';
 import { buildChildEnv } from './env.js';
+import { deleteChatReadMark } from '../chats/read-marks.js';
 import { codexHistoryEvents, normalizeCodexModels, normalizeOpencodeModels, opencodeHistoryEvents } from './normalize.js';
 import { probeAgyModels, probeClaudeModels, probePiModels } from './agent-probe.js';
 
@@ -240,6 +241,12 @@ const SWEEP_INTERVAL_MS = 15_000;
  */
 export class SessionManager {
   private readonly live = new Map<string, ManagedSession>();
+  /**
+   * PA-165: when each session's most recent turn completed — what the chat
+   * status dot's "unread" state compares a read mark against. In memory only:
+   * after a restart nothing reads as unread, which is the safe direction.
+   */
+  private readonly lastTurnEndedAt = new Map<string, number>();
   private readonly attachCounts = new Map<string, number>();
   /**
    * PA-20 Phase 2: sessions with live-listen/talk-back on right now. A plain
@@ -825,6 +832,7 @@ export class SessionManager {
     // about *push notifications*, and letting them skip this would make the
     // queue depend on whether notifications happen to be configured.
     this.notifyTreeIdle(session.spec.cwd);
+    this.lastTurnEndedAt.set(session.id, Date.now());
     this.notifySessionTurnComplete(session.id);
 
     const push = this.opts.push;
@@ -1701,6 +1709,8 @@ export class SessionManager {
     }
     this.live.delete(id);
     this.voiceModeSessions.delete(id);
+    this.lastTurnEndedAt.delete(id);
+    deleteChatReadMark(this.opts.db, 'session', id);
     const changes = this.opts.db.prepare('DELETE FROM sessions WHERE id = ?').run(id).changes;
     if (changes === 0 && !live) {
       throw new SessionError(`No such session: ${id}`, 'not_found', 404);
@@ -2062,6 +2072,7 @@ export class SessionManager {
           ? session.pendingPermissions().length
           : 0,
       voiceModeEnabled: this.isVoiceModeEnabled(session.id),
+      lastTurnEndedAt: this.lastTurnEndedAt.get(session.id) ?? null,
     };
   }
 
@@ -2224,6 +2235,7 @@ export class SessionManager {
       if (this.attachedCount(id) === 0 && now - endedAt > 10 * 60_000) {
         session.dispose();
         this.live.delete(id);
+        this.lastTurnEndedAt.delete(id);
         // A dead session's voice mode is definitionally off — nothing is
         // listening for it anymore — and `rowToInfo` (used once it's out of
         // `live`) always reports `false` regardless, so this is pure

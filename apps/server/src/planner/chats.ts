@@ -56,6 +56,7 @@ import {
   readDisabledToolNames,
   readGlobalDisabledToolNames,
   readPlannerChat,
+  readPlannerModelById,
   readPlannerChatMemoryFoldedTurns,
   readPlannerChats,
   readPlannerChatsByParentId,
@@ -154,6 +155,8 @@ import { applyCacheControl, isCacheControlRejection, resolvePromptCaching } from
 import { roundTripCostUsd, type PlannerModelPrices } from './cost.js';
 import { budgetContextImages } from './image-budget.js';
 import { isQuotaMessage } from './llm-errors.js';
+import { AI_TITLE_TIMEOUT_MS, buildTitleMessages, sanitizeAiTitle } from './chat-title.js';
+import { deleteChatReadMark, isUnread, markChatRead, readChatReadAt } from '../chats/read-marks.js';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   buildSummaryRequest,
@@ -457,7 +460,14 @@ export interface PlannerChatServiceOptions {
   logger?: {
     warn: (obj: unknown, msg?: string) => void;
     error?: (obj: unknown, msg?: string) => void;
+    info?: (obj: unknown, msg?: string) => void;
   };
+  /**
+   * PA-165: ask a model for each new chat's title (`scheduleAiTitle`). On in
+   * the app, off by default here so a test with a scripted fake LLM is not
+   * handed an extra request it did not script.
+   */
+  aiTitles?: boolean;
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
   /** PA-121: injected in tests to shrink the LLM retry delays. */
@@ -1117,10 +1127,101 @@ export class PlannerChatService {
       ...chat,
       ...(docWs ? { docWorkspaceAutoApproveEdits: docWs.autoApproveEdits } : {}),
       busy: this.isBusy(chat.id),
+      ...this.attentionFor(chat),
       queuedPrompts: this.queuedPrompts(chat.id),
       // PA-118: provenance badge for a chat an MCP client created.
       mcpClient: readMcpOwnedWork(this.opts.db, 'planner_chat', chat.id)?.client_label ?? null,
     };
+  }
+
+  /** PA-165: title generations in flight — awaited by `settleAiTitles`. */
+  private readonly titleJobs = new Set<Promise<void>>();
+
+  /**
+   * PA-165: replace a new chat's first-line title with a model-written one,
+   * in the background. Never awaited by the turn and never throws: on any
+   * failure — no title model, a provider that is not configured, a timeout,
+   * an empty or unusable reply — the first-line title simply stays. Applied
+   * only while the chat's title is still `provisional`, so a rename made in
+   * the meantime always wins.
+   *
+   * The model is `titleModelId` from Settings when it still resolves to a
+   * catalogued model, else the chat's own. An image- or file-only first
+   * message has no text to summarise and keeps its placeholder.
+   */
+  private scheduleAiTitle(chatId: string, prompt: string, provisional: string, chatModelId: string | null): void {
+    if (!this.opts.aiTitles || !prompt.trim()) return;
+    const job = this.generateAiTitle(chatId, prompt, provisional, chatModelId)
+      .catch((err: unknown) => {
+        this.opts.logger?.warn(
+          { chatId, error: err instanceof Error ? err.message : String(err) },
+          'planner chat title generation failed; keeping the first-line title',
+        );
+      })
+      .finally(() => {
+        this.titleJobs.delete(job);
+      });
+    this.titleJobs.add(job);
+  }
+
+  /** PA-165: for tests (and anything else that must not race a title). */
+  async settleAiTitles(): Promise<void> {
+    while (this.titleJobs.size > 0) await Promise.allSettled([...this.titleJobs]);
+  }
+
+  private async generateAiTitle(
+    chatId: string,
+    prompt: string,
+    provisional: string,
+    chatModelId: string | null,
+  ): Promise<void> {
+    const configured = readPlannerSettings(this.opts.db).titleModelId;
+    const configuredRow = configured ? readPlannerModelById(this.opts.db, configured) : null;
+    const ref = configuredRow?.id ?? chatModelId;
+    if (!ref) return;
+    const resolved = resolvePlannerModel(this.opts.db, ref);
+    if (!resolved.modelId || !resolved.provider) return;
+    const client = this.clientForProvider(resolved.provider);
+    const signal = AbortSignal.timeout(AI_TITLE_TIMEOUT_MS);
+    let content: string | null = null;
+    for await (const chunk of client.streamComplete(
+      resolved.modelId,
+      buildTitleMessages(prompt),
+      undefined,
+      signal,
+      { thinking: false, chatId },
+    )) {
+      if (chunk.type === 'done') content = chunk.content;
+    }
+    const title = sanitizeAiTitle(content);
+    if (!title) return;
+    const current = readPlannerChat(this.opts.db, chatId);
+    if (!current || current.title !== provisional) return;
+    updatePlannerChat(this.opts.db, chatId, { title });
+    this.opts.logger?.info?.({ chatId, modelId: resolved.modelId }, 'planner chat titled by model');
+  }
+
+  /**
+   * PA-165: the status dot's two facts beyond `busy` — see
+   * `plannerChatDotState`. `lastActivityAt` is the right clock for "unread"
+   * because the only things that move it are a finished turn (`finishTurn`,
+   * a Gemini Live turn) and the chat's own creation and `/clear`, and those
+   * last two stamp a read mark in the same breath: the person who made or
+   * cleared the chat is looking at it.
+   */
+  private attentionFor(chat: PlannerChat): { awaitingApproval: boolean; unread: boolean } {
+    let awaitingApproval = false;
+    for (const pending of this.pendingTurns.values()) {
+      if (pending.chatId === chat.id) {
+        awaitingApproval = true;
+        break;
+      }
+    }
+    const unread =
+      !awaitingApproval &&
+      !this.activeTurns.has(chat.id) &&
+      isUnread(chat.lastActivityAt, readChatReadAt(this.opts.db, 'planner', chat.id));
+    return { awaitingApproval, unread };
   }
 
   /**
@@ -1654,6 +1755,9 @@ export class PlannerChatService {
       thinkingEnabled: input.thinking !== undefined ? input.thinking : true,
     };
     insertPlannerChat(this.opts.db, chat);
+    // PA-165: a chat nobody has looked at yet has no turn to be unread either;
+    // its first finished turn will be later than this.
+    markChatRead(this.opts.db, 'planner', chat.id, now);
     return this.decorate(chat);
   }
 
@@ -1766,6 +1870,7 @@ export class PlannerChatService {
     this.stalledQueues.delete(id);
     this.queueDrainInProgress.delete(id);
     this.settleIdle(id);
+    deleteChatReadMark(this.opts.db, 'planner', id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -1867,7 +1972,10 @@ export class PlannerChatService {
     // Left in place, a cleared chat folded nothing into memory until it had
     // re-grown past the old count.
     writePlannerChatMemoryFoldedTurns(this.opts.db, chat.id, 0);
-    updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: Date.now() });
+    const clearedAt = Date.now();
+    updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: clearedAt });
+    // PA-165: an empty chat has nothing unread.
+    markChatRead(this.opts.db, 'planner', chat.id, clearedAt);
   }
 
   /**
@@ -2529,22 +2637,28 @@ export class PlannerChatService {
       if (opts.fromQueue) {
         const first = readPlannerQueuedPrompts(this.opts.db, chat.id)[0];
         if (chat.title === null && first) {
+          const firstText = stripSpokenSummaryInstruction(first.content);
           const title = deriveChatTitle(
-            stripSpokenSummaryInstruction(first.content) ||
-              (first.attachments[0]?.name ?? (first.image ? 'Image prompt' : '')),
+            firstText || (first.attachments[0]?.name ?? (first.image ? 'Image prompt' : '')),
           );
-          if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+          if (title) {
+            updatePlannerChat(this.opts.db, chat.id, { title });
+            this.scheduleAiTitle(chat.id, firstText, title, modelId);
+          }
         }
         // Everything was cancelled between the drain deciding to run and
         // now: there is no new prompt, so there is nothing to ask the model.
         if ((yield* this.deliverQueuedPrompts(chat, workspacePath)) === 0) return;
       } else {
         if (chat.title === null) {
+          const promptText = stripSpokenSummaryInstruction(promptContent);
           const title = deriveChatTitle(
-            stripSpokenSummaryInstruction(promptContent) ||
-              (opts.attachments?.[0]?.name ?? (opts.image ? 'Image prompt' : '')),
+            promptText || (opts.attachments?.[0]?.name ?? (opts.image ? 'Image prompt' : '')),
           );
-          if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+          if (title) {
+            updatePlannerChat(this.opts.db, chat.id, { title });
+            this.scheduleAiTitle(chat.id, promptText, title, modelId);
+          }
         }
 
         const userEvent: AgentEvent = {
@@ -3891,7 +4005,10 @@ export class PlannerChatService {
       if (userText) {
         if (this.get(chatId)?.title === null) {
           const title = deriveChatTitle(userText);
-          if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+          if (title) {
+            updatePlannerChat(this.opts.db, chat.id, { title });
+            this.scheduleAiTitle(chat.id, userText, title, chat.lastModelId);
+          }
         }
         await this.persist(workspacePath, chat.id, { kind: 'user_prompt', id: crypto.randomUUID(), text: userText });
       }
@@ -3925,7 +4042,11 @@ export class PlannerChatService {
         this.turnStartedAtByChat.delete(chat.id);
         this.turnIdByChat.delete(chat.id);
       }
-      updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: Date.now() });
+      const liveAt = Date.now();
+      updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: liveAt });
+      // PA-165: a live transcript is reported by the page that is speaking
+      // it, so whoever caused this activity heard it as it happened.
+      markChatRead(this.opts.db, 'planner', chat.id, liveAt);
     });
   }
 

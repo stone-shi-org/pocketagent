@@ -83,7 +83,13 @@ const llm = http.createServer((req, res) => {
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     try {
-      llmRequests.push(JSON.parse(body));
+      const parsed = JSON.parse(body);
+      // PA-165: a new chat's background title request is not the turn this
+      // demo inspects, and it can land either side of it.
+      const first = parsed.messages?.[0];
+      const isTitleRequest =
+        first?.role === 'system' && String(first.content).startsWith('You write titles for chat conversations');
+      if (!isTitleRequest) llmRequests.push(parsed);
     } catch {
       /* a probe */
     }

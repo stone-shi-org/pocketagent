@@ -31,6 +31,7 @@ import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
 import { toPlannerModelInfos } from '../agent/planner-models.js';
 import { applyEvent, applyEvents, emptyTranscript, markTurnUndone, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { useMarkChatRead } from '../agent/chat-read.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
 import { unlockAudioContext } from '../audio/audio-context.js';
@@ -252,6 +253,9 @@ export function PlannerChatPage({
   onApiError,
 }: Props): JSX.Element {
   const api = useHostApi();
+  // PA-165: a turn that finishes while this chat is on screen has been read.
+  const [turnsFinished, setTurnsFinished] = useState(0);
+  useMarkChatRead('planner', chatId, { active, turnSignal: turnsFinished });
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [providers, setProviders] = useState<PlannerProvider[]>([]);
@@ -946,6 +950,7 @@ export function PlannerChatPage({
         setChat((prev) => (prev ? { ...prev, busy: true } : null));
       } else if (event.kind === 'turn_complete') {
         setSending(false);
+        setTurnsFinished((n) => n + 1);
         setChat((prev) => (prev ? { ...prev, busy: false } : null));
         void refreshSubagents();
         void refreshArtifacts();

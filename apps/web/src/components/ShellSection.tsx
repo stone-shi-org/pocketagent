@@ -1,3 +1,5 @@
+import { chatDotState } from '@pocketagent/protocol';
+import { ChatStatusDot } from './ChatStatusDot.js';
 import { useEffect, useState } from 'react';
 import type { ShellSessionSummary } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
@@ -162,7 +164,7 @@ export function ShellSection({
               title={`${shell.title} — ${shell.cwdLabel}`}
             >
               <span className="chat-title">
-                {shell.live && <span className="live-dot" aria-label="running" />}
+                <ChatStatusDot state={chatDotState(shell)} />
                 {shell.title}
               </span>
               <span className="shell-row-meta">

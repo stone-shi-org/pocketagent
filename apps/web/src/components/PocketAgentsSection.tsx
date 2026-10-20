@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DocWorkspace, PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
+import { plannerChatDotState } from '@pocketagent/protocol';
+import { ChatStatusDot } from './ChatStatusDot.js';
 import { Icon } from './Icon.js';
 import { codeServerLink } from './ProjectList.js';
 import { PlannerDirectoryPicker } from './PlannerDirectoryPicker.js';
@@ -301,6 +303,7 @@ export function PocketAgentsSection({
                   title={chat.title ?? 'Untitled chat'}
                 >
                   <span className="chat-title">
+                    <ChatStatusDot state={plannerChatDotState(chat)} />
                     {chat.mcpClient && (
                       <span title={`Created by MCP client ${chat.mcpClient}`}>
                         <Icon
@@ -338,6 +341,7 @@ export function PocketAgentsSection({
                     title={sub.title ?? 'Untitled chat'}
                   >
                     <span className="chat-title">
+                      <ChatStatusDot state={plannerChatDotState(sub)} />
                       <span className="chat-planner-badge" title="Subagent chat">
                         <Icon name="agent-generic" size={13} />
                       </span>
@@ -475,6 +479,7 @@ export function PocketAgentsSection({
                     title={chat.title ?? 'Untitled chat'}
                   >
                     <span className="chat-title">
+                      <ChatStatusDot state={plannerChatDotState(chat)} />
                       <span className="chat-planner-badge" title="Subagent chat">
                         <Icon name="agent-generic" size={13} />
                       </span>
@@ -668,6 +673,7 @@ export function PocketAgentsSection({
                         title={`${chat.title ?? 'Untitled chat'} (${chat.workspaceName})`}
                       >
                         <span className="chat-title">
+                          <ChatStatusDot state={plannerChatDotState(chat)} />
                           {chat.title ?? 'Untitled chat'}
                           <span className="chat-doc-ws-badge" title={`Agent: ${chat.workspaceName}`}>
                             {chat.workspaceName}

@@ -107,6 +107,8 @@ export async function createTestApp(
   agentInstallFetchScript: ScriptFetcher = stubInstallerFetch,
   /** PA-164: injected so a test can point codex title reads at a fixture directory instead of a real `~/.codex`. */
   codexTranscripts?: CodexTranscriptStore,
+  /** PA-165: anything else a test needs to flip on `BuildAppOptions`. */
+  extra: { plannerAiTitles?: boolean } = {},
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -135,6 +137,8 @@ export async function createTestApp(
     plannerSkillsRoot,
     attachmentStagingDir: path.join(ws.root, 'attachment-staging'),
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
+    // PA-165: off by default, see `BuildAppOptions.plannerAiTitles`.
+    plannerAiTitles: extra.plannerAiTitles ?? false,
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),
     agentInstallFetchScript,

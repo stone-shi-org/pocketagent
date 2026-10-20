@@ -164,6 +164,8 @@ import type {
   DocWorkspaceSearchResponse,
   UndoTurnRequest,
   UndoTurnResponse,
+  ChatReadKind,
+  MarkChatReadRequest,
 } from '@pocketagent/protocol';
 import { DEFAULT_HOST, hostUrl, type HostEndpoint } from './host.js';
 
@@ -384,6 +386,16 @@ export function createApiClient(endpoint: HostEndpoint) {
         '/api/shells/clear-finished',
         { method: 'POST' },
       ),
+
+    /**
+     * PA-165: "this chat is on screen now" — clears its unread dot on every
+     * device. See `useMarkChatRead`.
+     */
+    markChatRead: (kind: ChatReadKind, id: string) =>
+      request<void>('/api/chats/read', {
+        method: 'POST',
+        body: JSON.stringify({ kind, id } satisfies MarkChatReadRequest),
+      }),
 
     /** Drops a chat from the list. Never deletes a transcript. */
     removeChat: (ids: { sessionId?: string; conversationId?: string }) =>

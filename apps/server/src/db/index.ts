@@ -265,6 +265,33 @@ export const TELEGRAM_DDL = `
  * `<dataDir>/doc-workspaces/<id>/versions/<sha256>` so nothing is ever written
  * into the user's host folder and planner file tools cannot delete their own undo history.
  */
+/**
+ * PA-165: when someone last looked at a chat, for the status dot's "unread"
+ * state. `kind` is `session` (a coding session id) or `planner` (a Pocket
+ * Agent chat id); `id` is deliberately not a foreign key, for the
+ * `pruneOldSessions` reason `mcp_owned_work.target_id` gives — orphans are
+ * swept at boot instead. Stored server-side rather than per browser, so
+ * reading a chat on the phone clears it on the desktop too.
+ *
+ * A named constant because it is run twice — as a migration, and as the
+ * idempotent positional-migration repair in `openDatabase`.
+ */
+export const CHAT_READ_MARKS_DDL = `
+  CREATE TABLE IF NOT EXISTS chat_read_marks (
+    kind    TEXT NOT NULL,
+    id      TEXT NOT NULL,
+    read_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, id)
+  );
+`;
+
+/**
+ * PA-165: key in `settings` holding the epoch ms read tracking started. A chat
+ * with no read mark counts as read up to this instant, so upgrading does not
+ * light up every chat that finished a turn before the feature existed.
+ */
+export const CHAT_READ_MARKS_EPOCH_KEY = 'chat_read_marks_epoch';
+
 export const DOC_WORKSPACES_DDL = `
   CREATE TABLE IF NOT EXISTS doc_workspaces (
     id                 TEXT PRIMARY KEY,
@@ -1669,6 +1696,9 @@ export const MIGRATIONS: readonly string[] = [
   // PA-148: Multiple Pocket Agent LLM providers (`planner_providers`) and
   // per-provider model catalog (`planner_models.provider_id`).
   PLANNER_PROVIDERS_DDL,
+
+  // PA-165: read marks for the chat status dot.
+  CHAT_READ_MARKS_DDL,
 ];
 
 /**
@@ -2246,6 +2276,19 @@ export function openDatabase(databasePath: string): Db {
     db.exec('ALTER TABLE planner_chats ADD COLUMN doc_workspace_id TEXT REFERENCES doc_workspaces(id) ON DELETE SET NULL');
     db.exec('CREATE INDEX IF NOT EXISTS idx_planner_chats_doc_workspace ON planner_chats (doc_workspace_id)');
   }
+  // PA-165, same positional-migration hazard: `markChatRead` writes this table
+  // on every chat view. The epoch is written once, the first time the table
+  // exists, and orphaned marks (a pruned session, a deleted chat) are swept.
+  db.exec(CHAT_READ_MARKS_DDL);
+  db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+    CHAT_READ_MARKS_EPOCH_KEY,
+    String(Date.now()),
+  );
+  db.exec(`
+    DELETE FROM chat_read_marks
+     WHERE (kind = 'session' AND id NOT IN (SELECT id FROM sessions))
+        OR (kind = 'planner' AND id NOT IN (SELECT id FROM planner_chats))
+  `);
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;

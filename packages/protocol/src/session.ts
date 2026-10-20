@@ -178,6 +178,13 @@ export const SessionInfo = z.object({
    * PA-76: number of tool approvals currently pending a decision from a human.
    */
   pendingApprovalsCount: z.number().int().nonnegative().default(0),
+  /**
+   * PA-165: epoch ms the session's most recent turn completed, or null when no
+   * turn has completed since this server started (in memory only — a restart
+   * forgets it, which reads as "nothing unread" rather than every session
+   * lighting up). What `ChatSummary.unread` compares a read mark against.
+   */
+  lastTurnEndedAt: z.number().int().nullable().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 
@@ -636,6 +643,19 @@ export const ChatSummary = z.object({
   mcpClient: z.string().nullable().optional(),
   /** Carried from the representative live session for an actionable row badge. */
   rateLimit: RateLimitEvent.nullable(),
+  /**
+   * PA-165: the live session has a tool call parked on a human. Optional so
+   * every older construction site (and an older backend's response) stays
+   * valid; absent means no.
+   */
+  awaitingApproval: z.boolean().optional(),
+  /**
+   * PA-165: the live session's last turn finished after anyone last looked at
+   * it (`POST /api/chats/read`). Structured sessions only — a terminal's
+   * output never stops moving, so "finished" has no meaning there. See
+   * `chatDotState`.
+   */
+  unread: z.boolean().optional(),
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
