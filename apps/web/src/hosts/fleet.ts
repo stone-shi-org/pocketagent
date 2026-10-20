@@ -82,10 +82,18 @@ export function announceFleetChanged(): void {
 export const fleetChatFor = async (endpoint: HostEndpoint, pocketAgentId: string): Promise<string> => {
   const client = createApiClient(endpoint);
   const { chats } = await client.listPlannerChats(pocketAgentId);
-  // A person's chat only: not a subagent's, a scheduled job's or one an MCP
-  // client started, which would open someone else's conversation.
+  // A person's chat only: not a subagent's, a scheduled job's, one attached to
+  // a document workspace, or one an MCP client started, which would open
+  // someone else's conversation.
   const newest = [...chats]
-    .filter((chat) => chat.workspaceId === pocketAgentId && !chat.parentChatId && !chat.cronJobId && !chat.mcpClient)
+    .filter(
+      (chat) =>
+        chat.workspaceId === pocketAgentId &&
+        !chat.docWorkspaceId &&
+        !chat.parentChatId &&
+        !chat.cronJobId &&
+        !chat.mcpClient,
+    )
     .sort((a, b) => b.lastActivityAt - a.lastActivityAt)[0];
   if (newest) return newest.id;
   const created = await client.createPlannerChat({ workspaceId: pocketAgentId, title: 'Fleet' });

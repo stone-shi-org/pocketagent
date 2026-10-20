@@ -1885,8 +1885,21 @@ export class PlannerChatService {
    * report back.
    */
   removeAllForWorkspace(workspaceId: string): number {
+    const allChats = readPlannerChats(this.opts.db);
+    const byId = new Map(allChats.map((c) => [c.id, c]));
+    const inDocWorkspace = (chat: PlannerChat): boolean => {
+      let cur: PlannerChat | undefined = chat;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur.id)) {
+        if (cur.docWorkspaceId) return true;
+        seen.add(cur.id);
+        cur = cur.parentChatId ? byId.get(cur.parentChatId) : undefined;
+      }
+      return false;
+    };
     let removed = 0;
     for (const chat of this.list(workspaceId)) {
+      if (inDocWorkspace(chat)) continue;
       if (this.remove(chat.id)) removed += 1;
     }
     return removed;

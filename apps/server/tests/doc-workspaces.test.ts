@@ -1836,6 +1836,45 @@ describe('Document Workspaces Phase 3: Document Search (PA-144)', () => {
       await t.cleanup();
     }
   });
+
+  it('clearing finished chats for a Pocket Agent does not delete chats attached to a document workspace (PA-166)', async () => {
+    const t = await createTestApp();
+    try {
+      const wsPath = path.join(hostDir, 'clear-chats-doc-ws');
+      fs.mkdirSync(wsPath, { recursive: true });
+      const docWs = t.context.docWorkspaces.create({ path: wsPath });
+      const agentWs = t.context.plannerWorkspaces.getDefault()!;
+
+      const agentChat = t.context.plannerChats.create({
+        workspaceId: agentWs.id,
+        title: 'Standalone Agent Chat',
+      });
+      const docChat = t.context.plannerChats.create({
+        workspaceId: agentWs.id,
+        docWorkspaceId: docWs.id,
+        title: 'Workspace Attached Chat',
+      });
+      const docSubChat = t.context.plannerChats.create({
+        workspaceId: agentWs.id,
+        parentChatId: docChat.id,
+        title: 'Workspace Subagent Chat',
+      });
+
+      const delRes = await t.app.inject({
+        method: 'DELETE',
+        url: `/api/planner/workspaces/${agentWs.id}/chats`,
+        headers: authHeaders(t.cookie),
+      });
+      expect(delRes.statusCode).toBe(200);
+      expect(delRes.json()).toEqual({ removed: 1 });
+
+      expect(t.context.plannerChats.get(agentChat.id)).toBeNull();
+      expect(t.context.plannerChats.get(docChat.id)?.title).toBe('Workspace Attached Chat');
+      expect(t.context.plannerChats.get(docSubChat.id)?.title).toBe('Workspace Subagent Chat');
+    } finally {
+      await t.cleanup();
+    }
+  });
 });
 
 

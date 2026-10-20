@@ -210,7 +210,7 @@ describe('PocketAgentsSection (PA-106)', () => {
     expect(htmlWithCodeServer).toContain('href="https://code.example.com/?folder=%2Fpath%2Falpha"');
   });
 
-  it('renders document workspaces group with attached chats nested underneath (PA-142)', () => {
+  it('renders document workspaces group with attached chats nested underneath and does not duplicate them under Pocket Agents (PA-142, PA-166)', () => {
     const html = renderToStaticMarkup(
       <PocketAgentsSection
         workspaces={workspaces}
@@ -240,6 +240,19 @@ describe('PocketAgentsSection (PA-106)', () => {
             busy: false,
             thinkingEnabled: true,
           },
+          {
+            id: 'chat-doc-sub-1',
+            workspaceId: 'ws-1',
+            workspaceName: 'Agent Alpha',
+            parentChatId: 'chat-doc-1',
+            title: 'Subagent Clause Lookup',
+            lastModelId: null,
+            createdAt: 1100,
+            lastActivityAt: 1100,
+            skipToolApprovalsEnabled: false,
+            busy: false,
+            thinkingEnabled: true,
+          },
         ]}
         refresh={async () => {}}
         onOpenChat={() => {}}
@@ -250,7 +263,16 @@ describe('PocketAgentsSection (PA-106)', () => {
     expect(html).toContain('<div class="section-head"><h2 class="section-heading">Workspaces</h2><button type="button" class="round-btn plain section-head-action" aria-label="Add document workspace"');
     expect(html).toContain('Legal Matter');
     expect(html).toContain('Review Clause 4');
+    expect(html).toContain('Subagent Clause Lookup');
     expect(html).toContain('aria-label="New chat in Legal Matter"');
+    // PA-166: "Review Clause 4" and its subagent must appear only under Workspaces -> Legal Matter,
+    // and Agent Alpha (under Pocket Agents) must show "No chats yet" rather than a duplicate row.
+    const [pocketAgentsPart, workspacesPart] = html.split('<div class="doc-workspaces-group">');
+    expect(pocketAgentsPart).toContain('No chats yet');
+    expect(pocketAgentsPart).not.toContain('Review Clause 4');
+    expect(pocketAgentsPart).not.toContain('Subagent Clause Lookup');
+    expect(workspacesPart).toContain('Review Clause 4');
+    expect(workspacesPart).toContain('Subagent Clause Lookup');
   });
 });
 

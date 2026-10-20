@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { DocWorkspace, PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { plannerChatDotState } from '@pocketagent/protocol';
 import { ChatStatusDot } from './ChatStatusDot.js';
@@ -11,6 +11,26 @@ import {
   saveCollapsedPocketAgents,
   saveCollapsedPocketAgentCron,
 } from '../hosts/tree-pref.js';
+
+/**
+ * PA-166: A chat attached to a document workspace (or a subagent chat spawned
+ * by one) lives under the "Workspaces" section rather than under its Pocket
+ * Agent in "Pocket Agents", so a workspace chat is not rendered and updated in
+ * two places at once.
+ */
+function belongsToDocWorkspace(
+  chat: PlannerChat,
+  chatById: ReadonlyMap<string, PlannerChat>,
+): boolean {
+  let cur: PlannerChat | undefined = chat;
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur.id)) {
+    if (cur.docWorkspaceId) return true;
+    seen.add(cur.id);
+    cur = cur.parentChatId ? chatById.get(cur.parentChatId) : undefined;
+  }
+  return false;
+}
 
 interface Props {
   /** `null` while the first load is still in flight — see `usePlannerChats`. */
@@ -109,11 +129,15 @@ export function PocketAgentsSection({
       return next;
     });
 
+  const chatById = useMemo(() => new Map(chats.map((c) => [c.id, c])), [chats]);
+
   // Auto-expand scheduled jobs if activeChatId belongs to a scheduled job chat
   useEffect(() => {
     if (activeChatId) {
       for (const ws of workspaces ?? []) {
-        const wsChats = chats.filter((c) => c.workspaceId === ws.id);
+        const wsChats = chats.filter(
+          (c) => c.workspaceId === ws.id && !belongsToDocWorkspace(c, chatById),
+        );
         if (wsChats.some((c) => c.id === activeChatId && Boolean(c.cronJobId))) {
           setCronCollapsed((prev) => {
             if (!prev.has(ws.id)) return prev;
@@ -125,7 +149,7 @@ export function PocketAgentsSection({
         }
       }
     }
-  }, [activeChatId, workspaces, chats, hostId]);
+  }, [activeChatId, workspaces, chats, chatById, hostId]);
 
   const newChat = (workspaceId: string): void => {
     setBusy((prev) => new Set(prev).add(workspaceId));
@@ -250,8 +274,10 @@ export function PocketAgentsSection({
   const deleteAllChats = (workspaceId: string): void => {
     setMenuFor(null);
     setBusy((prev) => new Set(prev).add(workspaceId));
-    // PA-58: close any open tabs belonging to the workspace's chats before clearing
-    const wsChats = chats.filter((c) => c.workspaceId === workspaceId);
+    // PA-58 / PA-166: close any open tabs belonging to the agent's own chats before clearing
+    const wsChats = chats.filter(
+      (c) => c.workspaceId === workspaceId && !belongsToDocWorkspace(c, chatById),
+    );
     for (const chat of wsChats) {
       onCloseChat?.(chat.id);
     }
@@ -282,7 +308,9 @@ export function PocketAgentsSection({
       <h2 className="section-heading">Pocket Agents</h2>
       {workspaces.map((ws) => {
         const isCollapsed = collapsed.has(ws.id);
-        const wsChats = chats.filter((c) => c.workspaceId === ws.id);
+        const wsChats = chats.filter(
+          (c) => c.workspaceId === ws.id && !belongsToDocWorkspace(c, chatById),
+        );
         const mainChats = wsChats.filter((c) => !c.parentChatId);
         const cronChats = mainChats.filter((c) => Boolean(c.cronJobId));
         const regularChats = mainChats.filter((c) => !c.cronJobId);
@@ -315,11 +343,6 @@ export function PocketAgentsSection({
                       </span>
                     )}
                     {chat.title ?? 'Untitled chat'}
-                    {chat.docWorkspaceName && (
-                      <span className="chat-doc-ws-badge" title={`Attached workspace: ${chat.docWorkspaceName}`}>
-                        {chat.docWorkspaceName}
-                      </span>
-                    )}
                   </span>
                 </button>
                 <button
@@ -663,35 +686,65 @@ export function PocketAgentsSection({
                 <div className="project-empty">No attached chats yet</div>
               )}
               {!isCollapsed &&
-                attachedChats.map((chat) => (
-                  <div key={chat.id} className="planner-chat-group">
-                    <div className="chat-line master-chat-line">
-                      <button
-                        type="button"
-                        className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
-                        onClick={() => onOpenChat(chat.id)}
-                        title={`${chat.title ?? 'Untitled chat'} (${chat.workspaceName})`}
-                      >
-                        <span className="chat-title">
-                          <ChatStatusDot state={plannerChatDotState(chat)} />
-                          {chat.title ?? 'Untitled chat'}
-                          <span className="chat-doc-ws-badge" title={`Agent: ${chat.workspaceName}`}>
-                            {chat.workspaceName}
+                attachedChats.map((chat) => {
+                  const children = chats.filter((c) => c.parentChatId === chat.id);
+                  return (
+                    <div key={chat.id} className="planner-chat-group">
+                      <div className="chat-line master-chat-line">
+                        <button
+                          type="button"
+                          className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
+                          onClick={() => onOpenChat(chat.id)}
+                          title={`${chat.title ?? 'Untitled chat'} (${chat.workspaceName})`}
+                        >
+                          <span className="chat-title">
+                            <ChatStatusDot state={plannerChatDotState(chat)} />
+                            {chat.title ?? 'Untitled chat'}
+                            <span className="chat-doc-ws-badge" title={`Agent: ${chat.workspaceName}`}>
+                              {chat.workspaceName}
+                            </span>
                           </span>
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className="chat-remove"
-                        onClick={() => removeChat(chat.id)}
-                        aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
-                        title="Delete chat"
-                      >
-                        <Icon name="close" size={14} />
-                      </button>
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-remove"
+                          onClick={() => removeChat(chat.id)}
+                          aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
+                          title="Delete chat"
+                        >
+                          <Icon name="close" size={14} />
+                        </button>
+                      </div>
+                      {children.map((sub) => (
+                        <div key={sub.id} className="chat-line subagent-chat-line">
+                          <button
+                            type="button"
+                            className={`chat-row subagent-chat-row${activeChatId === sub.id ? ' active' : ''}`}
+                            onClick={() => onOpenChat(sub.id)}
+                            title={sub.title ?? 'Untitled chat'}
+                          >
+                            <span className="chat-title">
+                              <ChatStatusDot state={plannerChatDotState(sub)} />
+                              <span className="chat-planner-badge" title="Subagent chat">
+                                <Icon name="agent-generic" size={13} />
+                              </span>
+                              {sub.title ?? 'Untitled chat'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            className="chat-remove"
+                            onClick={() => removeChat(sub.id)}
+                            aria-label={`Delete ${sub.title ?? 'Untitled chat'}`}
+                            title="Delete chat"
+                          >
+                            <Icon name="close" size={14} />
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
             </div>
           );
         })}
