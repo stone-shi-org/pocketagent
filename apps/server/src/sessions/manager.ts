@@ -222,6 +222,11 @@ export interface ManagerOptions {
    * or `conversation_summaries.db`). Optional so tests can omit it.
    */
   agyTitleFor?: (agentSessionId: string) => Promise<string | null>;
+  /**
+   * Looks up codex's own generated title for one conversation (`session_index.jsonl`
+   * or `state_5.sqlite`). Optional so tests can omit it.
+   */
+  codexTitleFor?: (agentSessionId: string) => Promise<string | null>;
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -1596,9 +1601,15 @@ export class SessionManager {
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // No derived-title lookup wired yet for codex; tracked as a follow-up to PA-163.
+    // Pick up codex's own generated title (from `session_index.jsonl` or
+    // `state_5.sqlite`) on each completed turn, and once on `session_started`
+    // when resuming an existing conversation.
     session.on('event', (_seq, event) => {
-      if (event.kind === 'session_started') this.persist(session);
+      if (event.kind === 'session_started') {
+        this.persist(session);
+        if (args.resumeAgentSessionId) void this.refreshDerivedTitle(session);
+      }
+      if (event.kind === 'turn_complete') void this.refreshDerivedTitle(session);
     });
 
     try {
@@ -1622,8 +1633,8 @@ export class SessionManager {
   }
 
   /**
-   * Pick up the agent CLI's own generated title for a conversation (Claude Code
-   * or agy).
+   * Pick up the agent CLI's own generated title for a conversation (Claude Code,
+   * agy, or Codex).
    *
    * A session's own `spec.title` is fixed at creation and never updated —
    * but the CLI process behind a structured session writes a real,
@@ -1641,6 +1652,9 @@ export class SessionManager {
       if (session instanceof AgySession) {
         if (!this.opts.agyTitleFor) return;
         rawTitle = await this.opts.agyTitleFor(agentSessionId);
+      } else if (session instanceof CodexSession) {
+        if (!this.opts.codexTitleFor) return;
+        rawTitle = await this.opts.codexTitleFor(agentSessionId);
       } else if (session instanceof StructuredSession) {
         if (!this.opts.titleFor) return;
         rawTitle = await this.opts.titleFor(session.spec.cwd, agentSessionId);

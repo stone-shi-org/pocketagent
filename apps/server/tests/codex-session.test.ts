@@ -90,6 +90,16 @@ describe('CodexSession', () => {
     expect(session.agentSessionId).toMatch(/^thread_test/);
   });
 
+  it('stores and returns derivedTitle via setDerivedTitle without mutating spec.title (PA-164)', () => {
+    server = makeServer();
+    session = new CodexSession(makeSpec({ title: 'Codex · project' }), server);
+    expect(session.derivedTitle).toBeNull();
+
+    session.setDerivedTitle('Derived Codex Thread Title');
+    expect(session.derivedTitle).toBe('Derived Codex Thread Title');
+    expect(session.spec.title).toBe('Codex · project');
+  });
+
   it('reports the real starting model from thread/start, not a hardcoded null', async () => {
     server = makeServer();
     session = new CodexSession(makeSpec(), server);

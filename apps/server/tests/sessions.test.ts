@@ -16,6 +16,8 @@ import { clampTitle, CreateSessionRequest, MAX_SESSION_TITLE_CHARS } from '@pock
 import { titleOf } from '../src/webhooks/index.js';
 import { formatCronRunTitle } from '../src/cron/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
+import { CodexTranscriptStore } from '../src/conversations/codex.js';
+import Database from 'better-sqlite3';
 
 const AGY_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1152,6 +1154,109 @@ describe('session title clamping & agy derived titles (PA-163)', () => {
         title: string;
       };
       expect(freshRow.title).toBe('Fresh Agy Conversation Title');
+      fresh.terminate();
+    });
+  });
+
+  describe('codex derived titles (PA-164)', () => {
+    let t: TestApp;
+    let codexDir: string;
+    let sessionIndexPath: string;
+    let stateDbPath: string;
+
+    beforeEach(async () => {
+      codexDir = fs.mkdtempSync('/tmp/pa-pa164-codex-');
+      sessionIndexPath = path.join(codexDir, 'session_index.jsonl');
+      stateDbPath = path.join(codexDir, 'state_5.sqlite');
+      const codexTranscripts = new CodexTranscriptStore({ codexDir });
+      t = await createTestApp(
+        { POCKETAGENT_CODEX_BIN: CODEX_FIXTURE },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        codexTranscripts,
+      );
+    });
+
+    afterEach(async () => {
+      await t.cleanup();
+      fs.rmSync(codexDir, { recursive: true, force: true });
+    });
+
+    it('codex manager: a resumed codex session picks up its derived title on session_started / turn_complete and persists it, and a new session picks up its title from session_index.jsonl or state_5.sqlite after turn_complete', async () => {
+      // Seed state_5.sqlite with a title for `thread_existing`
+      const db = new Database(stateDbPath);
+      db.exec(`
+        CREATE TABLE threads (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT ''
+        );
+      `);
+      db.prepare('INSERT INTO threads (id, title) VALUES (?, ?)').run(
+        'thread_existing',
+        'Resumed Codex Thread From SQLite',
+      );
+      db.close();
+
+      // 1. Resumed codex session picks up its title on session_started
+      const resumed = await t.context.sessions.create({
+        agent: 'codex',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        transport: 'structured',
+        resumeAgentSessionId: 'thread_existing',
+        title: TES_46_LONG_TITLE,
+      });
+      if (resumed.transport !== 'structured') throw new Error('expected structured session');
+
+      await waitFor(
+        () => t.context.sessions.toInfo(resumed).title === 'Resumed Codex Thread From SQLite',
+      );
+      const resumedRow = t.db.prepare('SELECT title FROM sessions WHERE id = ?').get(resumed.id) as {
+        title: string;
+      };
+      expect(resumedRow.title).toBe('Resumed Codex Thread From SQLite');
+      resumed.terminate();
+
+      // 2. Brand-new codex session picks up its title from session_index.jsonl after the first turn
+      const fresh = await t.context.sessions.create({
+        agent: 'codex',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        transport: 'structured',
+      });
+      if (fresh.transport !== 'structured') throw new Error('expected structured session');
+      expect(t.context.sessions.toInfo(fresh).title).toBe(`Codex · ${path.basename(t.projectDir)}`);
+      expect(fresh.agentSessionId).toBeTruthy();
+
+      fs.writeFileSync(
+        sessionIndexPath,
+        JSON.stringify({
+          id: fresh.agentSessionId,
+          thread_name: 'Fresh Codex Thread Title',
+          updated_at: '2026-10-20T18:00:00Z',
+        }) + '\n',
+      );
+
+      fresh.prompt('hello codex');
+      await waitFor(() =>
+        fresh.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+      );
+      await waitFor(
+        () => t.context.sessions.toInfo(fresh).title === 'Fresh Codex Thread Title',
+      );
+      const freshRow = t.db.prepare('SELECT title FROM sessions WHERE id = ?').get(fresh.id) as {
+        title: string;
+      };
+      expect(freshRow.title).toBe('Fresh Codex Thread Title');
       fresh.terminate();
     });
   });

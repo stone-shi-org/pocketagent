@@ -46,6 +46,7 @@ import { PushService } from './push/index.js';
 import { wirePlannerApprovalPush } from './push/planner-approvals.js';
 import { ConversationStore } from './conversations/index.js';
 import { AgyTranscriptStore } from './conversations/agy.js';
+import { CodexTranscriptStore } from './conversations/codex.js';
 import { PiTranscriptStore } from './conversations/pi.js';
 import { AdoptionService } from './adopt/index.js';
 import { ProjectService } from './projects/index.js';
@@ -188,6 +189,8 @@ export interface BuildAppOptions {
   db?: Db;
   /** Injected in tests to point at a fixture directory instead of a real `~/.gemini`. */
   agyTranscripts?: AgyTranscriptStore;
+  /** Injected in tests to point at a fixture directory instead of a real `~/.codex`. */
+  codexTranscripts?: CodexTranscriptStore;
   /** Injected in tests to point at a fixture directory instead of a real `~/.pi`. */
   piTranscripts?: PiTranscriptStore;
   /**
@@ -438,6 +441,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const childEnv = buildChildEnv({ cwd: config.workspaceRoots[0] ?? process.cwd() });
   const conversations = new ConversationStore({ workspaces });
   const agyTranscripts = options.agyTranscripts ?? new AgyTranscriptStore();
+  const codexTranscripts = options.codexTranscripts ?? new CodexTranscriptStore();
   const piTranscripts = options.piTranscripts ?? new PiTranscriptStore();
   const adoption = new AdoptionService({
     socket: config.adoptTmuxSocket,
@@ -493,6 +497,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     globalSkipPermissionsDefault: config.globalSkipPermissionsDefault,
     titleFor: (cwd, agentSessionId) => conversations.titleFor(cwd, agentSessionId),
     agyTitleFor: (agentSessionId) => agyTranscripts.titleFor(agentSessionId),
+    codexTitleFor: (agentSessionId) => codexTranscripts.titleFor(agentSessionId),
   });
   if (sessions.getGlobalSkipPermissions()) {
     app.log.warn(
@@ -826,6 +831,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     push,
     conversations,
     agyTranscripts,
+    codexTranscripts,
     piTranscripts,
     adoption,
     projects,

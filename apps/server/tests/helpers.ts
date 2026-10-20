@@ -6,6 +6,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config/index.js';
 import { openDatabase, type Db } from '../src/db/index.js';
 import type { AgyTranscriptStore } from '../src/conversations/agy.js';
+import type { CodexTranscriptStore } from '../src/conversations/codex.js';
 import type { PiTranscriptStore } from '../src/conversations/pi.js';
 import type { PocketContext } from '../src/types.js';
 import type { AgentAdapter } from '../src/agents/types.js';
@@ -104,6 +105,8 @@ export async function createTestApp(
   geminiFetch?: typeof fetch,
   /** PA-104: defaults to a stub, so no test can ever download a real installer. */
   agentInstallFetchScript: ScriptFetcher = stubInstallerFetch,
+  /** PA-164: injected so a test can point codex title reads at a fixture directory instead of a real `~/.codex`. */
+  codexTranscripts?: CodexTranscriptStore,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -126,6 +129,7 @@ export async function createTestApp(
     config,
     db,
     agyTranscripts,
+    codexTranscripts,
     piTranscripts,
     plannerWorkspacesRoot,
     plannerSkillsRoot,
