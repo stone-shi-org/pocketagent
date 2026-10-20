@@ -9,7 +9,7 @@ import type {
   SessionInfo,
   SessionStatus,
 } from '@pocketagent/protocol';
-import { isTerminalStatus, usesClaudeTranscripts } from '@pocketagent/protocol';
+import { clampTitle, isTerminalStatus, usesClaudeTranscripts } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import {
@@ -733,44 +733,33 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   // path so this does not pile up duplicate chats.
   const canResume = !alive && !!session?.agentSessionId;
   const resumeAndSend = useCallback(
-    (text: string, image?: PromptImage, attachments?: string[]): boolean => {
-      if (!session?.agentSessionId || resuming) return false;
+    (text: string, image?: PromptImage, attachments?: string[]): Promise<boolean> => {
+      if (!session?.agentSessionId || resuming) return Promise.resolve(false);
       setResuming(true);
-      void api
-        .createSession({
-          // The whole server contract for "continue this conversation on a
-          // different provider" is this one field. `resumeAgentSessionId` is
-          // agent-namespaced, so the picker only ever offers agents in the
-          // same namespace (see `resumeAgentOptions`) — anything else would
-          // hand an id to an agent that cannot read it.
-          agent: resumeAgent ?? session.agent,
-          cwd: session.cwd,
-          cols: 80,
-          rows: 24,
-          transport: 'structured',
-          resumeAgentSessionId: session.agentSessionId,
-          forkSession: false,
-          title: session.title,
-          skipPermissions: session.skipPermissionsEnabled,
-          model: transcript.model ?? undefined,
-          effort: transcript.effort !== undefined ? transcript.effort : undefined,
-        })
-        .then((created) => {
-          setPendingPrompt(created.id, text, image, attachments);
-          onResumed(created.id);
-        })
+      return continueFinishedSession({
+        api,
+        session,
+        resumeAgent,
+        model: transcript.model,
+        effort: transcript.effort,
+        text,
+        image,
+        attachments,
+        onResumed,
+      })
+        .then(() => true)
         .catch((err) => {
           onApiError(err);
           setNotice(err instanceof ApiError ? err.message : 'Could not continue this chat.');
           setResuming(false);
+          return false;
         });
-      return true;
     },
-    [session, resuming, resumeAgent, onApiError, onResumed, transcript.model, transcript.effort],
+    [api, session, resuming, resumeAgent, onApiError, onResumed, transcript.model, transcript.effort],
   );
 
   const handleSend = useCallback(
-    (text: string, image?: PromptImage, attachments?: string[]): boolean =>
+    (text: string, image?: PromptImage, attachments?: string[]): boolean | Promise<boolean> =>
       alive ? sendPrompt(text, image, attachments) : resumeAndSend(text, image, attachments),
     [alive, sendPrompt, resumeAndSend],
   );
@@ -1235,4 +1224,43 @@ function mergePending(
   const extra = requests.filter((r) => !known.has(r.id));
   if (extra.length === 0) return state;
   return { ...state, pending: [...state.pending, ...extra] };
+}
+
+/**
+ * Continue a finished session by creating a new structured session bound to
+ * its `agentSessionId` (with its `title` clamped to at most 128 chars) and
+ * queueing the typed prompt for delivery as soon as the new session connects.
+ */
+export async function continueFinishedSession(opts: {
+  api: Pick<ReturnType<typeof useHostApi>, 'createSession'>;
+  session: Pick<SessionInfo, 'agent' | 'cwd' | 'agentSessionId' | 'title' | 'skipPermissionsEnabled'>;
+  resumeAgent?: string | null;
+  model?: string | null;
+  effort?: EffortLevel | null;
+  text: string;
+  image?: PromptImage;
+  attachments?: string[];
+  onResumed: (createdId: string) => void;
+}): Promise<SessionInfo> {
+  const created = await opts.api.createSession({
+    // The whole server contract for "continue this conversation on a
+    // different provider" is this one field. `resumeAgentSessionId` is
+    // agent-namespaced, so the picker only ever offers agents in the
+    // same namespace (see `resumeAgentOptions`) — anything else would
+    // hand an id to an agent that cannot read it.
+    agent: opts.resumeAgent ?? opts.session.agent,
+    cwd: opts.session.cwd,
+    cols: 80,
+    rows: 24,
+    transport: 'structured',
+    resumeAgentSessionId: opts.session.agentSessionId!,
+    forkSession: false,
+    title: clampTitle(opts.session.title),
+    skipPermissions: opts.session.skipPermissionsEnabled,
+    model: opts.model ?? undefined,
+    effort: opts.effort !== undefined ? opts.effort : undefined,
+  });
+  setPendingPrompt(created.id, opts.text, opts.image, opts.attachments);
+  opts.onResumed(created.id);
+  return created;
 }

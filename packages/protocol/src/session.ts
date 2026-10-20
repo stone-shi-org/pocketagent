@@ -34,6 +34,32 @@ export function isTerminalStatus(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
+/** Maximum UTF-16 code units stored for a session title across all creation/derived sources. */
+export const MAX_SESSION_TITLE_CHARS = 128;
+
+/**
+ * Trim, collapse whitespace, and truncate to at most `max` UTF-16 code units
+ * with a trailing ellipsis (`…`), stepping back if the cut would split a
+ * UTF-16 surrogate pair in half.
+ *
+ * Accepts a non-number second argument so `z.string().transform(clampTitle)`
+ * (where Zod passes `RefinementCtx` as the second parameter) uses the default
+ * limit instead of treating the context object as `max`.
+ */
+export function clampTitle(s: string, max: unknown = MAX_SESSION_TITLE_CHARS): string {
+  const limit = typeof max === 'number' ? max : MAX_SESSION_TITLE_CHARS;
+  if (limit <= 0) return '';
+  const normalized = s.trim().replace(/\s+/g, ' ');
+  if (normalized.length <= limit) return normalized;
+  if (limit === 1) return '…';
+  let end = limit - 1;
+  const prev = normalized.charCodeAt(end - 1);
+  if (end > 0 && prev >= 0xd800 && prev <= 0xdbff) {
+    end -= 1;
+  }
+  return `${normalized.slice(0, end)}…`;
+}
+
 /** Session metadata as exposed to clients. Never includes env or resolved argv. */
 export const SessionInfo = z.object({
   id: z.string(),

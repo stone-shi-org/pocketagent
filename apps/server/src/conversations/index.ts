@@ -4,7 +4,7 @@ import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { PromptImage, type AgentEvent, type ConversationInfo } from '@pocketagent/protocol';
+import { clampTitle, PromptImage, type AgentEvent, type ConversationInfo } from '@pocketagent/protocol';
 import { normalizeSdkMessage } from '../sessions/normalize.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 
@@ -491,7 +491,8 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
   // A conversation started headlessly never gets an `ai-title`; the opening
   // prompt (or slash command) is a far better label than "Untitled".
   const promptForTitle = firstPrompt ?? slashPrompt;
-  meta.title = aiTitle ?? (promptForTitle ? fallbackTitle(promptForTitle) : null);
+  const rawTitle = aiTitle ?? (promptForTitle ? fallbackTitle(promptForTitle) : null);
+  meta.title = rawTitle ? clampTitle(rawTitle) : null;
 
   // A slash command, no reply, and nothing a human typed: the residue of a
   // headless probe rather than a conversation. `/clear` in a real chat still

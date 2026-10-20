@@ -79,12 +79,13 @@ const MAX_PICKER_RESULTS = 8;
 interface Props {
   sessionId: string;
   /**
-   * Returns false when the socket is down, so the draft (and any attached
-   * image) is kept rather than cleared. `image` is only ever set for a
-   * structured Claude Agent SDK session — see `readImageFile`'s caller here
-   * for the only place one gets attached.
+   * Returns false (or a promise resolving to false) when the socket is down or
+   * session resume fails, so the draft (and any attached image/files) is kept
+   * rather than cleared. `image` is only ever set for a structured Claude Agent
+   * SDK session — see `readImageFile`'s caller here for the only place one gets
+   * attached.
    */
-  onSend: (text: string, image?: PromptImage, attachments?: string[]) => boolean;
+  onSend: (text: string, image?: PromptImage, attachments?: string[]) => boolean | Promise<boolean>;
   disabled: boolean;
   /**
    * PA-136: uploads one non-image file (`POST /api/attachments`) and resolves
@@ -604,6 +605,29 @@ export function PromptBox({
     uploadControllers.current.clear();
   }
 
+  function recordSentAndClear(sentText: string): void {
+    if (sentText.trim()) {
+      const trimmed = sentText.trim();
+      if (historyKey) {
+        sentHistoryRef.current = appendPromptHistory(historyKey, trimmed);
+      } else {
+        sentHistoryRef.current = [
+          ...sentHistoryRef.current.filter((h) => h !== trimmed),
+          trimmed,
+        ];
+      }
+      historyIndexRef.current = -1;
+      draftBeforeHistoryRef.current = '';
+    }
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      /* private browsing */
+    }
+    setText('');
+    clearAttachments();
+  }
+
   function send(): void {
     const value = text;
     if ((value.length === 0 && !hasAttachment) || disabled || value.length > LIMITS.maxInputChars) return;
@@ -616,22 +640,13 @@ export function PromptBox({
       return;
     }
     void unlockAudioContext();
-    if (onSend(value, attachedImage ?? undefined, sendableIds())) {
-      if (value.trim()) {
-        const trimmed = value.trim();
-        if (historyKey) {
-          sentHistoryRef.current = appendPromptHistory(historyKey, trimmed);
-        } else {
-          sentHistoryRef.current = [
-            ...sentHistoryRef.current.filter((h) => h !== trimmed),
-            trimmed,
-          ];
-        }
-        historyIndexRef.current = -1;
-        draftBeforeHistoryRef.current = '';
-      }
-      setText('');
-      clearAttachments();
+    const sent = onSend(value, attachedImage ?? undefined, sendableIds());
+    if (typeof sent === 'boolean') {
+      if (sent) recordSentAndClear(value);
+    } else {
+      void sent.then((ok) => {
+        if (ok) recordSentAndClear(value);
+      });
     }
   }
 
@@ -774,22 +789,11 @@ export function PromptBox({
         setText(fullText);
         return;
       }
-      if (onSend(fullText, attachedImage ?? undefined, sendableIds())) {
-        if (fullText.trim()) {
-          const finalTrimmed = fullText.trim();
-          if (historyKey) {
-            sentHistoryRef.current = appendPromptHistory(historyKey, finalTrimmed);
-          } else {
-            sentHistoryRef.current = [
-              ...sentHistoryRef.current.filter((h) => h !== finalTrimmed),
-              finalTrimmed,
-            ];
-          }
-          historyIndexRef.current = -1;
-          draftBeforeHistoryRef.current = '';
-        }
-        setText('');
-        clearAttachments();
+      const sent = await onSend(fullText, attachedImage ?? undefined, sendableIds());
+      if (sent) {
+        recordSentAndClear(fullText);
+      } else {
+        setText(fullText);
       }
     } else {
       setText((prev) => (prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed));

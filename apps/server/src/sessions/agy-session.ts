@@ -328,12 +328,17 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   get globalBypassActive(): boolean {
     return false;
   }
-  /** No transcript store to derive a title from; the fixed creation-time title stands. */
+  private _derivedTitle: string | null = null;
+  /**
+   * The conversation's own title from agy's on-disk annotations or summaries
+   * database, once `SessionManager` has read it. Supersedes `spec.title` for
+   * display without mutating `spec` itself.
+   */
   get derivedTitle(): string | null {
-    return null;
+    return this._derivedTitle;
   }
-  setDerivedTitle(_title: string): void {
-    // No-op: see `derivedTitle`.
+  setDerivedTitle(title: string): void {
+    this._derivedTitle = title;
   }
 
   isAlive(): boolean {

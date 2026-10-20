@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import {
   AttachmentIdList,
+  clampTitle,
   EffortLevel,
   MAX_ATTACHMENT_NAME_CHARS,
   MAX_ATTACHMENTS_PER_PROMPT,
@@ -702,7 +703,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       cwd: z.string().min(1).max(4096).describe('Directory inside an added project folder.'),
       agent: z.string().min(1).max(200).describe('An agent id from list_agents, e.g. "claude".'),
       prompt: z.string().min(1).max(100_000),
-      title: z.string().max(200).optional(),
+      title: z.string().optional(),
       model: z.string().max(200).optional(),
       effort: EffortLevel.nullable().optional(),
       worktree: z
@@ -758,7 +759,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       cwd: z.string().min(1).max(4096),
       agent: z.string().min(1).max(200),
       prompt: z.string().min(1).max(100_000),
-      title: z.string().max(200).optional(),
+      title: z.string().optional(),
       model: z.string().max(200).optional(),
       effort: EffortLevel.nullable().optional(),
       worktree: z.enum(['none', 'new-branch']).optional(),
@@ -1157,7 +1158,7 @@ function startInput(args: Record<string, unknown>): StartSessionInput {
     cwd: String(args.cwd),
     agent: String(args.agent),
     prompt: String(args.prompt),
-    ...(typeof args.title === 'string' ? { title: args.title } : {}),
+    ...(typeof args.title === 'string' ? { title: clampTitle(args.title) } : {}),
     ...(typeof args.model === 'string' ? { model: args.model } : {}),
     ...(args.effort !== undefined ? { effort: args.effort as z.infer<typeof EffortLevel> | null } : {}),
     ...(args.worktree === 'new-branch' || args.worktree === 'none'

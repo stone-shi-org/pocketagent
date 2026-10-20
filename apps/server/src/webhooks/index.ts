@@ -30,6 +30,7 @@ import {
   JIRA_SAMPLE_PAYLOAD,
   JiraWebhookFilter as JiraWebhookFilterSchema,
   bambooTemplateVariables,
+  clampTitle,
   jiraTemplateVariables,
   RETRYABLE_DELIVERY_STATUSES,
   parsePocketAgentId,
@@ -122,13 +123,13 @@ function templateRouteKeyOf(type: WebhookType, facts: AnyEventFacts): string | n
 }
 
 /** A short session title. Bamboo has no "summary" field, so it composes one from plan/build facts. */
-function titleOf(hookName: string, type: WebhookType, facts: AnyEventFacts): string {
+export function titleOf(hookName: string, type: WebhookType, facts: AnyEventFacts): string {
   if (type === 'bamboo') {
     const b = facts as BambooEventFacts;
-    return `[${b.planKey}] Build ${b.buildNumber ?? '?'} ${b.buildState.toLowerCase()}`;
+    return clampTitle(`[${b.planKey}] Build ${b.buildNumber ?? '?'} ${b.buildState.toLowerCase()}`);
   }
   const j = facts as JiraEventFacts;
-  return j.summary ? `[${j.issueKey}] ${j.summary}` : `${hookName} · ${j.issueKey}`;
+  return clampTitle(j.summary ? `[${j.issueKey}] ${j.summary}` : `${hookName} · ${j.issueKey}`);
 }
 
 /** The generic delivery-row fields every provider's facts map onto (see `db/index.ts`'s `issue_key`/`project_key` columns). */

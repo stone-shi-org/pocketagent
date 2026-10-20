@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AgentInfo, ConversationInfo, PromptImage } from '@pocketagent/protocol';
-import { usesClaudeTranscripts } from '@pocketagent/protocol';
+import { clampTitle, usesClaudeTranscripts } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { applyEvents, emptyTranscript, type TranscriptItem } from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
@@ -112,10 +112,10 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
   );
 
   const start = useCallback(
-    (text: string, image?: PromptImage, attachments?: string[]): boolean => {
-      if (!conversation || starting) return false;
+    (text: string, image?: PromptImage, attachments?: string[]): Promise<boolean> => {
+      if (!conversation || starting) return Promise.resolve(false);
       setStarting(true);
-      void api
+      return api
         .createSession({
           // Every conversation this page can open came from `ConversationStore`,
           // which only discovers Claude Code transcripts — so this defaults to
@@ -130,18 +130,19 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
           transport: 'structured',
           resumeAgentSessionId: conversationId,
           forkSession: false,
-          title: conversation.title,
+          title: clampTitle(conversation.title),
         })
         .then((created) => {
           setPendingPrompt(created.id, text, image, attachments);
           onStarted(created.id);
+          return true;
         })
         .catch((err) => {
           onApiError(err);
           setNotice(err instanceof ApiError ? err.message : 'Could not continue this chat.');
           setStarting(false);
+          return false;
         });
-      return true;
     },
     [agent, conversation, conversationId, starting, onApiError, onStarted],
   );

@@ -3,6 +3,7 @@ import {
   AdoptableTarget,
   AgentInfo,
   BrowseEntry,
+  clampTitle,
   ConversationInfo,
   DiscoveredFolder,
   HostInfo,
@@ -45,7 +46,7 @@ export const CreateSessionRequest = z.object({
   cwd: z.string().min(1).max(4096),
   cols: z.number().int().min(LIMITS.minCols).max(LIMITS.maxCols).default(80),
   rows: z.number().int().min(LIMITS.minRows).max(LIMITS.maxRows).default(24),
-  title: z.string().max(128).optional(),
+  title: z.string().transform(clampTitle).optional(),
   /** Defaults to the agent's preferred transport. */
   transport: SessionTransport.optional(),
   /** Resume a previous structured conversation by its agent session id. */

@@ -12,6 +12,10 @@ import { createCodexAdapter } from '../src/agents/codex.js';
 import { createPiAdapter } from '../src/agents/pi.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
 import { readAgentDefaults, writeAgentDefaults } from '../src/db/index.js';
+import { clampTitle, CreateSessionRequest, MAX_SESSION_TITLE_CHARS } from '@pocketagent/protocol';
+import { titleOf } from '../src/webhooks/index.js';
+import { formatCronRunTitle } from '../src/cron/index.js';
+import { AgyTranscriptStore } from '../src/conversations/agy.js';
 
 const AGY_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -928,5 +932,227 @@ describe('structured agent defaults caching', () => {
 
     const defaults = readAgentDefaults(t.db, 'claude');
     expect(defaults?.model).toBe('opus[1m]');
+  });
+});
+
+describe('session title clamping & agy derived titles (PA-163)', () => {
+  const TES_46_LONG_TITLE =
+    '[TES-46] LLM coding benchmark: Java problems from interview-question-bank, judged on Piston (retries, tools, LLM judge, composite score)';
+
+  it('protocol: CreateSessionRequest truncates a 200-char title to 128 chars ending in an ellipsis, leaves a short title unchanged, and never splits non-BMP emoji in half', () => {
+    const longTitle = 'A'.repeat(200);
+    const parsedLong = CreateSessionRequest.parse({
+      agent: 'agy',
+      cwd: '/tmp/project',
+      title: longTitle,
+    });
+    expect(parsedLong.title).toHaveLength(MAX_SESSION_TITLE_CHARS);
+    expect(parsedLong.title?.endsWith('…')).toBe(true);
+    expect(parsedLong.title).toBe(`${'A'.repeat(127)}…`);
+
+    const parsedShort = CreateSessionRequest.parse({
+      agent: 'agy',
+      cwd: '/tmp/project',
+      title: '  Short   session \n title  ',
+    });
+    expect(parsedShort.title).toBe('Short session title');
+
+    // 100 rocket emojis = 200 UTF-16 code units; cutting at 127 would land
+    // right between the high surrogate (index 126) and low surrogate (index 127)
+    // of the 64th emoji.
+    const emojiTitle = '🚀'.repeat(100);
+    const clampedEmoji = clampTitle(emojiTitle);
+    expect(clampedEmoji.length).toBeLessThanOrEqual(MAX_SESSION_TITLE_CHARS);
+    expect(clampedEmoji.endsWith('…')).toBe(true);
+    // Must contain no lone high or low surrogates.
+    expect(clampedEmoji).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(clampedEmoji).toBe(`${'🚀'.repeat(63)}…`);
+  });
+
+  it('webhook titleOf and cron formatCronRunTitle clamp over-long inputs to at most 128 characters', () => {
+    const summary150 = 'x'.repeat(150);
+    const jiraTitle = titleOf('Jira Triage', 'jira', {
+      event: 'jira:issue_updated',
+      eventType: 'issue_updated',
+      issueKey: 'TES-46',
+      projectKey: 'TES',
+      issueType: 'Task',
+      status: 'In Progress',
+      priority: 'Medium',
+      summary: summary150,
+      description: '',
+      assignee: null,
+      reporter: null,
+      actor: null,
+      labels: [],
+      components: [],
+      comment: null,
+      changelog: [],
+      changeHeadline: null,
+      timestamp: Date.now(),
+    });
+    expect(jiraTitle.startsWith('[TES-46] ')).toBe(true);
+    expect(jiraTitle.length).toBeLessThanOrEqual(MAX_SESSION_TITLE_CHARS);
+    expect(jiraTitle.endsWith('…')).toBe(true);
+
+    const cronTitle = formatCronRunTitle('Nightly '.repeat(25), 'UTC', Date.UTC(2026, 9, 20, 9, 0));
+    expect(cronTitle.length).toBeLessThanOrEqual(MAX_SESSION_TITLE_CHARS);
+    expect(cronTitle.endsWith('…')).toBe(true);
+  });
+
+  describe('manager and HTTP integration', () => {
+    let t: TestApp;
+    let agyRootDir: string;
+    let annotationsDir: string;
+
+    beforeEach(async () => {
+      agyRootDir = fs.mkdtempSync('/tmp/pa-pa163-agy-');
+      annotationsDir = path.join(agyRootDir, 'annotations');
+      fs.mkdirSync(annotationsDir, { recursive: true });
+      const agyTranscripts = new AgyTranscriptStore({
+        brainDir: path.join(agyRootDir, 'brain'),
+        annotationsDir,
+        summariesDbPath: path.join(agyRootDir, 'conversation_summaries.db'),
+      });
+      t = await createTestApp(
+        { POCKETAGENT_AGY_BIN: AGY_FIXTURE },
+        undefined,
+        agyTranscripts,
+      );
+    });
+
+    afterEach(async () => {
+      await t.cleanup();
+      fs.rmSync(agyRootDir, { recursive: true, force: true });
+    });
+
+    it('SessionManager.create() clamps over-long titles from MCP, cron, and webhook sources and persists the clamped title', async () => {
+      expect(TES_46_LONG_TITLE.length).toBe(136);
+      for (const rawTitle of [
+        TES_46_LONG_TITLE,
+        `MCP · ${'long-client-label-'.repeat(10)}`,
+        formatCronRunTitle('CronJob-'.repeat(20), 'UTC', Date.now()),
+      ]) {
+        const session = await t.context.sessions.create({
+          agent: 'agy',
+          cwd: t.projectDir,
+          cols: 80,
+          rows: 24,
+          transport: 'structured',
+          title: rawTitle,
+        });
+        const info = t.context.sessions.toInfo(session);
+        expect(info.title.length).toBeLessThanOrEqual(MAX_SESSION_TITLE_CHARS);
+        const row = t.db.prepare('SELECT title FROM sessions WHERE id = ?').get(session.id) as {
+          title: string;
+        };
+        expect(row.title.length).toBeLessThanOrEqual(MAX_SESSION_TITLE_CHARS);
+        session.terminate();
+      }
+    });
+
+    it('regression: continuing a finished session that was saved with a 136-character title succeeds over POST /api/sessions', async () => {
+      // Seed a legacy finished session row with the exact 136-character TES-46 title.
+      t.db
+        .prepare(
+          `INSERT INTO sessions
+             (id, title, agent, command, args_json, cwd, env_keys_json, status, pid,
+              cols, rows, created_at, started_at, ended_at, transport, agent_session_id, skip_permissions)
+           VALUES ('bWgXsQizFDnP', ?, 'agy', '', '[]', ?, '[]', 'exited', NULL, 0, 0, 1000, 1000, 2000, 'structured', 'f919dbb7-tes46', 1)`,
+        )
+        .run(TES_46_LONG_TITLE, t.projectDir);
+
+      const oldInfo = t.context.sessions.find('bWgXsQizFDnP');
+      expect(oldInfo?.title).toBe(TES_46_LONG_TITLE);
+
+      // Resuming with the raw 136-character title (as older clients or direct API callers do) succeeds instead of 400.
+      const res = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(t),
+        payload: {
+          agent: 'agy',
+          cwd: t.projectDir,
+          cols: 80,
+          rows: 24,
+          transport: 'structured',
+          resumeAgentSessionId: 'f919dbb7-tes46',
+          forkSession: false,
+          title: oldInfo!.title,
+          skipPermissions: true,
+        },
+      });
+      expect(res.statusCode, res.body).toBe(201);
+      const created = res.json();
+      expect(created.title.length).toBe(MAX_SESSION_TITLE_CHARS);
+      expect(created.title.endsWith('…')).toBe(true);
+    });
+
+    it('agy manager: a resumed agy session with a 136-char title shows the agy title after session_started / turn_complete and persists it, and a new session picks up its title after the first turn', async () => {
+      fs.writeFileSync(
+        path.join(annotationsDir, 'f919dbb7-tes46.pbtxt'),
+        'title:"LLM Java Coding Benchmark Implementation"',
+      );
+
+      // 1. Resumed agy session starting with the 136-char title
+      const resumed = await t.context.sessions.create({
+        agent: 'agy',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        transport: 'structured',
+        resumeAgentSessionId: 'f919dbb7-tes46',
+        title: TES_46_LONG_TITLE,
+      });
+      if (resumed.transport !== 'structured') throw new Error('expected structured session');
+
+      resumed.prompt('continue benchmark');
+      await waitFor(() =>
+        resumed.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+      );
+      await waitFor(
+        () => t.context.sessions.toInfo(resumed).title === 'LLM Java Coding Benchmark Implementation',
+      );
+      const resumedRow = t.db.prepare('SELECT title FROM sessions WHERE id = ?').get(resumed.id) as {
+        title: string;
+      };
+      expect(resumedRow.title).toBe('LLM Java Coding Benchmark Implementation');
+      resumed.terminate();
+
+      // 2. Brand-new agy session picks up its title after the first turn
+      const fresh = await t.context.sessions.create({
+        agent: 'agy',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        transport: 'structured',
+      });
+      if (fresh.transport !== 'structured') throw new Error('expected structured session');
+      expect(t.context.sessions.toInfo(fresh).title).not.toBe('Fresh Agy Conversation Title');
+
+      // Real agy writes `<conversationId>.pbtxt` once the conversation starts;
+      // write the fixture file as soon as `session_started` reports the minted UUID.
+      fresh.on('event', (_seq, event) => {
+        if (event.kind === 'session_started' && event.agentSessionId) {
+          fs.writeFileSync(
+            path.join(annotationsDir, `${event.agentSessionId}.pbtxt`),
+            'title:"Fresh Agy Conversation Title"',
+          );
+        }
+      });
+
+      fresh.prompt('hello agy');
+      await waitFor(() =>
+        fresh.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+      );
+      await waitFor(
+        () => t.context.sessions.toInfo(fresh).title === 'Fresh Agy Conversation Title',
+      );
+      const freshRow = t.db.prepare('SELECT title FROM sessions WHERE id = ?').get(fresh.id) as {
+        title: string;
+      };
+      expect(freshRow.title).toBe('Fresh Agy Conversation Title');
+      fresh.terminate();
+    });
   });
 });

@@ -9,7 +9,7 @@ import type {
   SessionStatus,
   SessionTransport,
 } from '@pocketagent/protocol';
-import { isCustomClaudeProviderId } from '@pocketagent/protocol';
+import { clampTitle, isCustomClaudeProviderId } from '@pocketagent/protocol';
 import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
@@ -217,6 +217,11 @@ export interface ManagerOptions {
    * fixed creation-time title forever, which is the pre-existing behaviour.
    */
   titleFor?: (cwd: string, agentSessionId: string) => Promise<string | null>;
+  /**
+   * Looks up agy's own generated title for one conversation (`annotations/*.pbtxt`
+   * or `conversation_summaries.db`). Optional so tests can omit it.
+   */
+  agyTitleFor?: (agentSessionId: string) => Promise<string | null>;
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -920,10 +925,11 @@ export class SessionManager {
     if (input.resumeAgentSessionId) {
       this.unhideChat(input.resumeAgentSessionId);
     }
-    const title =
+    const title = clampTitle(
       input.title?.trim() ||
-      input.adopt?.label ||
-      `${adapter.displayName} · ${path.basename(input.cwd)}`;
+        input.adopt?.label ||
+        `${adapter.displayName} · ${path.basename(input.cwd)}`,
+    );
     const createdAt = Date.now();
 
     if (input.adopt) {
@@ -1161,7 +1167,10 @@ export class SessionManager {
     // is also a cheap opportunity to pick up Claude Code's own generated
     // title for the conversation, once it exists.
     session.on('event', (_seq, event) => {
-      if (event.kind === 'session_started') this.persist(session);
+      if (event.kind === 'session_started') {
+        this.persist(session);
+        if (args.resumeAgentSessionId) void this.refreshDerivedTitle(session);
+      }
       if (event.kind === 'turn_complete') void this.refreshDerivedTitle(session);
     });
 
@@ -1227,11 +1236,15 @@ export class SessionManager {
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // Unlike `startStructured`, there is no derived-title lookup: agy keeps no
-    // transcript store this server knows how to read, so the fixed
-    // creation-time title stands for the life of the session.
+    // Pick up agy's own AI-generated title (from `annotations/<id>.pbtxt` or
+    // `conversation_summaries.db`) on each completed turn, and once on
+    // `session_started` when resuming an existing conversation.
     session.on('event', (_seq, event) => {
-      if (event.kind === 'session_started') this.persist(session);
+      if (event.kind === 'session_started') {
+        this.persist(session);
+        if (args.resumeAgentSessionId) void this.refreshDerivedTitle(session);
+      }
+      if (event.kind === 'turn_complete') void this.refreshDerivedTitle(session);
     });
 
     try {
@@ -1297,8 +1310,8 @@ export class SessionManager {
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // No derived-title lookup, same reasoning as agy: pi keeps its own
-    // session store, not one this server knows how to read.
+    // No derived-title lookup: pi's on-disk JSONL sessions record no AI-generated
+    // conversation title, so the creation-time title stands.
     session.on('event', (_seq, event) => {
       if (event.kind === 'session_started') this.persist(session);
     });
@@ -1394,8 +1407,8 @@ export class SessionManager {
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // No derived-title lookup, same reasoning as agy: opencode keeps its own
-    // conversation store, not one this server knows how to read.
+    // No derived-title lookup wired yet for opencode (`OpencodeSession.start`
+    // seeds opencode's session title from `spec.title` at creation).
     session.on('event', (_seq, event) => {
       if (event.kind === 'session_started') this.persist(session);
     });
@@ -1583,8 +1596,7 @@ export class SessionManager {
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // No derived-title lookup, same reasoning as agy/opencode: codex keeps
-    // its own conversation store, not one this server knows how to read.
+    // No derived-title lookup wired yet for codex; tracked as a follow-up to PA-163.
     session.on('event', (_seq, event) => {
       if (event.kind === 'session_started') this.persist(session);
     });
@@ -1610,27 +1622,36 @@ export class SessionManager {
   }
 
   /**
-   * Pick up Claude Code's own generated title for a conversation.
+   * Pick up the agent CLI's own generated title for a conversation (Claude Code
+   * or agy).
    *
    * A session's own `spec.title` is fixed at creation and never updated —
    * but the CLI process behind a structured session writes a real,
-   * content-derived title into its own transcript almost as soon as the
-   * conversation starts, the same one `ProjectService` already surfaces for
-   * the home-screen list. This is what keeps an *open* session's own title
-   * (its `AgentPage` header, not just the list row) in sync with that,
-   * without the cost of `ConversationStore.find()`'s full directory scan on
-   * every turn — `titleFor` goes straight to the one file it needs.
+   * content-derived title into its own transcript/annotations almost as soon
+   * as the conversation starts. This keeps an *open* session's own title (its
+   * `AgentPage` header, session list row, and persisted `sessions.title`) in
+   * sync with that without a full directory scan on every turn.
    */
-  private async refreshDerivedTitle(session: StructuredSession): Promise<void> {
+  private async refreshDerivedTitle(session: StructuredLikeSession): Promise<void> {
     const agentSessionId = session.agentSessionId;
-    if (!agentSessionId || !this.opts.titleFor) return;
+    if (!agentSessionId) return;
 
-    let title: string | null;
+    let rawTitle: string | null = null;
     try {
-      title = await this.opts.titleFor(session.spec.cwd, agentSessionId);
+      if (session instanceof AgySession) {
+        if (!this.opts.agyTitleFor) return;
+        rawTitle = await this.opts.agyTitleFor(agentSessionId);
+      } else if (session instanceof StructuredSession) {
+        if (!this.opts.titleFor) return;
+        rawTitle = await this.opts.titleFor(session.spec.cwd, agentSessionId);
+      } else {
+        return;
+      }
     } catch {
       return; // Best-effort: the fixed creation-time title still shows.
     }
+    if (!rawTitle) return;
+    const title = clampTitle(rawTitle);
     if (!title || title === session.derivedTitle) return;
 
     session.setDerivedTitle(title);

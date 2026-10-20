@@ -1,5 +1,6 @@
 import type { AgentEvent, EffortLevel, McpTurnState, PermissionRequestEvent } from '@pocketagent/protocol';
 import {
+  clampTitle,
   MAX_MCP_ATTACHMENT_BYTES,
   MAX_MCP_CALL_DEPTH,
   MCP_MAX_LIVE_SESSIONS_PER_CLIENT,
@@ -265,7 +266,7 @@ export class McpWorkService {
         cols: 0,
         rows: 0,
         transport: 'structured',
-        title: input.title ?? `MCP · ${principal.label}`,
+        title: clampTitle(input.title ?? `MCP · ${principal.label}`),
         ...(input.model !== undefined ? { model: input.model } : {}),
         ...(input.effort !== undefined ? { effort: input.effort } : {}),
         ...(input.resumeConversationId !== undefined

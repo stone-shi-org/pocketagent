@@ -6,7 +6,7 @@ import type {
   CronRunStatus,
   CronSchedulePreset,
 } from '@pocketagent/protocol';
-import { CronError, compileCronPreset, nextRunAt, serverTimeZone } from '@pocketagent/protocol';
+import { CronError, clampTitle, compileCronPreset, nextRunAt, serverTimeZone } from '@pocketagent/protocol';
 import type { CronJobRow, CronRunRow, Db } from '../db/index.js';
 import {
   deleteCronJob,
@@ -1009,10 +1009,10 @@ export function formatCronRunTitle(name: string, timeZone: string, timestamp: nu
       hour12: false,
     }).formatToParts(new Date(timestamp));
     const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '00';
-    return `${name} (${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')})`;
+    return clampTitle(`${name} (${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')})`);
   } catch {
     const d = new Date(timestamp);
-    return `${name} (${d.toISOString().slice(0, 16).replace('T', ' ')})`;
+    return clampTitle(`${name} (${d.toISOString().slice(0, 16).replace('T', ' ')})`);
   }
 }
 

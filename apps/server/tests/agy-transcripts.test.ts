@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { AgyTranscriptStore, agyTranscriptRecordToEvent } from '../src/conversations/agy.js';
 
 /**
@@ -149,5 +150,101 @@ describe('AgyTranscriptStore', () => {
         0,
       ),
     ).toEqual({ kind: 'user_prompt', id: 'hist_agy_c_0', text: 'plain prompt, no wrapper' });
+  });
+
+  describe('titleFor (PA-163)', () => {
+    let rootDir: string;
+    let annotationsDir: string;
+    let summariesDbPath: string;
+
+    beforeEach(() => {
+      rootDir = fs.mkdtempSync('/tmp/pa-agy-titles-');
+      annotationsDir = path.join(rootDir, 'annotations');
+      summariesDbPath = path.join(rootDir, 'conversation_summaries.db');
+      fs.mkdirSync(annotationsDir, { recursive: true });
+    });
+
+    afterEach(() => {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    it('reads a plain title, an escaped title (quotes, backslash, non-ASCII bytes), and a file with no title from .pbtxt', async () => {
+      fs.writeFileSync(
+        path.join(annotationsDir, 'f919dbb7-plain.pbtxt'),
+        'title:"LLM Java Coding Benchmark Implementation"',
+      );
+      fs.writeFileSync(
+        path.join(annotationsDir, 'escaped-1.pbtxt'),
+        'title: "Fix \\"quote\\", path C:\\\\tmp\\nnext, and UTF-8 \\303\\251 \\342\\200\\224 \\xc3\\xa9"',
+      );
+      fs.writeFileSync(path.join(annotationsDir, 'no-title.pbtxt'), 'other_field:"something"\n');
+      fs.writeFileSync(path.join(annotationsDir, 'empty-title.pbtxt'), 'title:"   "');
+
+      const store = new AgyTranscriptStore({
+        brainDir: path.join(rootDir, 'brain'),
+        annotationsDir,
+        summariesDbPath,
+      });
+
+      expect(await store.titleFor('f919dbb7-plain')).toBe('LLM Java Coding Benchmark Implementation');
+      expect(await store.titleFor('escaped-1')).toBe('Fix "quote", path C:\\tmp\nnext, and UTF-8 é — é');
+      expect(await store.titleFor('no-title')).toBeNull();
+      expect(await store.titleFor('empty-title')).toBeNull();
+    });
+
+    it('falls back to conversation_summaries.db when the annotation file is missing or has no title', async () => {
+      const db = new Database(summariesDbPath);
+      db.exec(`
+        CREATE TABLE conversation_summaries (
+          conversation_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          preview TEXT NOT NULL DEFAULT '',
+          workspace_uris TEXT NOT NULL DEFAULT '[]',
+          last_modified_time TEXT NOT NULL DEFAULT ''
+        );
+      `);
+      const insert = db.prepare(
+        'INSERT INTO conversation_summaries (conversation_id, title) VALUES (?, ?)',
+      );
+      insert.run('f919dbb7-tes46', 'LLM Java Coding Benchmark Implementation');
+      insert.run('e7239e5e-ls17', 'Fix VRAM Admission Races');
+      insert.run('47791b49-ls16', 'Fix Streaming TTS Chunk Framing');
+      insert.run('blank-row', '   ');
+      db.close();
+
+      // Also verify that an annotation file with no title field falls back to the DB row.
+      fs.writeFileSync(path.join(annotationsDir, 'e7239e5e-ls17.pbtxt'), 'other:"ignored"');
+
+      const store = new AgyTranscriptStore({
+        brainDir: path.join(rootDir, 'brain'),
+        annotationsDir,
+        summariesDbPath,
+      });
+
+      expect(await store.titleFor('f919dbb7-tes46')).toBe('LLM Java Coding Benchmark Implementation');
+      expect(await store.titleFor('e7239e5e-ls17')).toBe('Fix VRAM Admission Races');
+      expect(await store.titleFor('47791b49-ls16')).toBe('Fix Streaming TTS Chunk Framing');
+      expect(await store.titleFor('blank-row')).toBeNull();
+      expect(await store.titleFor('missing-everywhere')).toBeNull();
+    });
+
+    it('returns null without throwing when both annotation and database are missing', async () => {
+      const store = new AgyTranscriptStore({
+        brainDir: path.join(rootDir, 'brain'),
+        annotationsDir,
+        summariesDbPath,
+      });
+      expect(await store.titleFor('does-not-exist')).toBeNull();
+    });
+
+    it('returns null without throwing when conversation_summaries.db is corrupt or unreadable', async () => {
+      fs.writeFileSync(summariesDbPath, 'not a valid sqlite database header');
+      const store = new AgyTranscriptStore({
+        brainDir: path.join(rootDir, 'brain'),
+        annotationsDir,
+        summariesDbPath,
+      });
+      await expect(store.titleFor('any-id')).resolves.toBeNull();
+    });
   });
 });

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import type { AgentEvent } from '@pocketagent/protocol';
 
 /**
@@ -29,17 +30,83 @@ import type { AgentEvent } from '@pocketagent/protocol';
 
 /** A pathological transcript should not be read into memory whole; none seen live has exceeded a few MB. */
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+/** Annotation files are one-line `.pbtxt` records (~50-200 bytes). */
+const MAX_ANNOTATION_BYTES = 64 * 1024;
 
 export interface AgyTranscriptStoreOptions {
   /** Overridable for tests. Defaults to `~/.gemini/antigravity-cli/brain`. */
   brainDir?: string;
+  /** Overridable for tests. Defaults to `<parent of brainDir>/annotations` (`~/.gemini/antigravity-cli/annotations`). */
+  annotationsDir?: string;
+  /** Overridable for tests. Defaults to `<parent of brainDir>/conversation_summaries.db` (`~/.gemini/antigravity-cli/conversation_summaries.db`). */
+  summariesDbPath?: string;
 }
 
 export class AgyTranscriptStore {
   private readonly brainDir: string;
+  private readonly annotationsDir: string;
+  private readonly summariesDbPath: string;
 
   constructor(options: AgyTranscriptStoreOptions = {}) {
-    this.brainDir = options.brainDir ?? path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain');
+    const defaultRoot = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+    this.brainDir = options.brainDir ?? path.join(defaultRoot, 'brain');
+    const rootDir = options.brainDir ? path.dirname(this.brainDir) : defaultRoot;
+    this.annotationsDir = options.annotationsDir ?? path.join(rootDir, 'annotations');
+    this.summariesDbPath = options.summariesDbPath ?? path.join(rootDir, 'conversation_summaries.db');
+  }
+
+  /**
+   * Look up agy's own AI-generated title for a conversation (PA-163).
+   *
+   * Primary source is `annotations/<conversation-id>.pbtxt` (a single-line
+   * protobuf text record such as `title:"LLM Java Coding Benchmark Implementation"`),
+   * which requires no SQLite access. When the annotation file is missing or
+   * carries no `title`, falls back to `conversation_summaries.db` opened
+   * read-only (`readonly: true, fileMustExist: true`) because agy writes to it
+   * while running. Returns `null` on any error and never throws.
+   */
+  async titleFor(conversationId: string): Promise<string | null> {
+    if (!conversationId || conversationId.includes('/') || conversationId.includes('\\') || conversationId === '..') {
+      return null;
+    }
+
+    const fromAnnotation = await this.readTitleFromAnnotation(conversationId);
+    if (fromAnnotation) return fromAnnotation;
+
+    return this.readTitleFromSummariesDb(conversationId);
+  }
+
+  private async readTitleFromAnnotation(conversationId: string): Promise<string | null> {
+    const file = path.join(this.annotationsDir, `${conversationId}.pbtxt`);
+    try {
+      const stat = await fs.stat(file);
+      if (!stat.isFile() || stat.size === 0 || stat.size > MAX_ANNOTATION_BYTES) return null;
+      const raw = await fs.readFile(file, 'utf8');
+      return parsePbtxtTitle(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  private readTitleFromSummariesDb(conversationId: string): string | null {
+    let db: Database.Database | null = null;
+    try {
+      db = new Database(this.summariesDbPath, { readonly: true, fileMustExist: true });
+      const row = db
+        .prepare('SELECT title FROM conversation_summaries WHERE conversation_id = ?')
+        .get(conversationId) as { title?: unknown } | undefined;
+      if (!row || typeof row.title !== 'string') return null;
+      const trimmed = row.title.trim();
+      return trimmed || null;
+    } catch {
+      return null;
+    } finally {
+      try {
+        db?.close();
+      } catch {
+        // Ignore close errors on corrupt/locked db.
+      }
+    }
   }
 
   /**
@@ -135,4 +202,117 @@ export function agyTranscriptRecordToEvent(
   }
 
   return null;
+}
+
+const PBTXT_TITLE_RE = /(?:^|[\s;])title\s*:\s*"((?:[^"\\]|\\.)*)"/;
+
+/**
+ * Parse the `title` field from a protobuf text-format `.pbtxt` annotation
+ * file, unescaping standard C/textproto escapes (`\"`, `\\`, `\n`, `\r`, `\t`,
+ * octal `\000`–`\377` and hex `\xHH` UTF-8 byte sequences, and `\uXXXX` /
+ * `\UXXXXXXXX` Unicode escapes).
+ */
+export function parsePbtxtTitle(raw: string): string | null {
+  const match = PBTXT_TITLE_RE.exec(raw);
+  if (!match) return null;
+  const body = match[1]!;
+  const bytes: number[] = [];
+
+  let i = 0;
+  while (i < body.length) {
+    const nextSlash = body.indexOf('\\', i);
+    if (nextSlash === -1) {
+      bytes.push(...Buffer.from(body.slice(i), 'utf8'));
+      break;
+    }
+    if (nextSlash > i) {
+      bytes.push(...Buffer.from(body.slice(i, nextSlash), 'utf8'));
+    }
+    i = nextSlash + 1;
+    if (i >= body.length) {
+      bytes.push(0x5c);
+      break;
+    }
+    const ch = body[i]!;
+    if (ch >= '0' && ch <= '7') {
+      let oct = ch;
+      while (oct.length < 3 && i + oct.length < body.length) {
+        const d = body[i + oct.length]!;
+        if (d < '0' || d > '7') break;
+        oct += d;
+      }
+      bytes.push(parseInt(oct, 8) & 0xff);
+      i += oct.length;
+      continue;
+    }
+    if (ch === 'x' || ch === 'X') {
+      const hex = /^[0-9a-fA-F]{1,2}/.exec(body.slice(i + 1))?.[0];
+      if (hex) {
+        bytes.push(parseInt(hex, 16) & 0xff);
+        i += 1 + hex.length;
+        continue;
+      }
+    }
+    if (ch === 'u') {
+      const hex = /^[0-9a-fA-F]{4}/.exec(body.slice(i + 1))?.[0];
+      if (hex) {
+        bytes.push(...Buffer.from(String.fromCodePoint(parseInt(hex, 16)), 'utf8'));
+        i += 5;
+        continue;
+      }
+    }
+    if (ch === 'U') {
+      const hex = /^[0-9a-fA-F]{8}/.exec(body.slice(i + 1))?.[0];
+      if (hex) {
+        const cp = parseInt(hex, 16);
+        if (cp <= 0x10ffff) {
+          bytes.push(...Buffer.from(String.fromCodePoint(cp), 'utf8'));
+          i += 9;
+          continue;
+        }
+      }
+    }
+    switch (ch) {
+      case 'n':
+        bytes.push(0x0a);
+        break;
+      case 'r':
+        bytes.push(0x0d);
+        break;
+      case 't':
+        bytes.push(0x09);
+        break;
+      case 'b':
+        bytes.push(0x08);
+        break;
+      case 'f':
+        bytes.push(0x0c);
+        break;
+      case 'v':
+        bytes.push(0x0b);
+        break;
+      case 'a':
+        bytes.push(0x07);
+        break;
+      case '\\':
+        bytes.push(0x5c);
+        break;
+      case '"':
+        bytes.push(0x22);
+        break;
+      case "'":
+        bytes.push(0x27);
+        break;
+      case '?':
+        bytes.push(0x3f);
+        break;
+      default:
+        bytes.push(...Buffer.from(ch, 'utf8'));
+        break;
+    }
+    i += 1;
+  }
+
+  const decoded = Buffer.from(bytes).toString('utf8').trim();
+  return decoded || null;
 }

@@ -492,6 +492,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     adoption,
     globalSkipPermissionsDefault: config.globalSkipPermissionsDefault,
     titleFor: (cwd, agentSessionId) => conversations.titleFor(cwd, agentSessionId),
+    agyTitleFor: (agentSessionId) => agyTranscripts.titleFor(agentSessionId),
   });
   if (sessions.getGlobalSkipPermissions()) {
     app.log.warn(
