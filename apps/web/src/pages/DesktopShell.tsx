@@ -1,3 +1,4 @@
+import { loadLiveOnly, saveLiveOnly } from '../hosts/tree-pref.js';
 import { chatDotState, plannerChatDotState, type ChatDotState } from '@pocketagent/protocol';
 import { Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { Route } from '../hooks/useHashRoute.js';
@@ -12,6 +13,7 @@ import {
   HostCompatibilityNotice,
   ProjectList,
   SearchField,
+  LiveOnlyToggle,
   allChats,
 } from '../components/ProjectList.js';
 import { HostRail } from '../components/HostRail.js';
@@ -240,6 +242,11 @@ export function DesktopShell({
   onLogout,
 }: Props): JSX.Element {
   const [search, setSearch] = useState('');
+  const [liveOnly, setLiveOnlyState] = useState(loadLiveOnly);
+  const setLiveOnly = (on: boolean): void => {
+    setLiveOnlyState(on);
+    saveLiveOnly(on);
+  };
   const [menuOpen, setMenuOpen] = useState(false);
   // Each dialog's open-state is the *host id* it acts on, not a boolean
   // (PA-67): every one of them adds a project folder, lists tmux sessions or
@@ -881,6 +888,7 @@ export function DesktopShell({
 
         <div className="sidebar-search">
           <SearchField value={search} onChange={setSearch} />
+          <LiveOnlyToggle checked={liveOnly} onChange={setLiveOnly} />
         </div>
 
         <div className="sidebar-scroll">
@@ -948,10 +956,12 @@ export function DesktopShell({
                     onNewShell={() => setShowShell(hostId)}
                     activeSessionId={activeHere ? activeSessionId : null}
                     search={search}
+                    liveOnly={liveOnly}
                   />
                   <ProjectList
                     state={hostState}
                     search={search}
+                    liveOnly={liveOnly}
                     onCompose={(cwd) => nav.openOn(hostId, { name: 'compose', cwd })}
                     onAddProject={() => setShowAdd(hostId)}
                     activeSessionId={activeHere ? activeSessionId : null}

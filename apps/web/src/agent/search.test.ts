@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatSummary, ProjectInfo } from '@pocketagent/protocol';
-import { filterProjects } from './search.js';
+import { filterLiveOnly, filterProjects } from './search.js';
 
 function chat(title: string): ChatSummary {
   return {
@@ -114,5 +114,22 @@ describe('filterProjects with folded worktrees', () => {
   it('matching the main project keeps every worktree untouched', () => {
     const result = filterProjects(withWorktrees, 'agents-remote-control');
     expect(result[0]?.worktrees).toHaveLength(2);
+  });
+});
+
+describe('filterLiveOnly (PA-167)', () => {
+  it('keeps live chats, drops idle ones and empty folders, including nested worktrees', () => {
+    const live = { ...chat('running'), live: true };
+    const a = project('a', ['idle']);
+    a.chats.push(live);
+    const b = project('b', ['idle2']);
+    const wt = project('wt', []);
+    wt.chats.push({ ...chat('wt-live'), live: true });
+    const c = project('c', ['idle3'], [wt]);
+    const out = filterLiveOnly([a, b, c]);
+    expect(out.map((p) => p.name)).toEqual(['a', 'c']);
+    expect(out[0]!.chats.map((x) => x.title)).toEqual(['running']);
+    expect(out[1]!.chats).toEqual([]);
+    expect(out[1]!.worktrees[0]!.chats.map((x) => x.title)).toEqual(['wt-live']);
   });
 });

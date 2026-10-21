@@ -1,3 +1,4 @@
+import { loadLiveOnly, saveLiveOnly } from '../hosts/tree-pref.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
@@ -11,6 +12,7 @@ import {
   HostCompatibilityNotice,
   ProjectList,
   SearchField,
+  LiveOnlyToggle,
 } from '../components/ProjectList.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
@@ -94,6 +96,11 @@ export function ProjectsPage({
   onOpenHub,
 }: Props): JSX.Element {
   const [search, setSearch] = useState('');
+  const [liveOnly, setLiveOnlyState] = useState(loadLiveOnly);
+  const setLiveOnly = (on: boolean): void => {
+    setLiveOnlyState(on);
+    saveLiveOnly(on);
+  };
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState<string | null>(null);
@@ -211,6 +218,7 @@ export function ProjectsPage({
       </header>
 
       <div className="home-scroll">
+        <LiveOnlyToggle checked={liveOnly} onChange={setLiveOnly} />
         {visible.map((host) => {
           const hostId = host.endpoint.id;
           const state = fleet.stateFor(hostId);
@@ -260,10 +268,12 @@ export function ProjectsPage({
                   open={state.open}
                   onNewShell={() => setShowShell(hostId)}
                   search={search}
+                  liveOnly={liveOnly}
                 />
                 <ProjectList
                   state={state}
                   search={search}
+                  liveOnly={liveOnly}
                   onCompose={(cwd) => onCompose(hostId, cwd)}
                   onAddProject={() => setShowAdd(hostId)}
                   onOpenCronJob={(jobId) => onOpenCronJob(hostId, jobId)}

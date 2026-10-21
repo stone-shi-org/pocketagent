@@ -76,3 +76,21 @@ function matchesWholesale(project: ProjectInfo, needle: string): boolean {
 export function flattenProjects(projects: ProjectInfo[]): ProjectInfo[] {
   return projects.flatMap((p) => [p, ...flattenProjects(p.worktrees)]);
 }
+
+/**
+ * PA-167 "Only running": keep only live coding-agent chats. A spec (cron job,
+ * webhook) or a queued waiter is not a running agent, so they go too; a folder
+ * or worktree left with nothing live is dropped rather than shown empty.
+ * Subagents are kept when live, since they are running agents as well.
+ */
+export function filterLiveOnly(projects: ProjectInfo[]): ProjectInfo[] {
+  const out: ProjectInfo[] = [];
+  for (const project of projects) {
+    const chats = project.chats.filter((c) => c.live);
+    const subagents = (project.subagents ?? []).filter((c) => c.live);
+    const worktrees = filterLiveOnly(project.worktrees);
+    if (chats.length === 0 && subagents.length === 0 && worktrees.length === 0) continue;
+    out.push({ ...project, chats, subagents, cronJobs: [], webhooks: [], queued: [], worktrees });
+  }
+  return out;
+}

@@ -14,7 +14,7 @@ import { hostDotClass, type HostStatus } from '../hosts/host-status.js';
 import type { HostCompatibilityState } from '../api/negotiate.js';
 import { ApiError, type ApiClient } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
-import { filterProjects } from '../agent/search.js';
+import { filterLiveOnly, filterProjects } from '../agent/search.js';
 import { formatCountdown } from '../agent/cron-format.js';
 import { formatRelative } from './StatusBadge.js';
 import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
@@ -547,6 +547,8 @@ export function projectActions({
 interface ListProps {
   state: ProjectsState;
   search: string;
+  /** PA-167: show only running agents. */
+  liveOnly?: boolean;
   onCompose: (cwd: string) => void;
   /** Highlighted in the sidebar so you can see which chat you are reading. */
   activeSessionId?: string | null;
@@ -569,6 +571,7 @@ interface ListProps {
 export function ProjectList({
   state,
   search = '',
+  liveOnly = false,
   onCompose,
   activeSessionId,
   activeConversationId,
@@ -616,7 +619,10 @@ export function ProjectList({
 
   const { projects, open } = state;
 
-  const visible = useMemo(() => filterProjects(projects ?? [], search), [projects, search]);
+  const visible = useMemo(() => {
+    const base = liveOnly ? filterLiveOnly(projects ?? []) : (projects ?? []);
+    return filterProjects(base, search);
+  }, [projects, search, liveOnly]);
   const searching = search.trim().length > 0;
 
   const toggle = (cwd: string): void =>
@@ -719,7 +725,13 @@ export function ProjectList({
 
       {projects !== null && visible.length === 0 && (
         <div className="empty">
-          {searching ? <>No chats match “{search.trim()}”.</> : emptyHint}
+          {searching ? (
+            <>No chats match “{search.trim()}”.</>
+          ) : liveOnly ? (
+            <>No running agents.</>
+          ) : (
+            emptyHint
+          )}
         </div>
       )}
 
@@ -1698,6 +1710,22 @@ export function HostCompatibilityNotice({
     <div className="notice inline warn" role="status">
       {compatibility.message}
     </div>
+  );
+}
+
+/** PA-167: "Only running" switch, under the search field in both layouts. */
+export function LiveOnlyToggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}): JSX.Element {
+  return (
+    <label className="live-only-toggle">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      Only running
+    </label>
   );
 }
 

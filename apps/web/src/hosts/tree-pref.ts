@@ -150,3 +150,25 @@ export function saveCollapsedPocketAgents(hostId: string, ids: Iterable<string>)
 export function saveCollapsedPocketAgentCron(hostId: string, ids: Iterable<string>): void {
   updateHostTreeState(hostId, { collapsedPocketAgentCron: Array.from(ids) });
 }
+
+// PA-167 "Only running" filter. One switch for the whole home screen (not per
+// host): it is a way of looking at the list, not a property of a machine.
+const LIVE_ONLY_KEY = 'pocketagent:home-live-only';
+
+export function loadLiveOnly(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(LIVE_ONLY_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveLiveOnly(on: boolean): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (on) localStorage.setItem(LIVE_ONLY_KEY, '1');
+    else localStorage.removeItem(LIVE_ONLY_KEY);
+  } catch {
+    /* unavailable storage: the filter simply does not persist */
+  }
+}

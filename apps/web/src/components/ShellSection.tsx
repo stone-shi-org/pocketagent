@@ -22,6 +22,8 @@ interface Props {
   activeSessionId?: string | null;
   /** Free-text query from the shared search box; `''` means no filter. */
   search?: string;
+  /** PA-167: show only running shells. */
+  liveOnly?: boolean;
 }
 
 /**
@@ -54,6 +56,7 @@ export function ShellSection({
   onNewShell,
   activeSessionId,
   search = '',
+  liveOnly = false,
 }: Props): JSX.Element | null {
   const endpoint = useHostEndpoint();
   const hostId = endpoint.id;
@@ -89,9 +92,10 @@ export function ShellSection({
   // case someone is squinting at the list to resolve.
   const visible = (shells ?? []).filter(
     (shell) =>
-      !searching ||
+      (!liveOnly || shell.live) &&
+      (!searching ||
       shell.title.toLowerCase().includes(needle) ||
-      shell.cwdLabel.toLowerCase().includes(needle),
+      shell.cwdLabel.toLowerCase().includes(needle)),
   );
 
   // Nothing at all renders nothing — not an empty section header. A user who

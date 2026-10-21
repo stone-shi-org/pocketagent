@@ -10254,3 +10254,17 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
 .turn-changed-file-link:hover {
   opacity: 0.85;
 }
+
+/* PA-167: "Only running" switch under the search field. */
+.live-only-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 8px;
+  font-size: 13px;
+  color: var(--text-dim, inherit);
+  cursor: pointer;
+}
+.sidebar-search .live-only-toggle {
+  padding-bottom: 0;
+}
