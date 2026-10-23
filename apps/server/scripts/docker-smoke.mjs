@@ -641,11 +641,12 @@ heading('The -all image renders a page with playwright-cli, $HOME mounted (if th
 
     const sheetDeps = tryRun('docker', [
       'exec', '--user', `${HOST_UID}:${HOST_GID}`, probe, 'bash', '-lc',
-      'soffice --headless --version && python3 -c "import openpyxl; print(\'openpyxl-ok\')"',
+      'soffice --headless --version && python3 -c "import openpyxl; print(\'openpyxl-ok\')" && command -v pdftotext',
     ]);
     check(
-      sheetDeps.status === 0 && /libreoffice/i.test(sheetDeps.stdout) && sheetDeps.stdout.includes('openpyxl-ok'),
-      'libreoffice-calc (soffice) and python3-openpyxl are runnable from a login shell (PA-140)',
+      sheetDeps.status === 0 && /libreoffice/i.test(sheetDeps.stdout) && sheetDeps.stdout.includes('openpyxl-ok') &&
+        /\/pdftotext\s*$/.test(sheetDeps.stdout),
+      'libreoffice-calc (soffice), python3-openpyxl (PA-140) and pdftotext are runnable from a login shell',
       sheetDeps.stdout.split('\n')[0],
     );
     tryRun('docker', ['rm', '-f', probe]);

@@ -70,3 +70,20 @@ describe('basePlannerSystemPrompt and playwright-cli', () => {
     expect(withCli).toMatch(/view the PNG with read_file/);
   });
 });
+
+describe('basePlannerSystemPrompt and PDF text', () => {
+  // Prod chat b5defce8: the model had read every PDF through read_file, then
+  // hunted the shell for an extractor to write per-file .txt copies.
+  it('tells a document-workspace agent to save extracted text with write_file', () => {
+    const docWorkspace = { name: 'Docs', path: '/d' } as unknown as Parameters<typeof basePlannerSystemPrompt>[2];
+    const prompt = basePlannerSystemPrompt('/w', {}, docWorkspace);
+    expect(prompt).toMatch(/read_file it and write_file the text/);
+    expect(prompt).not.toMatch(/pdftotext|pypdf/);
+    expect(basePlannerSystemPrompt('/w')).not.toMatch(/write_file the text/);
+  });
+
+  it('mentions pdftotext only when the host has it', () => {
+    expect(basePlannerSystemPrompt('/w')).not.toMatch(/pdftotext/);
+    expect(basePlannerSystemPrompt('/w', { pdftotext: true })).toMatch(/pdftotext -layout in\.pdf out\.txt/);
+  });
+});

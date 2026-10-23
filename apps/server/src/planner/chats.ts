@@ -257,7 +257,7 @@ const MISSING_TOOL_RESULT_MESSAGE =
  */
 export function basePlannerSystemPrompt(
   workspacePath: string,
-  host: { playwrightCli?: boolean; libreoffice?: boolean } = {},
+  host: { playwrightCli?: boolean; libreoffice?: boolean; pdftotext?: boolean } = {},
   docWorkspace?: DocWorkspace | null,
 ): string {
   return [
@@ -274,6 +274,12 @@ export function basePlannerSystemPrompt(
             'markers, and grep_files searches across them. Every change to a workspace file is saved as a restorable version; ' +
             'pass baseVersion from your last read when updating an existing file (required for sheet_edit and doc_edit). ' +
             'New artifacts from create_sheet, create_doc, and export_pdf default to outputs/ inside the document workspace.',
+          // Prod chat b5defce8: asked for one .txt per PDF, the model had
+          // already read every PDF through read_file, then went hunting for
+          // pypdf/pdftotext/soffice in bash, found none, and told the user
+          // "text extraction tools aren't available on this host".
+          '- To save a document\'s text to a file (for example one .txt per PDF), read_file it and write_file the ' +
+            'text it returned. That already is the extraction, so there is no need to look for a converter in bash.',
         ]
       : []),
     '- Store files you are asked to create, implementation plans in Markdown, exported documents, or generated ' +
@@ -319,6 +325,14 @@ export function basePlannerSystemPrompt(
             'workbook from scratch when there is no existing workbook to patch.',
         ]
       : []),
+    // Outside a document workspace read_file refuses a PDF as binary, so the
+    // shell is the only way to its text — named only when it is really here.
+    ...(host.pdftotext
+      ? [
+          '- `pdftotext` (poppler-utils) is installed: in bash, `pdftotext -layout in.pdf out.txt` extracts a ' +
+            "PDF's text layer (a scanned PDF has none).",
+        ]
+      : []),
   ].join('\n');
 }
 
@@ -331,10 +345,12 @@ export function basePlannerSystemPrompt(
  */
 let playwrightCliOnHost: boolean | null = null;
 let libreOfficeOnHost: boolean | null = null;
-function hostBrowserTools(): { playwrightCli: boolean; libreoffice: boolean } {
+let pdftotextOnHost: boolean | null = null;
+function hostBrowserTools(): { playwrightCli: boolean; libreoffice: boolean; pdftotext: boolean } {
   playwrightCliOnHost ??= resolveExecutable('playwright-cli') !== null;
   libreOfficeOnHost ??= resolveLibreOfficeExecutable() !== null;
-  return { playwrightCli: playwrightCliOnHost, libreoffice: libreOfficeOnHost };
+  pdftotextOnHost ??= resolveExecutable('pdftotext') !== null;
+  return { playwrightCli: playwrightCliOnHost, libreoffice: libreOfficeOnHost, pdftotext: pdftotextOnHost };
 }
 
 /** PA-121: tokens kept free beyond the estimate when sizing `max_tokens` —

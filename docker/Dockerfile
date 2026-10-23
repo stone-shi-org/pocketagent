@@ -494,14 +494,21 @@ RUN test -n "${PLAYWRIGHT_CLI_VERSION}" \
 # brand-new `.xlsx` workbooks from scratch. Installed only in `all` (~250 MB
 # with `--no-install-recommends`); `runtime` and `claude` stay lean and
 # `sheet_check`/`sheet_edit` degrade gracefully when `soffice` is absent.
+# `poppler-utils` (`pdftotext`, a few MB) is the shell's PDF text extractor:
+# libreoffice-calc has no PDF import filter, and outside a document workspace
+# `read_file` refuses a PDF as binary, so without it an agent had no way to a
+# PDF's text at all (prod chat b5defce8). The base prompt names it only when
+# it resolves on PATH.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-calc \
+        poppler-utils \
         python3-openpyxl \
     && rm -rf /var/lib/apt/lists/* \
     && lo_probe="$(mktemp -d)" && chmod 0777 "$lo_probe" \
     && gosu pocketagent env HOME="$lo_probe" soffice "-env:UserInstallation=file://$lo_probe/profile" --headless --version | grep -qi "libreoffice" \
     && gosu pocketagent env HOME="$lo_probe" python3 -c "import openpyxl; wb = openpyxl.Workbook(); assert wb.active is not None" \
+    && gosu pocketagent env HOME="$lo_probe" pdftotext -v 2>&1 | grep -qi "pdftotext" \
     && rm -rf "$lo_probe" \
     && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
          || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }

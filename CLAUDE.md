@@ -81,7 +81,10 @@ load-bearing and easy to undo by accident:
   `python3-openpyxl` (PA-140) so `sheet_check` and `sheet_edit` can recalculate formula caches
   headlessly (`soffice --headless --convert-to xlsx` with an isolated `-env:UserInstallation=file://…`
   profile) and agents can build brand-new `.xlsx` files from scratch when needed; both are checked
-  at image build time and by `docker-smoke.mjs`.
+  at image build time and by `docker-smoke.mjs`. It also installs `poppler-utils` so `pdftotext` is
+  the shell's PDF text extractor (outside a document workspace `read_file` refuses a PDF as binary,
+  and `libreoffice-calc` has no PDF import filter); a Pocket Agent's base prompt names it only when
+  it resolves on `PATH`, like `playwright-cli`.
 
 The entrypoint's own rule: **it never chowns a mounted volume.** It remaps the `pocketagent`
 account to `PUID`/`PGID` (so `git` can match the owner of a bind-mounted repo — a uid mismatch
