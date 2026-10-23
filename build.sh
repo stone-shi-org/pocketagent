@@ -183,6 +183,7 @@ for target in "${targets[@]}"; do
     [[ -n "$stamp_version" ]] && env_args+=("PA_VERSION=${stamp_version}")
     [[ -n "${planned_tags[$target]}" ]] && env_args+=("PA_TAGS=${planned_tags[$target]}")
     [[ -n "${PA_PLATFORM:-}" ]] && env_args+=("PA_PLATFORM=${PA_PLATFORM}")
+    [[ -n "${PA_BUILDER:-}" ]] && env_args+=("PA_BUILDER=${PA_BUILDER}")
 
     env "${env_args[@]}" docker/build.sh "$target"
 done

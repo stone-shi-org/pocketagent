@@ -162,6 +162,12 @@ describe("docker/build.sh's target table", () => {
       expect(nextLine).toBe('COPY patches/ patches/');
     }
   });
+
+  it('uses a container builder when pushing to avoid host split-horizon DNS timeouts', () => {
+    expect(script).toMatch(/docker-container/);
+    expect(script).toMatch(/PA_BUILDER/);
+    expect(script).toMatch(/pocketagent-builder/);
+  });
 });
 
 describe('the repo version', () => {

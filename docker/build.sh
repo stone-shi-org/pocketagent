@@ -19,6 +19,7 @@
 #   PA_VERSION    semver to stamp     (default: apps/server/package.json version + git sha)
 #   PA_PLATFORM   buildx --platform   (default: the host's own architecture)
 #   PA_PUSH=1     push instead of loading into the local daemon
+#   PA_BUILDER    buildx --builder    (default: pocketagent-builder when pushing, else current)
 #   PA_TAGS       tag names to apply  (default: "<version><suffix> latest<suffix>")
 #   PA_METADATA_FILE  write buildx --metadata-file here, for the pushed digest
 #
@@ -127,6 +128,21 @@ if [[ -n "${PA_PLATFORM:-}" ]]; then
     # each platform needs its own real `pnpm install` — a two-platform build
     # here is two builds, not one build copied twice.
     args+=(--platform "$PA_PLATFORM")
+fi
+
+if [[ -n "${PA_BUILDER:-}" ]]; then
+    args+=(--builder "$PA_BUILDER")
+elif [[ "${PA_PUSH:-}" == '1' ]]; then
+    # The default 'docker' buildx driver routes through dockerd on the host,
+    # which on split-horizon networks may resolve the private registry to an
+    # unrouted public IP. A docker-container builder runs in a container
+    # network that resolves local LAN names correctly.
+    builder="pocketagent-builder"
+    if ! docker buildx inspect "$builder" >/dev/null 2>&1; then
+        echo "==> Creating buildx container builder '${builder}' for registry push..."
+        docker buildx create --name "$builder" --driver docker-container >/dev/null
+    fi
+    args+=(--builder "$builder")
 fi
 
 if [[ "${PA_PUSH:-}" == '1' ]]; then
