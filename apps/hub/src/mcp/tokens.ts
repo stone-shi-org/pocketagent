@@ -4,6 +4,7 @@ import {
   HUB_MCP_SCOPES,
   HUB_MCP_TOKEN_PREFIX_LENGTH,
   HUB_MCP_TOKEN_SCHEME_PREFIX,
+  HUB_WEBHOOK_ROUTING_SCOPES,
   HubMcpScope,
   type HubMcpClientToken,
   type HubMcpTokenKind,
@@ -14,7 +15,7 @@ import type { HubDb, HubMcpTokenRow } from '../db.js';
 export interface HubMcpPrincipal {
   readonly id: string;
   readonly label: string;
-  /** PA-169: `coordinator` (PA-134's Fleet agent) or an operator-minted `client`. */
+  /** PA-169: `coordinator` (PA-134's Fleet agent) or an operator-minted `client`; PA-171: a backend's `webhook` routing token. */
   readonly kind: HubMcpTokenKind;
   /** PA-169: what this token may call. A coordinator holds every scope. */
   readonly scopes: readonly HubMcpScope[];
@@ -84,6 +85,35 @@ export class HubMcpTokenStore {
       )
       .run(id, label, digest(token), prefix, now, JSON.stringify(normaliseScopes(scopes)), hostsJson(hosts));
     return { id, token, prefix };
+  }
+
+  /**
+   * PA-171: a source backend's webhook-routing token — `dispatch` only, the
+   * hosts its operator allowed. Minted only by `WebhookRoutingService`, behind
+   * the Hub cookie. Its kind is what makes the Hub state a webhook dispatch
+   * origin to the target (`MCP_DISPATCH_ORIGIN_META_KEY`), so no other token
+   * can claim to be a webhook run.
+   */
+  mintWebhook(label: string, hosts: readonly string[], now = Date.now()): { id: string; token: string; prefix: string } {
+    const id = crypto.randomUUID();
+    const token = `${HUB_MCP_TOKEN_SCHEME_PREFIX}${generateToken(32)}`;
+    const prefix = token.slice(0, HUB_MCP_TOKEN_PREFIX_LENGTH);
+    this.db
+      .prepare(
+        `INSERT INTO hub_mcp_tokens (id, label, token_sha256, token_prefix, created_at, last_seen_at, kind, scopes_json, hosts_json)
+         VALUES (?, ?, ?, ?, ?, NULL, 'webhook', ?, ?)`,
+      )
+      .run(id, label, digest(token), prefix, now, JSON.stringify([...HUB_WEBHOOK_ROUTING_SCOPES]), hostsJson(hosts));
+    return { id, token, prefix };
+  }
+
+  /** PA-171: narrow or widen a webhook-routing token's hosts. Takes effect on its next call. */
+  setWebhookHosts(id: string, hosts: readonly string[]): boolean {
+    return (
+      this.db
+        .prepare("UPDATE hub_mcp_tokens SET hosts_json = ? WHERE id = ? AND kind = 'webhook'")
+        .run(hostsJson(hosts), id).changes > 0
+    );
   }
 
   /** PA-169: change a client token's label, scopes or hosts. Coordinator rows are not editable here. */
@@ -161,7 +191,8 @@ export function toClientTokenSummary(row: HubMcpTokenRow): HubMcpClientToken {
  * columns means "everything" — which is what every PA-134 row is.
  */
 function principalOf(row: HubMcpTokenRow): HubMcpPrincipal {
-  const kind: HubMcpTokenKind = row.kind === 'coordinator' ? 'coordinator' : 'client';
+  const kind: HubMcpTokenKind =
+    row.kind === 'coordinator' ? 'coordinator' : row.kind === 'webhook' ? 'webhook' : 'client';
   let scopes: HubMcpScope[];
   if (row.scopes_json === null) {
     scopes = kind === 'coordinator' ? [...HUB_MCP_SCOPES] : [];
@@ -169,7 +200,9 @@ function principalOf(row: HubMcpTokenRow): HubMcpPrincipal {
     scopes = normaliseScopes(parseStringArray(row.scopes_json) ?? []);
   }
   let hosts: string[] | null;
-  if (row.hosts_json === null) hosts = null;
+  // A webhook token always names its hosts; NULL there is a corrupted row, and
+  // "every host" is the wrong way to fail.
+  if (row.hosts_json === null) hosts = kind === 'webhook' ? [] : null;
   else hosts = parseStringArray(row.hosts_json) ?? [];
   return { id: row.id, label: row.label, kind, scopes, hosts };
 }

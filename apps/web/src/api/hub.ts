@@ -18,6 +18,8 @@ import {
   type HubMcpClientTokenListResponse,
   type UpdateHubMcpClientTokenRequest,
   type HubMcpAttachState,
+  type HubWebhookRoutingState,
+  type SetHubWebhookRoutingRequest,
 } from '@pocketagent/protocol';
 import { ApiError } from './client.js';
 
@@ -269,5 +271,28 @@ export async function setHubMcpAttach(enabled: boolean, hubUrl?: string): Promis
   return hubRequest<HubMcpAttachState>(`/api/hub/mcp/attach/${enabled ? 'enable' : 'disable'}`, {
     method: 'POST',
     ...(enabled ? { body: JSON.stringify({ hubUrl }) } : {}),
+  });
+}
+
+// ---- PA-171: webhook routing ---------------------------------------------------
+
+/** Per bound backend: may its webhooks dispatch to other hosts, and which. */
+export async function getHubWebhookRouting(): Promise<HubWebhookRoutingState> {
+  return hubRequest<HubWebhookRoutingState>('/api/hub/webhook-routing');
+}
+
+export async function setHubWebhookRouting(
+  hostId: string,
+  body: SetHubWebhookRoutingRequest,
+): Promise<HubWebhookRoutingState> {
+  return hubRequest<HubWebhookRoutingState>(`/api/hub/webhook-routing/${encodeURIComponent(hostId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function disableHubWebhookRouting(hostId: string): Promise<HubWebhookRoutingState> {
+  return hubRequest<HubWebhookRoutingState>(`/api/hub/webhook-routing/${encodeURIComponent(hostId)}`, {
+    method: 'DELETE',
   });
 }

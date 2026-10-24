@@ -328,7 +328,7 @@ function REVOKED(id: string): HubMcpPrincipal {
 /**
  * The tool dependencies as one principal sees them (PA-169): the registry
  * narrowed to its host list, and first-use minting of a host's dispatch token
- * for a `client` only. A coordinator keeps PA-134's rule — its hosts get their
+ * for a `client` (or, PA-171, a `webhook` token) only. A coordinator keeps PA-134's rule — its hosts get their
  * tokens at enable or bind, and one without is reported, never quietly fixed.
  */
 function depsFor(base: FleetToolDeps, principal: HubMcpPrincipal): FleetToolDeps {
@@ -336,7 +336,9 @@ function depsFor(base: FleetToolDeps, principal: HubMcpPrincipal): FleetToolDeps
   return {
     ...rest,
     registry: scopedRegistry(base.registry, principal),
-    ...(principal.kind === 'client' && ensureDispatchToken ? { ensureDispatchToken } : {}),
+    // PA-171: a webhook-routing token is a client in this respect — the
+    // backend that holds it may have no Fleet agent behind it at all.
+    ...(principal.kind !== 'coordinator' && ensureDispatchToken ? { ensureDispatchToken } : {}),
   };
 }
 

@@ -22,6 +22,7 @@ import { DiscoveryService } from './discovery/service.js';
 import { FleetService } from './fleet/service.js';
 import { BackendMcpClient } from './mcp/backend-client.js';
 import { HubMcpAttachService } from './mcp/attach.js';
+import { WebhookRoutingService } from './mcp/webhook-routing.js';
 import { HubMcpServer } from './mcp/server.js';
 import { HubMcpTokenStore } from './mcp/tokens.js';
 import { DispatchLimiter } from './mcp/tools.js';
@@ -95,6 +96,8 @@ export interface HubContext {
   readonly fleet: FleetService;
   /** PA-169: the Hub's `/mcp` offered to sessions on each backend. */
   readonly mcpAttach: HubMcpAttachService;
+  /** PA-171: backends whose webhooks may dispatch remote runs through this Hub. */
+  readonly webhookRouting: WebhookRoutingService;
 }
 
 declare module 'fastify' {
@@ -174,6 +177,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   const mcpTokens = new HubMcpTokenStore(db);
   const backendMcp = new BackendMcpClient(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {});
   const fleetRef: { current?: FleetService } = {};
+  const webhookRoutingRef: { current?: WebhookRoutingService } = {};
   const mcpServer = new HubMcpServer({
     deps: {
       registry,
@@ -184,6 +188,8 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
       templates,
       ensureAdminToken: (host) => fleetRef.current!.ensureAdminToken(host),
       ensureDispatchToken: (host) => fleetRef.current!.ensureDispatchTokenFor(host),
+      // PA-171: only a webhook-routing token resolves to an origin.
+      dispatchOriginFor: (principalId) => webhookRoutingRef.current?.originFor(principalId) ?? null,
       log: app.log,
     },
     version: HUB_VERSION,
@@ -203,6 +209,16 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   });
   fleetRef.current = fleet;
   const mcpAttach = new HubMcpAttachService({ db, registry, tokens: mcpTokens, mcpServer, fetchImpl, log: app.log });
+  const webhookRouting = new WebhookRoutingService({
+    db,
+    registry,
+    tokens: mcpTokens,
+    mcpServer,
+    fetchImpl,
+    log: app.log,
+    ensureDispatchProvenance: (host) => fleet.ensureDispatchProvenance(host),
+  });
+  webhookRoutingRef.current = webhookRouting;
 
   const context: HubContext = {
     config,
@@ -222,6 +238,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     backendMcp,
     fleet,
     mcpAttach,
+    webhookRouting,
   };
   app.decorate('hub', context);
 

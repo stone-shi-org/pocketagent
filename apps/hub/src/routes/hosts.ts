@@ -228,6 +228,7 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
     // that can revoke it still works. Best-effort, like everything here.
     await app.hub.fleet.beforeHostRemoved(row.id).catch(() => undefined);
     await app.hub.mcpAttach.beforeHostRemoved(row.id).catch(() => undefined);
+    await app.hub.webhookRouting.beforeHostRemoved(row.id).catch(() => undefined);
     let revokedOnBackend = false;
     const credential = registry.credentialFor(row);
     if (credential !== null && row.credential_id !== null) {

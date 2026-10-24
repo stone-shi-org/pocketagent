@@ -37,7 +37,7 @@ export interface HubMcpTokenRow {
   token_prefix: string;
   created_at: number;
   last_seen_at: number | null;
-  /** PA-169: `coordinator` (the Fleet agent's, every scope and host) or `client`. */
+  /** PA-169: `coordinator` (the Fleet agent's, every scope and host) or `client`; PA-171 adds `webhook`. */
   kind: string;
   /** PA-169: JSON array of `HubMcpScope`, or NULL for every scope (coordinator rows). */
   scopes_json: string | null;
@@ -51,6 +51,18 @@ export interface HubMcpAttachRow {
   hub_url: string;
   token_id: string | null;
   token_prefix: string | null;
+  last_error: string | null;
+  updated_at: number;
+}
+
+/** PA-171: one backend whose webhooks may dispatch remote runs through this Hub. */
+export interface HubWebhookRoutingRow {
+  host_id: string;
+  hub_url: string;
+  token_id: string | null;
+  token_prefix: string | null;
+  /** JSON array of the target host ids its token may reach. */
+  allowed_hosts_json: string;
   last_error: string | null;
   updated_at: number;
 }
@@ -278,6 +290,23 @@ export const HUB_MIGRATIONS: readonly string[] = [
     token_prefix TEXT,
     last_error   TEXT,
     updated_at   INTEGER NOT NULL
+  );
+  `,
+  // 6 — PA-171. Webhook routing: which backends may dispatch their webhooks'
+  // runs to other hosts through this Hub. Each holds its own \`webhook\`-kind
+  // Hub MCP token (dispatch scope, the hosts listed here), minted by the Hub
+  // and handed over once. CASCADE from the source host for the attach table's
+  // reason; token_id is again not a foreign key, so a token revoked elsewhere
+  // shows as a broken row rather than vanishing.
+  `
+  CREATE TABLE IF NOT EXISTS hub_webhook_routing (
+    host_id            TEXT PRIMARY KEY REFERENCES hub_hosts (id) ON DELETE CASCADE,
+    hub_url            TEXT NOT NULL,
+    token_id           TEXT,
+    token_prefix       TEXT,
+    allowed_hosts_json TEXT NOT NULL,
+    last_error         TEXT,
+    updated_at         INTEGER NOT NULL
   );
   `,
 ];

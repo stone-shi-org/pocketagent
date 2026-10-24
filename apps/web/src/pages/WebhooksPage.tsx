@@ -7,6 +7,7 @@ import { WebhookHistoryPanel } from '../components/WebhookHistoryPanel.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
+import type { RemoteHostLinks } from '../hosts/webhook-remote.js';
 
 const REFRESH_MS = 5000;
 
@@ -18,6 +19,8 @@ interface Props {
   onOpenChat: (conversationId: string) => void;
   /** PA-10: opens a Pocket Agent delivery's chat — its only transcript. */
   onOpenPlannerChat: (chatId: string) => void;
+  /** PA-171: opens a delivery that ran on another host, there. Absent without a Hub. */
+  remoteHosts?: RemoteHostLinks;
   onApiError: (error: unknown) => void;
   /**
    * Present only on the phone route. `DesktopShell` renders this in its right
@@ -47,6 +50,7 @@ export function WebhooksPage({
   onOpenSession,
   onOpenChat,
   onOpenPlannerChat,
+  remoteHosts,
   onApiError,
   onBack,
 }: Props): JSX.Element {
@@ -120,6 +124,9 @@ export function WebhooksPage({
           config: imported.config,
           authMode: imported.authMode ?? 'hmac',
           cwd: imported.cwd ?? '',
+          // An export carries no top-level host (PA-171): a Hub host id names a
+          // machine in one fleet, and an import may be into another.
+          hostId: null,
           agent: imported.agent,
           worktreeMode: imported.worktreeMode ?? 'none',
           model: imported.model,
@@ -342,6 +349,7 @@ export function WebhooksPage({
         onOpenSession={onOpenSession}
         onOpenChat={onOpenChat}
         onOpenPlannerChat={onOpenPlannerChat}
+        remoteHosts={remoteHosts}
         onOpenWebhook={onOpenWebhook}
         onApiError={onApiError}
       />

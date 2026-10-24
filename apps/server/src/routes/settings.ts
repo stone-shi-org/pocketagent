@@ -10,6 +10,10 @@ import {
   fromDtoValue,
   buildRuntimeSettingsSnapshot,
 } from '../settings/index.js';
+import {
+  readWebhookDispatchSkipApprovals,
+  writeWebhookDispatchSkipApprovals,
+} from '../webhooks/routing-store.js';
 import { auditConfigChange } from './shared.js';
 
 /**
@@ -24,8 +28,12 @@ import { auditConfigChange } from './shared.js';
  * `fixed` is all that is specific to this route.
  */
 function buildSettingsResponse(context: PocketContext): SettingsResponse {
-  const { config, sessions } = context;
-  const snapshot = buildRuntimeSettingsSnapshot(config, sessions.getGlobalSkipPermissions());
+  const { config, sessions, db } = context;
+  const snapshot = buildRuntimeSettingsSnapshot(
+    config,
+    sessions.getGlobalSkipPermissions(),
+    readWebhookDispatchSkipApprovals(db),
+  );
   return {
     fixed: {
       host: config.host,
@@ -75,8 +83,22 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     }
     const { config, sessions, db } = app.pocket;
 
+    // PA-171: an approval switch, so only a person (or the operator's Hub) may
+    // flip it — never an MCP client, which is exactly whose runs it would bypass.
+    if (patch.webhookDispatchSkipApprovals !== undefined && request.mcpPrincipal) {
+      return reply.code(403).send({
+        error: {
+          code: 'forbidden',
+          message: 'An MCP client cannot change whether dispatched webhook runs skip approvals on this host.',
+        },
+      });
+    }
+
     if (patch.skipPermissionsEnabled !== undefined) {
       await sessions.setGlobalSkipPermissions(patch.skipPermissionsEnabled as boolean);
+    }
+    if (patch.webhookDispatchSkipApprovals !== undefined) {
+      writeWebhookDispatchSkipApprovals(db, patch.webhookDispatchSkipApprovals as boolean);
     }
 
     const updatedFields: string[] = [];
@@ -94,6 +116,15 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
     if (patch.skipPermissionsEnabled !== undefined) {
       updatedFields.push('skipPermissionsEnabled');
+    }
+    if (patch.webhookDispatchSkipApprovals !== undefined) {
+      updatedFields.push('webhookDispatchSkipApprovals');
+      // Always `warn`, whoever asked: it decides whether runs another machine
+      // sends here are supervised at all.
+      request.log.warn(
+        { webhookDispatchSkipApprovals: patch.webhookDispatchSkipApprovals },
+        'webhook-dispatch skip-approvals switch changed',
+      );
     }
     if (updatedFields.length > 0) {
       auditConfigChange(request, 'settings updated', {

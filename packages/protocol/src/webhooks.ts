@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
 import { LIMITS } from './limits.js';
 import { CronWorktreeMode } from './cron.js';
+import { HubHostId } from './hub-registry.js';
 
 /**
  * Inbound webhooks: an outside system starting agent work.
@@ -259,6 +260,15 @@ export type JiraWebhookFilter = z.infer<typeof JiraWebhookFilter>;
 export const JiraProjectMapEntry = z.object({
   projectKey: z.string().min(1).max(32),
   cwd: z.string().min(1).max(4096),
+  /**
+   * PA-171: run this project on *another* agent server, by its Hub host id.
+   * Absent means this server, so every row written before the field existed is
+   * unchanged. A remote `cwd` is not containment-checked here — this server
+   * cannot see that machine's folders — but re-resolved by the target's own
+   * `start_session` against its own workspace folders, which refuses anything
+   * outside them.
+   */
+  hostId: HubHostId.optional(),
 });
 export type JiraProjectMapEntry = z.infer<typeof JiraProjectMapEntry>;
 
@@ -301,6 +311,8 @@ export type BambooWebhookFilter = z.infer<typeof BambooWebhookFilter>;
 export const BambooPlanMapEntry = z.object({
   planKey: z.string().min(1).max(32),
   cwd: z.string().min(1).max(4096),
+  /** PA-171: as `JiraProjectMapEntry.hostId`. */
+  hostId: HubHostId.optional(),
 });
 export type BambooPlanMapEntry = z.infer<typeof BambooPlanMapEntry>;
 
@@ -395,6 +407,12 @@ const WebhookFields = z
     authMode: WebhookAuthMode,
     cwd: z.string().min(1).max(4096),
     /**
+     * PA-171: the host the top-level `cwd` (the fallback when no map row
+     * matches) lives on. `null` means this server. Nullable rather than
+     * optional so a PATCH can move the target back to local.
+     */
+    hostId: HubHostId.nullable(),
+    /**
      * A coding-agent id from the server's `AgentRegistry` (`claude`, `codex`,
      * …), **or** a Pocket Agent as `pocket:<plannerWorkspaceId>` — see
      * `POCKET_AGENT_ID_PREFIX` in `planner.ts` for why PA-10 widened this one
@@ -457,10 +475,12 @@ const WebhookFields = z
     slug: true,
     model: true,
     effort: true,
+    hostId: true,
   });
 
 export const CreateWebhookRequest = WebhookFields.extend({
   enabled: z.boolean().default(true),
+  hostId: HubHostId.nullable().default(null),
   authMode: WebhookAuthMode.default('hmac'),
   worktreeMode: CronWorktreeMode.default('none'),
   conversationMode: WebhookConversationMode.default('per-delivery'),
@@ -541,6 +561,8 @@ export const Webhook = z.object({
   config: WebhookConfig,
   cwd: z.string(),
   workspaceLabel: z.string(),
+  /** PA-171: the host the top-level `cwd` is on; `null` = this server. */
+  hostId: HubHostId.nullable(),
   agent: z.string(),
   agentDisplayName: z.string(),
   worktreeMode: CronWorktreeMode,
@@ -606,6 +628,10 @@ export const WebhookSecretResponse = z.object({
   secretSetAt: z.number().int(),
 });
 export type WebhookSecretResponse = z.infer<typeof WebhookSecretResponse>;
+
+/** PA-171: a remote run's last reported state while its delivery is open. */
+export const WebhookRemoteState = z.enum(['queued', 'running', 'awaiting_approval']);
+export type WebhookRemoteState = z.infer<typeof WebhookRemoteState>;
 
 export const WebhookDelivery = z.object({
   id: z.string(),
@@ -676,6 +702,22 @@ export const WebhookDelivery = z.object({
   retryProblem: z.string().nullable(),
   /** PA-170: unconfirmed route suggestion when this delivery was filtered for an unmapped key. */
   routeSuggestion: WebhookRouteCacheEntry.nullable().optional(),
+  /**
+   * PA-171: the host this delivery was dispatched to through the Hub, or null
+   * for a run on this server. When set, `sessionId` / `plannerChatId` are ids
+   * *on that host*, and the transcript is reached through the Hub at
+   * `#/h/<remoteHostId>/s/<id>` (or `/planner/<id>`).
+   */
+  remoteHostId: z.string().nullable(),
+  /** PA-171: `session:<id>` or `chat:<id>` on `remoteHostId`, exactly as the Hub returned it. */
+  remoteRef: z.string().nullable(),
+  /**
+   * PA-171: what the last Hub `wait` reported while the delivery is `running`:
+   * `queued` (behind another run in that host's working tree), `awaiting_approval`
+   * (a human must answer on that host), or `running`. Null once settled, and
+   * for a local run.
+   */
+  remoteState: WebhookRemoteState.nullable(),
 });
 export type WebhookDelivery = z.infer<typeof WebhookDelivery>;
 

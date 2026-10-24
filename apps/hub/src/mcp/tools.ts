@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import {
   MAX_MCP_CALL_DEPTH,
   MCP_APPROVAL_SCOPE_ARG_META_KEY,
+  MCP_DISPATCH_ORIGIN_META_KEY,
   PROTOCOL_VERSION,
   describeIncompatibility,
   describeVersionDrift,
@@ -11,6 +12,7 @@ import {
   negotiateProtocol,
   secretHolesFor,
   type HubFleetToolName,
+  type McpDispatchOrigin,
   type ProtocolRange,
 } from '@pocketagent/protocol';
 import type { HubHostRow } from '../db.js';
@@ -67,6 +69,11 @@ export interface FleetToolDeps {
    * ever minted — Hub MCP client tokens work without a Fleet agent enabled.
    */
   readonly ensureDispatchToken?: (host: HubHostRow) => Promise<void>;
+  /**
+   * PA-171: the dispatch origin a webhook-routing token's calls carry to the
+   * target (`MCP_DISPATCH_ORIGIN_META_KEY`), or null for any other principal.
+   */
+  readonly dispatchOriginFor?: (principalId: string) => McpDispatchOrigin | null;
   readonly log?: FastifyBaseLogger;
 }
 
@@ -316,6 +323,24 @@ function assertMayStart(ctx: FleetToolContext): void {
   }
 }
 
+/**
+ * PA-171: the `_meta` a dispatch call adds for the target, stated by the Hub.
+ *
+ * Only a `webhook`-kind token's calls get one, and its content comes from the
+ * Hub's own routing row — never from the caller's arguments or `_meta` — so
+ * the target can trust that "this is a webhook run from dev01" was decided
+ * here. A webhook token whose routing row has gone is refused rather than
+ * dispatched as an ordinary client: it has no business existing.
+ */
+function originMeta(deps: FleetToolDeps, ctx: FleetToolContext): Record<string, unknown> {
+  if (ctx.principal.kind !== 'webhook') return {};
+  const origin = deps.dispatchOriginFor?.(ctx.principal.id) ?? null;
+  if (origin === null) {
+    throw new Error('This webhook-routing token no longer has a routing entry on the Hub. Save webhook routing again.');
+  }
+  return { [MCP_DISPATCH_ORIGIN_META_KEY]: origin };
+}
+
 function waitSeconds(args: Record<string, unknown>): number {
   const raw = args.timeoutSeconds;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_WAIT_SECONDS;
@@ -518,6 +543,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
     async handler(deps, ctx, args) {
       assertMayStart(ctx);
+      const meta = originMeta(deps, ctx);
       const target = await targetFor(deps, args.host);
       return deps.limiter.run(target.hostId, async () => {
         const created = await deps.client.call(
@@ -528,7 +554,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
             title: typeof args.title === 'string' && args.title.length > 0 ? args.title : `Fleet · ${ctx.principal.label}`,
             ...(typeof args.modelId === 'string' && args.modelId.length > 0 ? { modelId: args.modelId } : {}),
           },
-          { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 },
+          { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000, meta },
         );
         const chatId = typeof created.chatId === 'string' ? created.chatId : null;
         if (!chatId) throw new Error(`${target.row.label} created a chat but did not say which.`);
@@ -536,7 +562,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
           target,
           'send_pocket_message',
           { chatId, message: String(args.prompt), timeoutSeconds: 0 },
-          { depth: ctx.depth, signal: ctx.signal },
+          { depth: ctx.depth, signal: ctx.signal, meta },
         );
         return turnView(target.hostId, `chat:${chatId}`, { ...sent, chatId });
       });
@@ -563,6 +589,11 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
         },
         title: { type: 'string', maxLength: 200 },
         model: { type: 'string', maxLength: 200 },
+        branchBase: {
+          type: 'string',
+          maxLength: 60,
+          description: 'Readable base for the minted branch name with worktree "new-branch". The host still mints the name.',
+        },
       },
       required: ['host', 'cwd', 'agent', 'prompt'],
       additionalProperties: false,
@@ -572,6 +603,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
     async handler(deps, ctx, args) {
       assertMayStart(ctx);
+      const meta = originMeta(deps, ctx);
       const target = await targetFor(deps, args.host);
       return deps.limiter.run(target.hostId, async () => {
         const started = await deps.client.call(
@@ -584,8 +616,9 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
             title: typeof args.title === 'string' && args.title.length > 0 ? args.title : `Fleet · ${ctx.principal.label}`,
             ...(args.worktree === 'new-branch' ? { worktree: 'new-branch' } : {}),
             ...(typeof args.model === 'string' && args.model.length > 0 ? { model: args.model } : {}),
+            ...(typeof args.branchBase === 'string' && args.branchBase.length > 0 ? { branchBase: args.branchBase } : {}),
           },
-          { depth: ctx.depth, signal: ctx.signal, timeoutMs: 60_000 },
+          { depth: ctx.depth, signal: ctx.signal, timeoutMs: 60_000, meta },
         );
         const sessionId = typeof started.sessionId === 'string' ? started.sessionId : null;
         if (!sessionId) throw new Error(`${target.row.label} started a session but did not say which.`);
@@ -625,6 +658,56 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
             ? await deps.client.call(target, 'wait_for_turn', { sessionId: id, timeoutSeconds }, { depth: ctx.depth, signal: ctx.signal })
             : await deps.client.call(target, 'wait_for_pocket_turn', { chatId: id, timeoutSeconds }, { depth: ctx.depth, signal: ctx.signal });
         return turnView(target.hostId, ref, kind === 'session' ? { sessionId: id, ...result } : { chatId: id, ...result });
+      });
+    },
+  },
+  {
+    name: 'dispatch_prompt',
+    title: 'Send a follow-up to dispatched work',
+    description:
+      'Send another prompt into work an earlier dispatch_* call started on a host (its ref). A finished coding ' +
+      'session is resumed into a new one, whose ref is returned — use that ref from then on. Returns at once; ' +
+      'call wait(host, ref). Needs approval on this side, per host. Approvals the work needs on that host are ' +
+      'answered by a human there.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: hostArg,
+        ref: { type: 'string', minLength: 1, maxLength: 220, description: 'The ref a dispatch_* call returned.' },
+        prompt: { type: 'string', minLength: 1, maxLength: 100_000 },
+      },
+      required: ['host', 'ref', 'prompt'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    meta: SCOPED_BY_HOST,
+    targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
+    async handler(deps, ctx, args) {
+      assertMayStart(ctx);
+      const meta = originMeta(deps, ctx);
+      const target = await targetFor(deps, args.host);
+      const ref = String(args.ref);
+      const match = /^(session|chat):(.{1,200})$/.exec(ref);
+      if (!match) throw new Error('A ref looks like "session:<id>" or "chat:<id>", exactly as dispatch_* returned it.');
+      const [, kind, id] = match as unknown as [string, 'session' | 'chat', string];
+      return deps.limiter.run(target.hostId, async () => {
+        if (kind === 'chat') {
+          const sent = await deps.client.call(
+            target,
+            'send_pocket_message',
+            { chatId: id, message: String(args.prompt), timeoutSeconds: 0 },
+            { depth: ctx.depth, signal: ctx.signal, meta },
+          );
+          return turnView(target.hostId, ref, { ...sent, chatId: id });
+        }
+        const sent = await deps.client.call(
+          target,
+          'send_prompt',
+          { sessionId: id, prompt: String(args.prompt) },
+          { depth: ctx.depth, signal: ctx.signal, timeoutMs: 60_000, meta },
+        );
+        const sessionId = typeof sent.sessionId === 'string' ? sent.sessionId : id;
+        return turnView(target.hostId, `session:${sessionId}`, { ...sent, sessionId });
       });
     },
   },

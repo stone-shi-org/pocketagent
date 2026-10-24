@@ -37,6 +37,7 @@ import { useHostFleet } from '../hosts/useHostFleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
 import { loadCollapsedHosts, toggleCollapsedHost } from '../hosts/collapsed-pref.js';
 import type { HostDirectory } from '../hosts/directory.js';
+import { buildRemoteHostLinks } from '../hosts/webhook-remote.js';
 import type { HostRecord } from '../hosts/host-status.js';
 import type { HostNav } from '../hosts/HostNav.js';
 import { DEFAULT_HOST_ID } from '../api/host.js';
@@ -285,6 +286,11 @@ export function DesktopShell({
   const openHub = (): void => onNavigate({ name: 'hub' }, { hostId: null });
   // PA-134: the Fleet agent's entry, in the Hub sidebar and the host sheet.
   const fleetEntry = useFleetEntry(directory);
+  // PA-171: webhook deliveries that ran on another host open there, in a tab of their own.
+  const remoteHosts = useMemo(
+    () => buildRemoteHostLinks(directory.source, hosts, (routingId, target) => nav.openOn(routingId, target)),
+    [directory.source, hosts, nav],
+  );
   const openFleet = useOpenFleetChat(
     fleetEntry,
     useCallback((hostId: string, chatId: string) => nav.openOn(hostId, { name: 'planner-chat', chatId }), [nav]),
@@ -1102,6 +1108,7 @@ export function DesktopShell({
                 ) : tab.route.name === 'webhooks' ? (
                   <Suspense fallback={<PageFallback />}>
                     <WebhooksPage
+                      remoteHosts={remoteHosts}
                       onBack={() => closeTab(tab.id)}
                       onOpenWebhook={(webhookId) => nav.openOn(tab.hostId, { name: 'webhook', webhookId })}
                       onOpenSession={(sessionId) => nav.openOn(tab.hostId, { name: 'terminal', sessionId })}
@@ -1113,6 +1120,7 @@ export function DesktopShell({
                 ) : tab.route.name === 'webhook' ? (
                   <Suspense fallback={<PageFallback />}>
                     <WebhookEditorPage
+                      remoteHosts={remoteHosts}
                       key={tab.route.webhookId}
                       webhookId={tab.route.webhookId}
                       onBack={() => nav.openOn(tab.hostId, { name: 'webhooks' })}

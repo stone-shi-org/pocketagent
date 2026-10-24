@@ -77,6 +77,7 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [confirmingSkip, setConfirmingSkip] = useState(false);
+  const [confirmingDispatchSkip, setConfirmingDispatchSkip] = useState(false);
   const [fontOverride, setFontOverride] = useState(() => getTerminalFontOverride() ?? '');
   const [voiceDirectSend, setVoiceDirectSend] = useState(() => getVoiceDirectSendPref());
   const { devices: audioDevices, selectedDeviceId: micDeviceId, selectDevice: selectMicDevice } =
@@ -169,6 +170,11 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
   async function applySkipPermissions(next: boolean): Promise<void> {
     await save({ skipPermissionsEnabled: next }, ['skipPermissionsEnabled']);
     setConfirmingSkip(false);
+  }
+
+  async function applyDispatchSkip(next: boolean): Promise<void> {
+    await save({ webhookDispatchSkipApprovals: next }, ['webhookDispatchSkipApprovals']);
+    setConfirmingDispatchSkip(false);
   }
 
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
@@ -347,6 +353,55 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
             onChange={(next) => {
               if (next) setConfirmingSkip(true);
               else void applySkipPermissions(false);
+            }}
+          />
+        )}
+        {/*
+          PA-171: a separate switch from the one above because the runs it
+          covers are started by *another* server's webhook — a prompt this
+          host's operator neither wrote nor configured. It lives here, on the
+          target, so that no source machine can turn approvals off on this one.
+        */}
+        {confirmingDispatchSkip ? (
+          <div className="warn-callout" role="alert">
+            <p className="confirm-body" style={{ fontWeight: 650, marginBottom: '6px' }}>
+              Skip approvals for webhook runs sent from other servers?
+            </p>
+            <p className="confirm-body">
+              Runs other servers&rsquo; webhooks send to this host will not ask before using tools. Their prompts are
+              built partly from text someone else wrote in Jira or a Bamboo build, on a machine you may not
+              administer, and they will edit files and run commands here unattended.
+            </p>
+            <p className="confirm-body dim" style={{ fontSize: '12px', marginTop: '6px', color: 'var(--text-dim)' }}>
+              Applies to runs started after you turn it on. A run started while it is on says so on every visit.
+            </p>
+            <div className="dialog-actions" style={{ marginTop: '16px' }}>
+              <button
+                type="button"
+                onClick={() => setConfirmingDispatchSkip(false)}
+                disabled={busy('webhookDispatchSkipApprovals')}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                className="danger primary-danger"
+                onClick={() => void applyDispatchSkip(true)}
+                disabled={busy('webhookDispatchSkipApprovals')}
+              >
+                {busy('webhookDispatchSkipApprovals') ? 'Enabling…' : 'Skip approvals for dispatched runs'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <BoolRow
+            label="Skip approvals for webhook runs from other servers"
+            help="Off by default. Webhook runs another server dispatches to this host through the Hub then follow this host's own approvals, whatever that webhook's Skip permissions says. Turning this on lets those runs use tools here without asking."
+            checked={settings.webhookDispatchSkipApprovals}
+            busy={busy('webhookDispatchSkipApprovals')}
+            onChange={(next) => {
+              if (next) setConfirmingDispatchSkip(true);
+              else void applyDispatchSkip(false);
             }}
           />
         )}

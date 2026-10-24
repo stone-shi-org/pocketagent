@@ -28,6 +28,7 @@ import type {
   CreateMcpClientTokenResponse,
   McpClientTokenListResponse,
   FleetMcpAttachState,
+  WebhookRoutingState,
   MeResponse,
   ProjectInfo,
   PushStatusResponse,
@@ -364,6 +365,12 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     /** PA-169: whether this host's sessions can attach the Hub's `/mcp`. */
     getFleetMcp: () => request<FleetMcpAttachState>('/api/fleet-mcp'),
+
+    /**
+     * PA-171: whether this host's webhooks may name another host in a mapping
+     * row, and which hosts. Written only by a Hub; read here for the editor.
+     */
+    getWebhookRouting: () => request<WebhookRoutingState>('/api/webhook-routing'),
 
     createMcpToken: (body: CreateMcpClientTokenRequest) =>
       request<CreateMcpClientTokenResponse>('/api/mcp/tokens', {

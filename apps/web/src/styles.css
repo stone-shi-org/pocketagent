@@ -5550,6 +5550,12 @@ button.chat-rate-limit-badge {
   min-width: 0;
 }
 
+/* PA-171: the host select, shown only when this server's webhooks may route elsewhere. */
+.project-map-host {
+  flex: 0 1 150px;
+  min-width: 0;
+}
+
 .project-map-remove {
   width: 32px;
   height: 32px;
@@ -6379,6 +6385,23 @@ button.chat-rate-limit-badge {
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
   color: var(--text-dim);
+}
+
+/* PA-171: the delivery ran on another host; the tag names it. */
+.history-host-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+}
+
+/* PA-171: what a dispatched run is doing over there. Not upper-cased — it carries a host name. */
+.history-remote-state {
+  font-size: 11px;
+  color: var(--warn);
 }
 
 /* PA-39: the delivery jumped the directory queue because of the skip-queue label. */

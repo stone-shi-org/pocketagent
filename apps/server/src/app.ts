@@ -26,6 +26,10 @@ import { McpServerService } from './mcp-server/server.js';
 import { mcpServerRoutes } from './routes/mcp-server.js';
 import { fleetMcpRoutes } from './routes/fleet-mcp.js';
 import { FleetMcpAttachStore } from './mcp-server/fleet-attach.js';
+import { WebhookRoutingStore } from './webhooks/routing-store.js';
+import { HubDispatchClient } from './runs/hub-dispatch.js';
+import { RemoteRunExecutor, type RemoteRunExecutorOptions } from './runs/remote.js';
+import { webhookRoutingRoutes } from './routes/webhook-routing.js';
 import {
   deleteWorkspace,
   insertWorkspace,
@@ -222,6 +226,12 @@ export interface BuildAppOptions {
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
   /**
+   * PA-171: injected in tests — the fetch the Hub dispatch client uses, and the
+   * remote wait loop's timings (a real run polls every 10 s).
+   */
+  hubDispatchFetch?: typeof fetch;
+  remoteRunTimings?: Pick<RemoteRunExecutorOptions, 'pollMs' | 'approvalPollMs' | 'maxBackoffMs' | 'maxRejections'>;
+  /**
    * PA-165: model-written titles for new Pocket Agent chats. On unless set to
    * false; the test harness turns it off so a scripted fake LLM is not sent a
    * request it did not script (a test that wants it turns it back on).
@@ -352,6 +362,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const mcpTokens = new McpTokenStore(db);
   // PA-169: the Hub's `/mcp` for sessions started with "attach Fleet MCP".
   const fleetMcp = new FleetMcpAttachStore({ db, encKey: config.settingsEncKey, logger: app.log });
+  // PA-171: the Hub token this host's webhooks dispatch remote runs with.
+  const webhookRouting = new WebhookRoutingStore({ db, encKey: config.settingsEncKey, logger: app.log });
+  const remoteRuns = new RemoteRunExecutor({
+    client: new HubDispatchClient({
+      credential: () => webhookRouting.credential(),
+      version: VERSION,
+      ...(options.hubDispatchFetch ? { fetchImpl: options.hubDispatchFetch } : {}),
+    }),
+    ...(options.remoteRunTimings ?? {}),
+    logger: app.log,
+  });
   const workspaces = new WorkspaceRegistry(
     config.workspaceRoots,
     createWorkspaceStore({
@@ -738,6 +759,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // Shared with interactive sessions: the service carves a reservation out of
     // this so a Jira delivery storm can never take the user's last slots.
     maxSessions: config.maxSessions,
+    webhookRouting,
+    remoteRuns,
     logger: app.log,
   });
 
@@ -853,6 +876,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     mcpTokens,
     mcpWork,
     fleetMcp,
+    webhookRouting,
     // Replaced just below, once the context it reads from exists.
     mcpServer: null as unknown as McpServerService,
   };
@@ -1075,6 +1099,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(authRoutes);
   await app.register(mcpServerRoutes);
   await app.register(fleetMcpRoutes);
+  await app.register(webhookRoutingRoutes);
   await app.register(sessionRoutes);
   await app.register(chatReadRoutes);
   await app.register(attachmentRoutes);
@@ -1169,5 +1194,5 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
 /** PA-118: a hub credential on the MCP endpoint, as an MCP principal. */
 function hubAsMcpPrincipal(hub: { id: string; label: string }): McpClientIdentity {
-  return { id: hub.id, label: `hub:${hub.label}`, scopes: MCP_SCOPES };
+  return { id: hub.id, label: `hub:${hub.label}`, scopes: MCP_SCOPES, mintedByHubId: hub.id };
 }

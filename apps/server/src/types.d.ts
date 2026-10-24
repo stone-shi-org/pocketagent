@@ -17,6 +17,7 @@ import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
 import type { McpTokenStore, McpClientIdentity } from './auth/mcp-tokens.js';
 import type { FleetMcpAttachStore } from './mcp-server/fleet-attach.js';
+import type { WebhookRoutingStore } from './webhooks/routing-store.js';
 import type { McpWorkService } from './mcp-server/work.js';
 import type { McpServerService } from './mcp-server/server.js';
 import type { UsageService } from './usage/index.js';
@@ -115,6 +116,8 @@ export interface PocketContext {
   mcpServer: McpServerService;
   /** PA-169: the Hub's `/mcp`, as this host's sessions may attach it. */
   fleetMcp: FleetMcpAttachStore;
+  /** PA-171: where this host's webhooks dispatch remote runs, through the Hub. */
+  webhookRouting: WebhookRoutingStore;
 }
 
 declare module 'fastify' {
