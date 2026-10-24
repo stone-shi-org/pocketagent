@@ -11,7 +11,8 @@ import {
   type McpHttpHandler,
   type ServerContext,
 } from '@modelcontextprotocol/server';
-import { MCP_DEPTH_HEADER, MCP_DEPTH_META_KEY, MCP_MODERN_PROTOCOL_VERSIONS, type McpProtocolEra } from '@pocketagent/protocol';
+import { HUB_FLEET_TOOL_SCOPES, MCP_DEPTH_HEADER, MCP_DEPTH_META_KEY, MCP_MODERN_PROTOCOL_VERSIONS, type McpProtocolEra } from '@pocketagent/protocol';
+import { hostRefusal, scopedRegistry, toolAllowed } from './scope.js';
 import type { HubMcpPrincipal } from './tokens.js';
 import { FLEET_TOOLS, type FleetToolDefinition, type FleetToolDeps } from './tools.js';
 
@@ -41,7 +42,10 @@ declare module 'fastify' {
  * - **Legacy** requests get sessionful transports bound to the principal that
  *   opened them; another principal's session id is answered as unknown.
  * - **Every tool call re-reads the principal**, so a revoked token stops on its
- *   next call even inside a long-lived session.
+ *   next call even inside a long-lived session — and, since PA-169, so does a
+ *   token whose scopes or host list were narrowed (`scope.ts`). The catalog a
+ *   session is built with is filtered by scope too, but that is presentation;
+ *   the per-call check is the enforcement.
  * - **Nothing about arguments or results is logged** — a prompt dispatched to
  *   another machine is as private as terminal I/O. Each call logs its name,
  *   principal, target host, era, duration and outcome.
@@ -131,7 +135,7 @@ export class HubMcpServer {
     }
 
     this.enforceSessionCap(principal.id);
-    const server = this.buildServer(principal.id, depthOf(request.headers[MCP_DEPTH_HEADER]), 'legacy');
+    const server = this.buildServer(principal, depthOf(request.headers[MCP_DEPTH_HEADER]), 'legacy');
     let entry: LegacySession | null = null;
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
@@ -174,8 +178,13 @@ export class HubMcpServer {
     let handler = this.modern.get(principalId);
     if (!handler) {
       handler = createMcpHandler(
-        (ctx) =>
-          this.buildServer(principalId, depthOf(ctx.requestInfo?.headers.get(MCP_DEPTH_HEADER) ?? undefined), 'modern'),
+        (ctx) => {
+          // Re-resolved per request, so a modern client's catalog follows the
+          // token's current scopes. A revoked principal gets an empty catalog
+          // (the gate has already refused its request in any case).
+          const principal = this.opts.resolve(principalId) ?? REVOKED(principalId);
+          return this.buildServer(principal, depthOf(ctx.requestInfo?.headers.get(MCP_DEPTH_HEADER) ?? undefined), 'modern');
+        },
         {
           legacy: 'reject',
           onerror: (err) => this.opts.log.warn({ err: err.message }, 'hub mcp modern request rejected or failed'),
@@ -215,7 +224,7 @@ export class HubMcpServer {
     }
   }
 
-  private buildServer(principalId: string, depth: number, era: McpProtocolEra): McpServer {
+  private buildServer(principal: HubMcpPrincipal, depth: number, era: McpProtocolEra): McpServer {
     const server = new McpServer(
       { name: 'pocketagent-hub', version: this.opts.version },
       {
@@ -227,7 +236,9 @@ export class HubMcpServer {
           'Approvals on a host are answered by a human there; you can see them and never answer them.',
       },
     );
-    for (const tool of FLEET_TOOLS) this.registerTool(server, tool, principalId, depth, era);
+    for (const tool of FLEET_TOOLS) {
+      if (toolAllowed(tool.name, principal)) this.registerTool(server, tool, principal.id, depth, era);
+    }
     return server;
   }
 
@@ -261,6 +272,7 @@ export class HubMcpServer {
           this.opts.log.info(
             {
               hubMcpClient: principal?.label ?? principalId,
+              hubMcpTokenKind: principal?.kind ?? null,
               tool: tool.name,
               targetHost: target,
               era,
@@ -274,10 +286,23 @@ export class HubMcpServer {
           audit(false);
           return errorResult('This Hub MCP token has been revoked.');
         }
+        // PA-169: scope and host list, from the row just re-read — so a token
+        // narrowed since this session opened is held to its current grant.
+        if (!toolAllowed(tool.name, principal)) {
+          audit(false);
+          return errorResult(
+            `${tool.name} needs the "${HUB_FLEET_TOOL_SCOPES[tool.name]}" scope, which this Hub MCP token does not have.`,
+          );
+        }
+        const refusal = hostRefusal(principal, args);
+        if (refusal !== null) {
+          audit(false);
+          return errorResult(refusal);
+        }
         const meta = ctx.mcpReq._meta as Record<string, unknown> | undefined;
         try {
           const result = await tool.handler(
-            this.opts.deps,
+            depsFor(this.opts.deps, principal),
             {
               principal,
               depth: Math.max(depth, depthOf(meta?.[MCP_DEPTH_META_KEY])),
@@ -294,6 +319,25 @@ export class HubMcpServer {
       },
     );
   }
+}
+
+function REVOKED(id: string): HubMcpPrincipal {
+  return { id, label: id, kind: 'client', scopes: [], hosts: [] };
+}
+
+/**
+ * The tool dependencies as one principal sees them (PA-169): the registry
+ * narrowed to its host list, and first-use minting of a host's dispatch token
+ * for a `client` only. A coordinator keeps PA-134's rule — its hosts get their
+ * tokens at enable or bind, and one without is reported, never quietly fixed.
+ */
+function depsFor(base: FleetToolDeps, principal: HubMcpPrincipal): FleetToolDeps {
+  const { ensureDispatchToken, ...rest } = base;
+  return {
+    ...rest,
+    registry: scopedRegistry(base.registry, principal),
+    ...(principal.kind === 'client' && ensureDispatchToken ? { ensureDispatchToken } : {}),
+  };
 }
 
 /** Same as the backend's: re-serialise the parsed body; the SDK reads `parsedBody`. */

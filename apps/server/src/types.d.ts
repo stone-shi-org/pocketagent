@@ -16,6 +16,7 @@ import type { PiTranscriptStore } from './conversations/pi.js';
 import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
 import type { McpTokenStore, McpClientIdentity } from './auth/mcp-tokens.js';
+import type { FleetMcpAttachStore } from './mcp-server/fleet-attach.js';
 import type { McpWorkService } from './mcp-server/work.js';
 import type { McpServerService } from './mcp-server/server.js';
 import type { UsageService } from './usage/index.js';
@@ -112,6 +113,8 @@ export interface PocketContext {
   mcpTokens: McpTokenStore;
   mcpWork: McpWorkService;
   mcpServer: McpServerService;
+  /** PA-169: the Hub's `/mcp`, as this host's sessions may attach it. */
+  fleetMcp: FleetMcpAttachStore;
 }
 
 declare module 'fastify' {

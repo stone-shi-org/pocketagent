@@ -139,6 +139,13 @@ export const SessionInfo = z.object({
    */
   providerDisclosure: z.string().nullable(),
   /**
+   * PA-169: true when this session was started with the Hub's `/mcp`
+   * attached, so its agent can start work on other machines. Shown on every
+   * visit, like `skipPermissionsEnabled`. Optional so an older server's frame
+   * still parses; absent means false.
+   */
+  fleetMcpAttached: z.boolean().optional(),
+  /**
    * PA-20 Phase 2: true while this session's live-listen/talk-back mode is
    * on. Runtime-togglable (the `voice_mode` WS message), not creation-time
    * like `skipPermissionsEnabled` — a client turns it on/off per chat, so

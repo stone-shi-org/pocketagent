@@ -62,6 +62,11 @@ export interface FleetToolDeps {
   readonly pushRelay?: PushNotificationRelay;
   readonly templates?: TemplateStore;
   readonly ensureAdminToken?: (host: HubHostRow) => Promise<string>;
+  /**
+   * PA-169: mint a host's scoped dispatch token on first use when none was
+   * ever minted — Hub MCP client tokens work without a Fleet agent enabled.
+   */
+  readonly ensureDispatchToken?: (host: HubHostRow) => Promise<void>;
   readonly log?: FastifyBaseLogger;
 }
 
@@ -141,11 +146,19 @@ const SCOPED_BY_HOST = { [MCP_APPROVAL_SCOPE_ARG_META_KEY]: 'host' };
 const SCOPED_BY_HOSTS = { [MCP_APPROVAL_SCOPE_ARG_META_KEY]: 'hosts' };
 
 /** A host that may be dispatched to (or read via Tier 1), or an error naming why not. */
-function targetFor(deps: FleetToolDeps, hostId: unknown): BackendTarget & { row: HubHostRow } {
+async function targetFor(deps: FleetToolDeps, hostId: unknown): Promise<BackendTarget & { row: HubHostRow }> {
   if (typeof hostId !== 'string' || hostId.length === 0) throw new Error('Name a host id from list_hosts.');
-  const row = deps.registry.getRow(hostId);
+  let row = deps.registry.getRow(hostId);
   if (row === null) throw new Error(`No host "${hostId}". Call list_hosts.`);
   if (row.enabled !== 1) throw new Error(`${row.label} is disabled on the Hub.`);
+  if (deps.registry.mcpTokenState(row) === 'missing' && deps.ensureDispatchToken) {
+    try {
+      await deps.ensureDispatchToken(row);
+    } catch (err) {
+      throw new Error(`${row.label} cannot be dispatched to: ${errorText(err)}`);
+    }
+    row = deps.registry.getRow(hostId) ?? row;
+  }
   const state = deps.registry.mcpTokenState(row);
   if (state !== 'ok') throw new Error(`${row.label} cannot be dispatched to: ${tokenProblem(state)}`);
   const token = deps.registry.mcpCredentialFor(row);
@@ -221,7 +234,7 @@ async function fanOutRead<T extends Record<string, unknown>>(
     rows.map(async (row) => {
       let target: BackendTarget;
       try {
-        target = targetFor(deps, row.id);
+        target = await targetFor(deps, row.id);
       } catch (err) {
         errors.push({ host: row.id, label: row.label, error: errorText(err) });
         return;
@@ -376,7 +389,14 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
               compatible: verdict.compatible,
               problem: describeIncompatibility(row.label, verdict),
             },
-            dispatch: row.enabled !== 1 ? 'disabled' : tokenState === 'ok' ? 'ready' : tokenState,
+            // PA-169: a bound host whose dispatch token was never minted gets
+            // one on first use, so it is as ready as one that has it.
+            dispatch:
+              row.enabled !== 1
+                ? 'disabled'
+                : tokenState === 'ok' || (tokenState === 'missing' && deps.ensureDispatchToken)
+                  ? 'ready'
+                  : tokenState,
           };
         }),
       };
@@ -398,7 +418,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     readOnly: true,
     targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
     async handler(deps, ctx, args) {
-      const target = targetFor(deps, args.host);
+      const target = await targetFor(deps, args.host);
       const call = (tool: string, toolArgs: Record<string, unknown> = {}) =>
         deps.client.call(target, tool, toolArgs, { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 });
       const [info, caps, agents, pocket, projects] = await Promise.all([
@@ -498,7 +518,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
     async handler(deps, ctx, args) {
       assertMayStart(ctx);
-      const target = targetFor(deps, args.host);
+      const target = await targetFor(deps, args.host);
       return deps.limiter.run(target.hostId, async () => {
         const created = await deps.client.call(
           target,
@@ -552,7 +572,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
     async handler(deps, ctx, args) {
       assertMayStart(ctx);
-      const target = targetFor(deps, args.host);
+      const target = await targetFor(deps, args.host);
       return deps.limiter.run(target.hostId, async () => {
         const started = await deps.client.call(
           target,
@@ -593,7 +613,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     readOnly: true,
     targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
     async handler(deps, ctx, args) {
-      const target = targetFor(deps, args.host);
+      const target = await targetFor(deps, args.host);
       const ref = String(args.ref);
       const match = /^(session|chat):(.{1,200})$/.exec(ref);
       if (!match) throw new Error('A ref looks like "session:<id>" or "chat:<id>", exactly as dispatch_* returned it.');
@@ -624,7 +644,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
         rows.map(async (row) => {
           let target;
           try {
-            target = targetFor(deps, row.id);
+            target = await targetFor(deps, row.id);
           } catch (err) {
             unavailable.push({ host: row.id, reason: errorText(err) });
             return;
@@ -824,7 +844,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
           let reachable = false;
           let probeError: string | null = null;
           try {
-            const target = targetFor(deps, row.id);
+            const target = await targetFor(deps, row.id);
             await withTimeout(
               deps.client.call(target, 'get_host_info', {}, {
                 depth: ctx.depth,

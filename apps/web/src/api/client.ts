@@ -27,6 +27,7 @@ import type {
   CreateMcpClientTokenRequest,
   CreateMcpClientTokenResponse,
   McpClientTokenListResponse,
+  FleetMcpAttachState,
   MeResponse,
   ProjectInfo,
   PushStatusResponse,
@@ -358,6 +359,9 @@ export function createApiClient(endpoint: HostEndpoint) {
      * here; the server keeps only a digest, so there is no reveal.
      */
     listMcpTokens: () => request<McpClientTokenListResponse>('/api/mcp/tokens'),
+
+    /** PA-169: whether this host's sessions can attach the Hub's `/mcp`. */
+    getFleetMcp: () => request<FleetMcpAttachState>('/api/fleet-mcp'),
 
     createMcpToken: (body: CreateMcpClientTokenRequest) =>
       request<CreateMcpClientTokenResponse>('/api/mcp/tokens', {

@@ -20,6 +20,7 @@ import {
   type PermissionRequestEvent,
   type PromptImage,
   type SessionStatus,
+  FLEET_MCP_SERVER_NAME,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
 import {
@@ -112,6 +113,12 @@ export interface StructuredSessionSpec {
    * `start_subagent_session`, or null for human/trigger sessions.
    */
   plannerChatId?: string | null;
+  /**
+   * PA-169: the Hub's `/mcp` and this host's token for it, handed to the SDK
+   * as an `mcpServers` entry. In memory only — never persisted, never in the
+   * child's environment, never written into the repository.
+   */
+  fleetMcp?: { url: string; token: string };
 }
 
 export interface StructuredSessionEvents {
@@ -251,6 +258,10 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   get globalBypassActive(): boolean {
     return this._globalBypass;
   }
+  /** PA-169: whether the Hub's `/mcp` was attached at spawn. */
+  get fleetMcpAttached(): boolean {
+    return this.spec.fleetMcp !== undefined;
+  }
   /** Claude Code's own generated title for this conversation, if found yet. */
   get derivedTitle(): string | null {
     return this._derivedTitle;
@@ -290,6 +301,17 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
         : {}),
       ...(this.spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: this.spec.maxBudgetUsd } : {}),
       ...(this.spec.executablePath ? { pathToClaudeCodeExecutable: this.spec.executablePath } : {}),
+      ...(this.spec.fleetMcp
+        ? {
+            mcpServers: {
+              [FLEET_MCP_SERVER_NAME]: {
+                type: 'http' as const,
+                url: this.spec.fleetMcp.url,
+                headers: { Authorization: `Bearer ${this.spec.fleetMcp.token}` },
+              },
+            },
+          }
+        : {}),
     };
 
     try {

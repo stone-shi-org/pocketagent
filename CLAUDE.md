@@ -20,7 +20,7 @@ pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real
 pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
 pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
 pnpm demo:attachments-ui  # PA-136/137: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports, text read
-pnpm demo:fleet           # PA-134: Hub /mcp + Fleet agent: route, approve, push deep link, complete — real Chrome
+pnpm demo:fleet           # PA-134/169: Hub /mcp + Fleet agent + a coding agent's client token — real Chrome
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -180,7 +180,7 @@ PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, stre
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
 pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
 pnpm demo:attachments-ui  # PA-136/137: scratch server + fake LLM; files attached in real Chrome, phone and desktop
-pnpm demo:fleet           # PA-134: two real backends + a real Hub + fake LLM and push service; real Chrome
+pnpm demo:fleet           # PA-134/169: two real backends + a real Hub + fake LLM and push service; real Chrome
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -270,7 +270,14 @@ checked for exactly one `read, sessions, planner` token and the `hub:` audit lin
 app" routes to mac01 and parks for approval on the coordinator with no "Allow globally"; the
 target's approval arrives as a push whose deep link is `/#/h/mac01/planner/…` and is answered in a
 second tab; and the coordinator's `wait` reports `complete`. A darwin capability card is PA-133's,
-so the demo routes on the Pocket Agent the host advertises. Like `demo:attachments-ui`, it needs
+so the demo routes on the Pocket Agent the host advertises. PA-169's criteria follow in the same
+run. A Hub MCP client token is created on the Hub page, limited to mac01, and shown once with a
+copyable `mcpServers` snippet. A real MCP SDK client, which is what a coding agent is, then:
+- sees only mac01 in `list_hosts`;
+- is refused on dev01, naming it, before any backend is dialed;
+- dispatches to mac01 itself, gets the target's approval as a push, and `wait`s to `complete`.
+
+Revoking the token on the page stops its very next call. Like `demo:attachments-ui`, it needs
 `PLAYWRIGHT_BROWSERS_PATH` pointing at a directory with the revision Playwright wants.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
@@ -2870,6 +2877,81 @@ carries `platform`/`arch` alongside PA-133's full `HostCapabilities` card (`get_
 backend, with a fallback to `get_host_info`/`list_projects`/`list_pocket_agents` when talking to an
 older backend without `get_capabilities`).
 
+### Hub MCP client tokens: the Hub's `/mcp` for coding agents (PA-169)
+
+A coding agent (Claude Code, Codex, any MCP client) used to need one `pam_` token and one MCP entry
+per backend: about 40 tools per host, and nothing to help it pick one. Now it adds **one** entry,
+the Hub's `/mcp` with a `phm_` **client** token, and picks the host itself by passing `host`.
+
+**Two kinds of `phm_` token, one table, one gate.**
+- **Schema.** Migration #5 adds `kind` (`coordinator` | `client`), `scopes_json` and `hosts_json`
+  to `hub_mcp_tokens`. Both JSON columns default to NULL, and `kind` defaults to `coordinator`.
+  That is exactly what every PA-134 row is: the Fleet coordinator's token, with every scope and
+  every host. So the migration changes nothing about a token that already exists.
+- **Client tokens.**
+  - Minted only by the cookie-only `POST /api/hub/mcp/tokens`, from the **MCP clients** card on
+    `HubPage` (`HubMcpClientsCard`). There are also `PATCH` and `DELETE` routes, and a list.
+  - Stored as `sha256` plus a prefix. No reveal and no expiry.
+  - Shown once, with a copyable `mcpServers` snippet and a `claude mcp add` line.
+  - Logged by label and prefix, at `warn`.
+- **The coordinator token** is listed on that card, but a 409 refuses editing or revoking it
+  there: its lifecycle is the Fleet card's.
+- **The gate in `app.ts` is unchanged.** Either kind is accepted on exact `/mcp` and nowhere else.
+- **Unreadable rows fail closed.** A client row whose JSON will not parse has no scopes and no
+  hosts. Only a coordinator row with NULL columns means "everything".
+
+**Scopes and a host allowlist, enforced by the Hub on every call** (`mcp/scope.ts`).
+- **Scopes.** `HUB_FLEET_TOOL_SCOPES` (protocol) is a `Record` over the catalog, so a new tool
+  without a scope is a type error. The three scopes are:
+  - `read`: `list_hosts`, `get_host_capabilities`, `list_pending_approvals`, `fleet_*`.
+  - `dispatch`: `dispatch_*` and `wait`.
+  - `admin`: the Tier 2 tools. Off by default.
+- **Two scope checks.** The catalog a session is built with is filtered by scope, but that is
+  presentation. The check in `registerTool`'s handler, on the principal re-read for the call, is
+  the enforcement. So narrowing a token bites on its next call, even inside an open legacy
+  session.
+- **Two host layers.**
+  - `hostRefusal` refuses any `host`/`hosts` argument outside the list before the handler runs,
+    so before any backend is dialed. It uses one sentence for a forbidden host and an unknown one,
+    so a narrowed token cannot probe which machines exist.
+  - `scopedRegistry` is a Proxy over `HostRegistry` whose `getRow`/`listRows`/`list`/`resolve`
+    hide rows outside the list. So `list_hosts`, every fan-out, `list_pending_approvals` and the
+    provisioner see only allowed hosts, and no code path in `tools.ts` has to remember to filter.
+- **Why the allowlist exists.** The coordinator's planner gate can remember a decision per host
+  (`approvalScopeArg`). A coding agent has only its own client's prompt, which in Claude Code is
+  tool-wide ("always allow" is every host), and a skip-permissions session has none at all.
+
+**A client token works with no Fleet agent enabled.** A client's first call to a host whose
+PA-134 dispatch token was never minted mints it (`FleetService.ensureDispatchTokenFor`). It uses
+the same scopes and the same "ask the token what it holds" verification, serialised per host.
+That is the client's path only: `depsFor` withholds it from a coordinator, which keeps PA-134's
+rule that a host without a token is reported, not quietly fixed. Disabling the Fleet agent keeps
+the per-host dispatch tokens while any client token exists, and says so in its steps.
+
+**Phase 3: "attach Fleet MCP" for sessions a human starts on a backend** (`mcp/attach.ts` on the
+Hub, `mcp-server/fleet-attach.ts` and `routes/fleet-mcp.ts` on the backend).
+- **Offering it.** "Offer to sessions" on the card gives each bound backend its own client token
+  (`read` + `dispatch`, every host, never `admin`). The Hub hands it over once, with its `pah_`
+  credential, to `POST /api/fleet-mcp`. It is tracked in `hub_mcp_attach` (CASCADE from the
+  host) and offered to hosts bound later too.
+- **Storing it.** The backend keeps it as `secret-box` ciphertext in `settings`: no reveal, and
+  unavailable without `POCKETAGENT_SETTINGS_ENC_KEY`. Only a cookie session or a Hub may write
+  it; an MCP principal is a 403.
+- **Using it.** `CreateSessionRequest.attachFleetMcp` is the composer's "Attach Fleet MCP"
+  checkbox. It is shown only for a new structured Claude-family session on a host that has the
+  token, and is off every time. It reaches the Agent SDK as an `mcpServers` entry
+  (`FLEET_MCP_SERVER_NAME`): in memory only, never in the child's environment, never written
+  into the repo.
+- **Refusals.** A terminal session or another engine is a 400. A host with nothing to attach is
+  a 409.
+- **Disclosure.** `SessionInfo.fleetMcpAttached` is a standing banner on every visit, like the
+  bypass banner.
+- **The loop guard.** `POST /api/sessions` refuses `attachFleetMcp` from any MCP principal, and
+  no MCP tool input has the field. A test pins that, so a session the Hub dispatched has no Fleet
+  tools: A → B → A stops at B.
+- **Known limitation.** The flag is not persisted, so a finished session's history row does not
+  record it. It cannot dispatch once finished, so there is nothing left to disclose.
+
 ### Fleet administration in three tiers (PA-135)
 
 Beyond task dispatch (PA-134), fleet administration is split across three tiers that follow the
@@ -3309,8 +3391,11 @@ These are load-bearing. Several were bugs first.
   minted `pah_` credential as a `secret-box` ciphertext plus its prefix in the clear; a row that
   will not decrypt (a rotated `POCKETAGENT_SETTINGS_ENC_KEY`) is **listed, marked unbound and
   refused** rather than dropped from the list or dialed without a credential. The Hub itself
-  accepts its own session cookie and, since PA-134, exactly one bearer class: a `phm_` coordinator
-  token, on the exact path `/mcp` and nowhere else — checked before the gate's early return, by
+  accepts its own session cookie and, since PA-134, exactly one bearer class: a `phm_` token
+  (PA-169: of two kinds, the Fleet coordinator's with every scope and host, and an operator-minted
+  `client` held by the Hub to its own scopes and host allowlist on every call), on the exact path
+  `/mcp` and nowhere else. A `phm_` token is minted only behind the Hub's cookie, so no MCP
+  principal can mint, widen or revoke one — checked before the gate's early return, by
   exact match (`/mcpx`, `/mcp/x` stay the shell), with the cookie counting for nothing there. A
   `phm_` token on `/api/hub/*`, `/h/**`, the WebSocket upgrade or push is a 401, so there is still
   no bearer path to front the registry or the proxy with (asserted in
@@ -3376,6 +3461,18 @@ These are load-bearing. Several were bugs first.
   there, by a person, from a push deep link. Asserted in
   `apps/server/tests/planner-mcp-host-approval.test.ts` (including the prompt-injection case) and
   end to end by `pnpm demo:fleet`.
+- **A Hub MCP client token is held to its scopes and hosts by the Hub, on every call** (PA-169).
+  A coding agent's own permission prompt is tool-wide, and a skip-permissions session has none,
+  so per-host control has to be the Hub's.
+  - **Re-read per call.** The token's row is read on every call. A revoked token is a 401, and a
+    narrowed one is refused or filtered on its next call, with no restart.
+  - **Hosts.** A host outside the allowlist is refused, naming it, before any backend is dialed.
+    Enumerating tools never see it.
+  - **Phase 3 attachment.** A Hub-offered token on a backend reaches a session only as an SDK
+    `mcpServers` entry, on a human's explicit per-session opt-in, disclosed on every visit. No MCP
+    principal can ask for it, so dispatched work never dispatches onward.
+  - Asserted in `apps/hub/tests/hub-mcp-clients.test.ts`, `apps/server/tests/fleet-mcp-attach.test.ts`
+    and `pnpm demo:fleet`.
 - **Fleet administration is split into read-only views, gated config mutations on a separate
   `admin`-scoped token, and human-only restart/install UI buttons** (PA-135). Tier 1 tools
   (`fleet_versions`, `fleet_drain_state`, `fleet_agent_status`, `fleet_health`, `fleet_attention`,
@@ -3733,7 +3830,8 @@ These are load-bearing. Several were bugs first.
   page. The remaining `window.location.origin` reads are `SecretReveal.tsx` and, by the same
   reasoning, `McpClientsSection.tsx` (PA-118's `/mcp` URL for a client config) and
   `FleetAgentCard.tsx` (PA-134's prefill for the Hub address a coordinator dials, labelled as the
-  browser's and editable). `SecretReveal.tsx` composes a
+  browser's and editable) and `HubMcpClientsCard.tsx` (PA-169's prefill for the Hub address a
+  coding agent dials, likewise). `SecretReveal.tsx` composes a
   webhook's *delivery* URL for a human to paste into Jira; the server deliberately has no notion
   of its own external origin, so that one stays — but it is only valid for the host that served
   the bundle. For any host reached through a path prefix, this origin is the *gateway's*, and a

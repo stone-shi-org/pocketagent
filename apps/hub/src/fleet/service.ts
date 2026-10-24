@@ -98,6 +98,8 @@ export interface FleetServiceOptions {
 }
 
 export class FleetService {
+  private readonly dispatchMints = new Map<string, Promise<void>>();
+
   constructor(private readonly opts: FleetServiceOptions) {}
 
   // ---- Reading ---------------------------------------------------------------
@@ -190,8 +192,21 @@ export class FleetService {
     if (current?.coordinator_host_id && current.registry_remote_id) {
       steps.push(await this.removeRegistry(current.coordinator_host_id, current.registry_remote_id));
     }
+    // PA-169: Hub MCP client tokens dispatch through the same per-host tokens,
+    // so while any client token exists they stay — revoking them here would
+    // only have the next client call mint them again.
+    const keepDispatch = this.hasClientTokens();
+    if (keepDispatch) {
+      steps.push({
+        label: 'keep the per-host dispatch tokens',
+        ok: true,
+        message: 'Hub MCP client tokens still use them. Revoke those on this page to stop all dispatch.',
+      });
+    }
     for (const host of this.opts.registry.listRows()) {
-      if (host.mcp_client_id !== null || host.mcp_credential_enc !== null) steps.push(await this.revokeDispatchToken(host));
+      if (!keepDispatch && (host.mcp_client_id !== null || host.mcp_credential_enc !== null)) {
+        steps.push(await this.revokeDispatchToken(host));
+      }
       if (host.mcp_admin_client_id !== null || host.mcp_admin_credential_enc !== null) {
         steps.push(await this.revokeAdminToken(host));
       }
@@ -212,11 +227,41 @@ export class FleetService {
 
   /** A host was just bound: if the fleet is on, it gets a dispatch token too. */
   async onHostBound(hostId: string): Promise<void> {
-    if (this.row()?.enabled !== 1) return;
+    // PA-169: Hub MCP client tokens dispatch through the same per-host token,
+    // so a host bound while any exist gets one too, Fleet agent or not.
+    if (this.row()?.enabled !== 1 && !this.hasClientTokens()) return;
     const host = this.opts.registry.getRow(hostId);
     if (!host) return;
     const step = await this.ensureDispatchToken(host, true);
     if (!step.ok) this.opts.log.warn({ hostId, reason: step.message }, 'fleet: could not mint a dispatch token on a newly bound host');
+  }
+
+  /**
+   * PA-169: the scoped dispatch token for `host`, minted now if it was never
+   * minted — the first call a Hub MCP client token makes to a host when no
+   * Fleet agent was ever enabled. One mint per host at a time, so a fan-out
+   * across hosts, or two clients at once, cannot mint two tokens on one
+   * backend. Only ever the PA-134 scopes, verified exactly as at enable.
+   */
+  async ensureDispatchTokenFor(host: HubHostRow): Promise<void> {
+    const pending = this.dispatchMints.get(host.id);
+    if (pending) return pending;
+    const run = (async () => {
+      const fresh = this.opts.registry.getRow(host.id) ?? host;
+      const step = await this.ensureDispatchToken(fresh, true);
+      if (!step.ok) throw new Error(step.message);
+      this.opts.log.info({ hostId: host.id }, 'fleet: dispatch token minted on first use by a Hub MCP client');
+    })();
+    this.dispatchMints.set(host.id, run);
+    try {
+      await run;
+    } finally {
+      this.dispatchMints.delete(host.id);
+    }
+  }
+
+  private hasClientTokens(): boolean {
+    return this.opts.tokens.list().some((row) => row.kind === 'client');
   }
 
   /** A host is about to be removed: revoke its dispatch and admin tokens there, best-effort. */

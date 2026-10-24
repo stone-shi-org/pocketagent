@@ -21,6 +21,7 @@ import { EditHostDialog } from '../components/EditHostDialog.js';
 import { ExportFromHostDialog } from '../components/ExportFromHostDialog.js';
 import { FleetAgentCard } from '../components/FleetAgentCard.js';
 import { FleetMaintenanceSection } from '../components/FleetMaintenanceSection.js';
+import { HubMcpClientsCard } from '../components/HubMcpClientsCard.js';
 import { fleetChatFor } from '../hosts/fleet.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
@@ -247,6 +248,8 @@ export function HubPage({
             .catch(onApiError);
         }}
       />
+
+      <HubMcpClientsCard hosts={hosts} onApiError={onApiError} />
 
       <FleetMaintenanceSection hosts={hosts} onApiError={onApiError} />
 

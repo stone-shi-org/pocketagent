@@ -18,7 +18,7 @@ import { readAgentDefaults } from '../db/index.js';
 import { deriveSetupState, refreshAgentAuthStates } from '../agents/auth-probe.js';
 import { refreshAgentVersions } from '../agents/version-probe.js';
 import { agentBinaryReport } from '../agents/install.js';
-import { resolveWorkspaceCwdOrReply } from './shared.js';
+import { auditConfigChange, resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
   const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db, cron } =
@@ -612,6 +612,15 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     }
     const body = parsed.data;
 
+    // PA-169: the loop guard. An MCP client — including the Hub dispatching
+    // here on another session's behalf — never gets Fleet MCP attached, so a
+    // dispatched session has no Fleet tools to dispatch onward with.
+    if (body.attachFleetMcp === true && request.mcpPrincipal) {
+      return reply.code(403).send({
+        error: { code: 'fleet_mcp_forbidden', message: 'A session an MCP client starts cannot have Fleet MCP attached.' },
+      });
+    }
+
     // Adopting a pane takes its working directory from the validated target,
     // not from the request body.
     let adopt: Parameters<typeof sessions.create>[0]['adopt'];
@@ -680,7 +689,11 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.effort !== undefined ? { effort: body.effort } : {}),
         ...(adopt ? { adopt } : {}),
+        ...(body.attachFleetMcp === true ? { attachFleetMcp: true } : {}),
       });
+      if (body.attachFleetMcp === true) {
+        auditConfigChange(request, 'session started with fleet mcp attached', { sessionId: session.id, agent: body.agent });
+      }
       return reply.code(201).send(sessions.toInfo(session));
     } catch (err) {
       if (err instanceof SessionError) {

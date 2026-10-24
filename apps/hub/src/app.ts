@@ -21,10 +21,12 @@ import { hubDiscoveryRoutes } from './routes/discovery.js';
 import { DiscoveryService } from './discovery/service.js';
 import { FleetService } from './fleet/service.js';
 import { BackendMcpClient } from './mcp/backend-client.js';
+import { HubMcpAttachService } from './mcp/attach.js';
 import { HubMcpServer } from './mcp/server.js';
 import { HubMcpTokenStore } from './mcp/tokens.js';
 import { DispatchLimiter } from './mcp/tools.js';
 import { hubFleetRoutes } from './routes/fleet.js';
+import { hubMcpTokenRoutes } from './routes/mcp-tokens.js';
 import { HubPushService } from './push/service.js';
 import { PushNotificationRelay } from './push/relay.js';
 import { Provisioner } from './templates/provisioner.js';
@@ -91,6 +93,8 @@ export interface HubContext {
   readonly mcpServer: HubMcpServer;
   readonly backendMcp: BackendMcpClient;
   readonly fleet: FleetService;
+  /** PA-169: the Hub's `/mcp` offered to sessions on each backend. */
+  readonly mcpAttach: HubMcpAttachService;
 }
 
 declare module 'fastify' {
@@ -179,6 +183,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
       pushRelay,
       templates,
       ensureAdminToken: (host) => fleetRef.current!.ensureAdminToken(host),
+      ensureDispatchToken: (host) => fleetRef.current!.ensureDispatchTokenFor(host),
       log: app.log,
     },
     version: HUB_VERSION,
@@ -197,6 +202,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     log: app.log,
   });
   fleetRef.current = fleet;
+  const mcpAttach = new HubMcpAttachService({ db, registry, tokens: mcpTokens, mcpServer, fetchImpl, log: app.log });
 
   const context: HubContext = {
     config,
@@ -215,6 +221,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     mcpServer,
     backendMcp,
     fleet,
+    mcpAttach,
   };
   app.decorate('hub', context);
 
@@ -318,6 +325,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   await app.register(hubTemplateRoutes);
   await app.register(hubPushRoutes);
   await app.register(hubFleetRoutes);
+  await app.register(hubMcpTokenRoutes);
   // PA-134: the Hub's own MCP endpoint. Authenticated by the gate above
   // (`request.hubMcpPrincipal`), served by `HubMcpServer`.
   app.route({

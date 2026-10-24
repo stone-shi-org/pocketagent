@@ -7,7 +7,7 @@ import type {
   ProjectInfo,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
-import { PROTOCOL_VERSION, negotiateProtocol } from '@pocketagent/protocol';
+import { PROTOCOL_VERSION, negotiateProtocol, usesClaudeTranscripts } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { AddProject } from '../components/AddProject.js';
@@ -57,6 +57,21 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // PA-169: whether this host can attach the Hub's `/mcp` to a new session,
+  // and whether this one should. Off by default, every time.
+  const [fleetMcpAvailable, setFleetMcpAvailable] = useState(false);
+  const [attachFleetMcp, setAttachFleetMcp] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    // An older host answers 404 here; that only means "not offered".
+    api
+      .getFleetMcp()
+      .then((state) => !cancelled && setFleetMcpAvailable(state.configured))
+      .catch(() => !cancelled && setFleetMcpAvailable(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   const [cwd, setCwd] = useState(initialCwd ?? '');
   const [flavour, setFlavour] = useState<Flavour | ''>('');
@@ -283,6 +298,10 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     : picked?.chat.conversationId
       ? true
       : transport === 'structured';
+  // PA-169: Fleet MCP rides the Claude Agent SDK's `mcpServers`, so it is
+  // offered only for a session about to be *created* on that path.
+  const showFleetMcp =
+    fleetMcpAvailable && willBeStructured && !picked?.chat.live && !!effectiveAgentId && usesClaudeTranscripts(effectiveAgentId);
 
   // Model/effort only matter for a brand-new chat — a picked chat (live or
   // resumed) always keeps whatever it was already using, same reasoning as
@@ -369,6 +388,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         // it was already running, so nothing is sent for either.
         ...(!picked && model ? { model } : {}),
         ...(!picked && showEffortPicker ? { effort } : {}),
+        ...(showFleetMcp && attachFleetMcp ? { attachFleetMcp: true } : {}),
       });
       onCreated(session.id);
     } catch (err) {
@@ -560,6 +580,14 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
             setWorktreeDialogOpen(false);
           }}
         />
+      )}
+
+      {showFleetMcp && (
+        <label className="planner-checkbox-row composer-note">
+          <input type="checkbox" checked={attachFleetMcp} onChange={(e) => setAttachFleetMcp(e.target.checked)} /> Attach
+          Fleet MCP: this chat’s agent can list the Hub’s hosts and start work on them. Approvals there still wait for
+          a person.
+        </label>
       )}
 
       {error && (

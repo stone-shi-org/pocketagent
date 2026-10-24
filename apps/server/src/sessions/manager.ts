@@ -123,7 +123,9 @@ export class SessionError extends Error {
       | 'not_running'
       | 'session_running'
       | 'spawn_failed'
-      | 'unsupported_transport',
+      | 'unsupported_transport'
+      | 'fleet_mcp_unsupported'
+      | 'fleet_mcp_unavailable',
     readonly statusCode = 400,
   ) {
     super(message);
@@ -163,6 +165,13 @@ export interface CreateSessionInput {
    * `start_subagent_session`, or null/undefined when started directly.
    */
   plannerChatId?: string;
+  /**
+   * PA-169: give this session the Hub's `/mcp` (Fleet tools: list hosts,
+   * dispatch to one, wait). Structured `claude`-family sessions only, a human's
+   * explicit opt-in — the route refuses it from any MCP principal, which is the
+   * loop guard (a session the Hub dispatched never gets it).
+   */
+  attachFleetMcp?: boolean;
   /** Attach to an already-running tmux pane instead of starting a process. */
   adopt?: {
     command: string;
@@ -228,6 +237,12 @@ export interface ManagerOptions {
    * or `state_5.sqlite`). Optional so tests can omit it.
    */
   codexTitleFor?: (agentSessionId: string) => Promise<string | null>;
+  /**
+   * PA-169: the Hub's `/mcp` address and this host's token for it, read at
+   * spawn for a session created with `attachFleetMcp`. Optional so tests can
+   * omit it; absent means the toggle is refused.
+   */
+  fleetMcp?: () => { url: string; token: string } | null;
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -892,6 +907,30 @@ export class SessionManager {
       );
     }
 
+    // PA-169: only the Claude Agent SDK path takes an `mcpServers` option, so
+    // only a structured session with no other engine can attach Fleet MCP.
+    // Refused rather than ignored: a person who asked for it must not get a
+    // session that silently lacks it.
+    let fleetMcp: { url: string; token: string } | undefined;
+    if (input.attachFleetMcp === true) {
+      if (transport !== 'structured' || adapter.structuredKind !== undefined || input.adopt) {
+        throw new SessionError(
+          `Fleet MCP can only be attached to a structured Claude session, not ${adapter.displayName} over "${transport}".`,
+          'fleet_mcp_unsupported',
+          400,
+        );
+      }
+      const credential = this.opts.fleetMcp?.() ?? null;
+      if (credential === null) {
+        throw new SessionError(
+          'This host has no Fleet MCP to attach. Turn it on from the Hub page (MCP clients → attach to sessions).',
+          'fleet_mcp_unavailable',
+          409,
+        );
+      }
+      fleetMcp = credential;
+    }
+
     // Only honour the opt-in on an adapter that actually declares support for
     // it; anything else silently ignores it rather than erroring, since the
     // client is expected to gate the control on `supportsSkipPermissions` too.
@@ -1067,6 +1106,7 @@ export class SessionManager {
         ...(effort !== undefined ? { effort } : {}),
         ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
         skipPermissions,
+        ...(fleetMcp ? { fleetMcp } : {}),
       });
     }
 
@@ -1144,6 +1184,7 @@ export class SessionManager {
     model?: string;
     effort?: EffortLevel | null;
     plannerChatId?: string | null;
+    fleetMcp?: { url: string; token: string };
   }): Promise<StructuredSession> {
     const session = new StructuredSession({
       id: args.id,
@@ -1170,6 +1211,7 @@ export class SessionManager {
       ...(args.model !== undefined ? { model: args.model } : {}),
       ...(args.effort !== undefined ? { effort: args.effort } : {}),
       plannerChatId: args.plannerChatId ?? null,
+      ...(args.fleetMcp ? { fleetMcp: args.fleetMcp } : {}),
     });
 
     this.insertRow(session, args.createdAt);
@@ -2064,6 +2106,9 @@ export class SessionManager {
       // stored, which also means a variant that is later reconfigured or
       // removed cannot leave a stale claim on an old row.
       plannerChatId: session.plannerChatId ?? null,
+      // PA-169: disclosed on every visit while the session lives — it can
+      // start work on other machines.
+      fleetMcpAttached: 'fleetMcpAttached' in session && session.fleetMcpAttached === true,
       providerDisclosure: this.opts.agents.get(session.spec.agent)?.providerDisclosure ?? null,
       pendingApprovalsCount:
         session.transport === 'structured' &&

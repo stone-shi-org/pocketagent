@@ -24,7 +24,12 @@
  *      relay — decrypted here (RFC 8291) — with a /#/h/mac01/planner/… deep
  *      link, and is answered there in a second tab.
  *   6. The coordinator's wait sees `complete`.
- *   7. The phone viewport shows the Fleet card and the host sheet's Fleet entry.
+ *   7. PA-169: a Hub MCP client token is created on the Hub page, limited to
+ *      mac01 and shown once with a copyable config; a real MCP SDK client (what
+ *      a coding agent is) lists only mac01, is refused on dev01 naming it,
+ *      dispatches to mac01 itself, and the target's approval arrives by push.
+ *      Revoking the token on the page stops its very next call.
+ *   8. The phone viewport shows the Fleet card and the host sheet's Fleet entry.
  *
  * `pnpm build` first. Run with: pnpm demo:fleet
  */
@@ -37,6 +42,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium, devices } from 'playwright';
+import { HUB_FLEET_TOOL_NAMES } from '@pocketagent/protocol';
 
 let step = 0;
 let failures = 0;
@@ -473,7 +479,11 @@ async function main() {
   }
   const registries = (await onBackend(dev01, 'GET', '/api/mcp-registries')).body.registries;
   const reg = registries.find((r) => r.id === fleetRegistryId);
-  check(reg && reg.lastError === null && reg.toolCount === 6, 'dev01’s registry reached the Hub /mcp and lists 6 tools', JSON.stringify(reg));
+  check(
+    reg && reg.lastError === null && reg.toolCount === HUB_FLEET_TOOL_NAMES.length,
+    `dev01’s registry reached the Hub /mcp and lists all ${HUB_FLEET_TOOL_NAMES.length} Fleet tools (a coordinator holds every scope)`,
+    JSON.stringify({ toolCount: reg?.toolCount, lastError: reg?.lastError }),
+  );
   // pino writes through a worker thread; give the line a moment to land.
   const audited = await waitFor(
     () => dev01.lines.some((line) => /mcp client token minted/.test(line) && /"by":"hub:/.test(line)),
@@ -560,6 +570,85 @@ async function main() {
   );
   check(!hubToolLines.some((line) => /Build the iOS app/.test(line)), 'the Hub’s log never carries a prompt');
 
+  heading('PA-169 — a coding agent’s own Hub MCP client token, limited to mac01');
+  await desktop.goto(`${HUB}/#/hub`, { waitUntil: 'domcontentloaded' });
+  const card = 'section[aria-labelledby="hub-mcp-clients-heading"]';
+  await desktop.waitForSelector(`${card} #hub-mcp-client-label`);
+  await desktop.fill(`${card} #hub-mcp-client-label`, 'laptop claude');
+  await desktop.click(`${card} label:has-text("Every host, including") input`);
+  await desktop.click(`${card} label.planner-checkbox-row:has-text("mac01") input`);
+  await desktop.click(`${card} button:has-text("Create token")`);
+  await desktop.waitForSelector(`${card} [role="status"] pre code`);
+  const clientToken = ((await desktop.textContent(`${card} [role="status"] .endpoint-url code`)) ?? '').trim();
+  const snippet = (await desktop.textContent(`${card} [role="status"] pre code`)) ?? '';
+  check(clientToken.startsWith('phm_'), 'the token is shown once on the page', `${clientToken.slice(0, 12)}…`);
+  check(snippet.includes(`${HUB}/mcp`) && snippet.includes(`Bearer ${clientToken}`), 'with a ready-to-paste mcpServers config');
+  check((await desktop.$$(`${card} [role="status"] button[aria-label="Copy config"]`)).length === 1, 'and a Copy config button');
+  await desktop.screenshot({ path: path.join(shots, '5-mcp-client-token.png') });
+  const listed = (await hub('/api/hub/mcp/tokens')).body;
+  const row = listed.tokens.find((t) => t.label === 'laptop claude');
+  check(
+    row?.kind === 'client' && JSON.stringify(row.hosts) === '["mac01"]' && row.scopes.join(',') === 'read,dispatch',
+    'listed as a client token: read, dispatch, mac01 only',
+    JSON.stringify(row),
+  );
+  check(!JSON.stringify(listed).includes(clientToken), 'the list never carries the token');
+
+  const { Client: McpClient, StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client');
+  const mcp = new McpClient({ name: 'demo-coding-agent', version: '1.0.0' });
+  await mcp.connect(
+    new StreamableHTTPClientTransport(new URL(`${HUB}/mcp`), { requestInit: { headers: { authorization: `Bearer ${clientToken}` } } }),
+  );
+  const callHub = async (name, args = {}) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    const text = r.content?.[0]?.text ?? '';
+    return { isError: r.isError === true, text, data: r.isError ? null : JSON.parse(text) };
+  };
+  const toolNames = (await mcp.listTools()).tools.map((t) => t.name);
+  check(toolNames.includes('dispatch_pocket_task') && !toolNames.includes('update_webhook'), 'its catalog has dispatch and no admin tools');
+  const seen = await callHub('list_hosts');
+  check(JSON.stringify(seen.data?.hosts?.map((h) => h.id)) === '["mac01"]', 'list_hosts shows only mac01', JSON.stringify(seen.data?.hosts?.map((h) => h.id)));
+  const refusedCaps = await callHub('get_host_capabilities', { host: 'dev01' });
+  check(refusedCaps.isError && refusedCaps.text.includes('"dev01"'), 'get_host_capabilities on dev01 is refused, naming it', refusedCaps.text);
+  const refusedDispatch = await callHub('dispatch_pocket_task', { host: 'dev01', pocketAgentId: 'x', prompt: 'Build the iOS app.' });
+  check(refusedDispatch.isError && refusedDispatch.text.includes('"dev01"'), 'dispatch to dev01 is refused, naming it', refusedDispatch.text);
+
+  const pushesBeforeClient = pushReceived.length;
+  const started = await callHub('dispatch_pocket_task', { host: 'mac01', pocketAgentId: xcode.body.id, prompt: 'Build the iOS app.' });
+  check(!started.isError && started.data?.ref?.startsWith('chat:'), 'the coding agent dispatched to mac01 itself', started.text.slice(0, 120));
+  const clientPush = await waitFor(
+    () => pushReceived.slice(pushesBeforeClient).find((p) => p.url === `/#/h/mac01/planner/${started.data?.chatId}`),
+    30_000,
+  );
+  check(Boolean(clientPush), 'the target’s approval arrived by push, deep-linked to that chat', clientPush?.url);
+  if (clientPush) {
+    const tab = await desktopContext.newPage();
+    await tab.goto(`${HUB}${clientPush.url}`, { waitUntil: 'domcontentloaded' });
+    await tab.waitForSelector('.planner-approval-card', { timeout: 20_000 });
+    await tab.click('.planner-approval-card button:has-text("Allow once")');
+    await tab.close();
+  }
+  let clientState = 'still_running';
+  for (let i = 0; i < 20 && clientState !== 'complete' && clientState !== 'ended'; i += 1) {
+    const waited = await callHub('wait', { host: 'mac01', ref: started.data.ref, timeoutSeconds: 5 });
+    clientState = waited.data?.state ?? 'error';
+  }
+  check(clientState === 'complete', 'the coding agent’s wait sees complete', clientState);
+  await sleep(500);
+  const createdLine = hubProc.lines.find((l) => /hub mcp client token created/.test(l)) ?? '';
+  check(/"label":"laptop claude"/.test(createdLine) && !createdLine.includes(clientToken), 'the Hub logged the mint by label and prefix, never the token');
+  check(
+    hubProc.lines.some((l) => /hub mcp tool call/.test(l) && /"hubMcpClient":"laptop claude"/.test(l) && /"targetHost":"mac01"/.test(l)),
+    'each call is logged with the client token’s label and target host',
+  );
+
+  await desktop.click(`${card} .planner-model-row:has-text("laptop claude") button:has-text("Revoke")`);
+  await desktop.click('.dialog button:has-text("Revoke")');
+  await desktop.waitForSelector(`${card} .planner-model-row:has-text("laptop claude")`, { state: 'detached', timeout: 10_000 });
+  const afterRevoke = await callHub('list_hosts').then((r) => (r.isError ? 'refused' : 'answered')).catch(() => 'refused');
+  check(afterRevoke === 'refused', 'revoked on the page, its very next call is refused', afterRevoke);
+  await mcp.close().catch(() => undefined);
+
   heading('Phone viewport — the Fleet card, and the host sheet’s Fleet entry');
   const phoneContext = await browser.newContext({ ...devices['iPhone 13'] });
   const phone = await phoneContext.newPage();
@@ -569,7 +658,7 @@ async function main() {
   await phone.click('.host-chip');
   const sheetFleet = await phone.waitForSelector('.sheet-option:has-text("Fleet")', { timeout: 10_000 }).then(() => true).catch(() => false);
   check(sheetFleet, 'the host sheet lists Fleet');
-  await phone.screenshot({ path: path.join(shots, '5-phone-sheet.png') });
+  await phone.screenshot({ path: path.join(shots, '6-phone-sheet.png') });
 
   await browser.close();
   llm.close();

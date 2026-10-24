@@ -24,6 +24,8 @@ import { InternalApiClient } from './mcp-server/internal-api.js';
 import { McpWorkService } from './mcp-server/work.js';
 import { McpServerService } from './mcp-server/server.js';
 import { mcpServerRoutes } from './routes/mcp-server.js';
+import { fleetMcpRoutes } from './routes/fleet-mcp.js';
+import { FleetMcpAttachStore } from './mcp-server/fleet-attach.js';
 import {
   deleteWorkspace,
   insertWorkspace,
@@ -348,6 +350,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const hubCredentials = new HubCredentialStore(db);
   // PA-118: the third credential class. See `auth/mcp-tokens.ts`.
   const mcpTokens = new McpTokenStore(db);
+  // PA-169: the Hub's `/mcp` for sessions started with "attach Fleet MCP".
+  const fleetMcp = new FleetMcpAttachStore({ db, encKey: config.settingsEncKey, logger: app.log });
   const workspaces = new WorkspaceRegistry(
     config.workspaceRoots,
     createWorkspaceStore({
@@ -505,6 +509,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     titleFor: (cwd, agentSessionId) => conversations.titleFor(cwd, agentSessionId),
     agyTitleFor: (agentSessionId) => agyTranscripts.titleFor(agentSessionId),
     codexTitleFor: (agentSessionId) => codexTranscripts.titleFor(agentSessionId),
+    fleetMcp: () => fleetMcp.credential(),
   });
   if (sessions.getGlobalSkipPermissions()) {
     app.log.warn(
@@ -847,6 +852,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     worktrees,
     mcpTokens,
     mcpWork,
+    fleetMcp,
     // Replaced just below, once the context it reads from exists.
     mcpServer: null as unknown as McpServerService,
   };
@@ -1068,6 +1074,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   await app.register(authRoutes);
   await app.register(mcpServerRoutes);
+  await app.register(fleetMcpRoutes);
   await app.register(sessionRoutes);
   await app.register(chatReadRoutes);
   await app.register(attachmentRoutes);

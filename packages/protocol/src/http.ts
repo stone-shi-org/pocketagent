@@ -88,6 +88,15 @@ export const CreateSessionRequest = z.object({
    * `normalizeAgyModelList`/`normalizeOpencodeModels`) and ignore this field.
    */
   effort: EffortLevel.nullable().optional(),
+  /**
+   * PA-169: attach the Hub's `/mcp` (list hosts, dispatch to one, wait) to
+   * this session, so its agent can send work to other machines. Structured
+   * Claude sessions only, on a host the Hub has offered it to
+   * (`GET /api/fleet-mcp`). Off unless asked for, and disclosed on the
+   * session for its whole life (`SessionInfo.fleetMcpAttached`). Never
+   * honoured for a request an MCP client made — that is the loop guard.
+   */
+  attachFleetMcp: z.boolean().optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 

@@ -37,6 +37,22 @@ export interface HubMcpTokenRow {
   token_prefix: string;
   created_at: number;
   last_seen_at: number | null;
+  /** PA-169: `coordinator` (the Fleet agent's, every scope and host) or `client`. */
+  kind: string;
+  /** PA-169: JSON array of `HubMcpScope`, or NULL for every scope (coordinator rows). */
+  scopes_json: string | null;
+  /** PA-169: JSON array of host ids, or NULL for every host. */
+  hosts_json: string | null;
+}
+
+/** PA-169: one backend offered the Hub's `/mcp` for its sessions. */
+export interface HubMcpAttachRow {
+  host_id: string;
+  hub_url: string;
+  token_id: string | null;
+  token_prefix: string | null;
+  last_error: string | null;
+  updated_at: number;
 }
 
 /** PA-134: the Fleet agent's one row (`id = 1`), or absent when never enabled. */
@@ -236,6 +252,33 @@ export const HUB_MIGRATIONS: readonly string[] = [
   ALTER TABLE hub_hosts ADD COLUMN mcp_admin_credential_enc TEXT;
   ALTER TABLE hub_hosts ADD COLUMN mcp_admin_credential_prefix TEXT;
   ALTER TABLE hub_hosts ADD COLUMN mcp_admin_client_id TEXT;
+  `,
+  // 5 — PA-169. Hub MCP client tokens: phm_ tokens an operator mints for a
+  // coding agent, each with its own scopes and an optional host allowlist.
+  `
+  -- kind defaults to 'coordinator' and both JSON columns to NULL, which is
+  -- exactly what every pre-PA-169 row is: the Fleet coordinator's token, with
+  -- every scope and every host. So the migration changes nothing about a
+  -- token that already exists. NULL scopes is only ever written for a
+  -- coordinator; a client row always names its scopes, so a client can never
+  -- be widened to "everything" by a column someone forgot to fill.
+  ALTER TABLE hub_mcp_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'coordinator';
+  ALTER TABLE hub_mcp_tokens ADD COLUMN scopes_json TEXT;
+  ALTER TABLE hub_mcp_tokens ADD COLUMN hosts_json TEXT;
+
+  -- Phase 3: which backends hold a Hub MCP client token for their own
+  -- sessions to attach ("attach Fleet MCP"). CASCADE from the host, because a
+  -- row describing a removed host is meaningless; token_id is deliberately not
+  -- a foreign key, so revoking that token on the MCP clients card leaves a row
+  -- the page shows as broken rather than one that silently vanished.
+  CREATE TABLE IF NOT EXISTS hub_mcp_attach (
+    host_id      TEXT PRIMARY KEY REFERENCES hub_hosts (id) ON DELETE CASCADE,
+    hub_url      TEXT NOT NULL,
+    token_id     TEXT,
+    token_prefix TEXT,
+    last_error   TEXT,
+    updated_at   INTEGER NOT NULL
+  );
   `,
 ];
 

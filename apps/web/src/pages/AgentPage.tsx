@@ -984,6 +984,15 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
         </div>
       )}
 
+      {/* PA-169: same doctrine — this session can start work on other
+          machines for as long as it lives, so it says so on every visit. */}
+      {session?.fleetMcpAttached && (
+        <div className="provider-banner" role="status">
+          Fleet MCP is attached: this session’s agent can list the Hub’s hosts and start work on them. Approvals
+          on those hosts still wait for a person there.
+        </div>
+      )}
+
       <div className="agent-strip">
         {transcript.files.length > 0 && (
           <button type="button" className="chip" onClick={() => setShowFiles((v) => !v)}>

@@ -13,6 +13,11 @@ import {
   type HubFleetState,
   type HubFleetStep,
   type UpdateHubTemplateRequest,
+  type CreateHubMcpClientTokenRequest,
+  type CreateHubMcpClientTokenResponse,
+  type HubMcpClientTokenListResponse,
+  type UpdateHubMcpClientTokenRequest,
+  type HubMcpAttachState,
 } from '@pocketagent/protocol';
 import { ApiError } from './client.js';
 
@@ -230,4 +235,39 @@ export async function runHubFleetAction(
     steps: parsed.steps ?? [],
     error: response.ok ? null : (parsed.error?.message ?? `The Hub refused that (${response.status}).`),
   };
+}
+
+// ---- PA-169: Hub MCP client tokens -------------------------------------------
+
+export async function listHubMcpTokens(): Promise<HubMcpClientTokenListResponse> {
+  return hubRequest<HubMcpClientTokenListResponse>('/api/hub/mcp/tokens');
+}
+
+export async function createHubMcpToken(body: CreateHubMcpClientTokenRequest): Promise<CreateHubMcpClientTokenResponse> {
+  return hubRequest<CreateHubMcpClientTokenResponse>('/api/hub/mcp/tokens', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateHubMcpToken(id: string, body: UpdateHubMcpClientTokenRequest): Promise<void> {
+  await hubRequest<unknown>(`/api/hub/mcp/tokens/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function revokeHubMcpToken(id: string): Promise<void> {
+  await hubRequest<unknown>(`/api/hub/mcp/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function getHubMcpAttach(): Promise<HubMcpAttachState> {
+  return hubRequest<HubMcpAttachState>('/api/hub/mcp/attach');
+}
+
+export async function setHubMcpAttach(enabled: boolean, hubUrl?: string): Promise<HubMcpAttachState> {
+  return hubRequest<HubMcpAttachState>(`/api/hub/mcp/attach/${enabled ? 'enable' : 'disable'}`, {
+    method: 'POST',
+    ...(enabled ? { body: JSON.stringify({ hubUrl }) } : {}),
+  });
 }
