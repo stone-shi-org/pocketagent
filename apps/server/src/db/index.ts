@@ -430,6 +430,34 @@ export const PLANNER_PROVIDERS_DDL = `
 `;
 
 /**
+ * PA-170: cached automatic project / plan → workspace route mappings.
+ *
+ * `webhook_id` cascades on delete because this is a cache rather than durable
+ * delivery history. `git_remote` records the origin remote URL of `cwd` at
+ * detection time so `validateAndPruneRouteCache` can invalidate entries when a
+ * folder's git remote changes without spawning `git`.
+ */
+const WEBHOOK_ROUTE_CACHE_DDL = `
+  CREATE TABLE IF NOT EXISTS webhook_route_cache (
+    webhook_id   TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    route_key    TEXT NOT NULL,
+    host_id      TEXT,
+    cwd          TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    confidence   TEXT NOT NULL,
+    evidence     TEXT NOT NULL,
+    detected_at  INTEGER NOT NULL,
+    confirmed_at INTEGER,
+    confirmed_by TEXT,
+    git_remote   TEXT,
+    dismissed_at INTEGER,
+    PRIMARY KEY (webhook_id, route_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_webhook_route_cache_webhook
+    ON webhook_route_cache (webhook_id);
+`;
+
+/**
  * Exported for one test only: `cron.test.ts` builds a *genuine* historical
  * database by replaying a prefix of this array, rather than by fully migrating
  * and then rewriting `schema_version`. Rewinding a fully-migrated database
@@ -1699,6 +1727,14 @@ export const MIGRATIONS: readonly string[] = [
 
   // PA-165: read marks for the chat status dot.
   CHAT_READ_MARKS_DDL,
+
+  // PA-170: per-webhook automatic project/plan routing policy (`auto_route`,
+  // defaulting to `'off'` for existing webhooks so upgrading changes no
+  // behaviour) and the cached route detection table (`webhook_route_cache`).
+  `
+  ALTER TABLE webhooks ADD COLUMN auto_route TEXT NOT NULL DEFAULT 'off';
+  ${WEBHOOK_ROUTE_CACHE_DDL}
+  `,
 ];
 
 /**
@@ -2289,6 +2325,17 @@ export function openDatabase(databasePath: string): Db {
      WHERE (kind = 'session' AND id NOT IN (SELECT id FROM sessions))
         OR (kind = 'planner' AND id NOT IN (SELECT id FROM planner_chats))
   `);
+  // PA-170, same positional-migration hazard: ensure `webhooks.auto_route`
+  // (defaulting to `'off'` for existing rows) and `webhook_route_cache` exist.
+  const webhookColumnsForAutoRoute = new Set(
+    (db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (webhookColumnsForAutoRoute.size > 0 && !webhookColumnsForAutoRoute.has('auto_route')) {
+    db.exec("ALTER TABLE webhooks ADD COLUMN auto_route TEXT NOT NULL DEFAULT 'off'");
+  }
+  db.exec(WEBHOOK_ROUTE_CACHE_DDL);
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
@@ -3018,6 +3065,12 @@ export interface WebhookRow {
    * see `WebhookSpecCommon.agentIdentity`. `''` means unknown.
    */
   agent_identity: string;
+  /**
+   * PA-170: `'off' | 'suggest' | 'auto'` — how unmapped project/plan keys are
+   * handled against cached route detection. Optional on insert so existing test
+   * row builders that predate it need not name it (defaults to `'off'`).
+   */
+  auto_route?: string;
   max_concurrent: number;
   store_payloads: number;
   created_at: number;
@@ -3202,16 +3255,16 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
        secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent, worktree_mode, model, effort,
        effort_set, skip_permissions, auto_select_agent_model, prompt_template, conversation_mode,
-       overlap_policy, directory_policy, skip_queue_label_enabled, agent_identity, max_concurrent, store_payloads,
+       overlap_policy, directory_policy, skip_queue_label_enabled, agent_identity, auto_route, max_concurrent, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
        @secret_set_at, @filter_json, @project_map_json, @prompt_template_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
        @effort_set, @skip_permissions, @auto_select_agent_model, @prompt_template, @conversation_mode,
-       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @agent_identity, @max_concurrent, @store_payloads,
+       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @agent_identity, @auto_route, @max_concurrent, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error
      )`,
-  ).run(row);
+  ).run({ ...row, auto_route: row.auto_route ?? 'off' });
 }
 
 /** Columns `updateWebhook` is allowed to write. `id`/`created_at` are immutable. */
@@ -3601,6 +3654,167 @@ export function pruneOldWebhookHits(db: Db, keep: number): number {
         WHERE id NOT IN (SELECT id FROM webhook_hit_log ORDER BY received_at DESC LIMIT ?)`,
     )
     .run(keep).changes;
+}
+
+/** PA-170: one cached automatic project/plan → workspace route entry. */
+export interface WebhookRouteCacheRow {
+  webhook_id: string;
+  route_key: string;
+  host_id: string | null;
+  cwd: string;
+  source: string;
+  confidence: string;
+  evidence: string;
+  detected_at: number;
+  confirmed_at: number | null;
+  confirmed_by: string | null;
+  git_remote: string | null;
+  dismissed_at: number | null;
+}
+
+export function readWebhookRouteCache(db: Db, webhookId: string): WebhookRouteCacheRow[] {
+  return db
+    .prepare('SELECT * FROM webhook_route_cache WHERE webhook_id = ? ORDER BY route_key ASC')
+    .all(webhookId) as WebhookRouteCacheRow[];
+}
+
+export function readAllWebhookRouteCache(db: Db): WebhookRouteCacheRow[] {
+  return db
+    .prepare('SELECT * FROM webhook_route_cache ORDER BY webhook_id ASC, route_key ASC')
+    .all() as WebhookRouteCacheRow[];
+}
+
+export function readWebhookRouteCacheEntry(
+  db: Db,
+  webhookId: string,
+  routeKey: string,
+): WebhookRouteCacheRow | null {
+  return (
+    (db
+      .prepare('SELECT * FROM webhook_route_cache WHERE webhook_id = ? AND route_key = ?')
+      .get(webhookId, routeKey) as WebhookRouteCacheRow | undefined) ?? null
+  );
+}
+
+/**
+ * Upsert one detected route cache entry.
+ *
+ * If an existing row for `(webhook_id, route_key)` is already confirmed for the
+ * *same* `cwd` and `host_id`, preserve `confirmed_at`/`confirmed_by` unless the
+ * caller explicitly overrides them; if the detected `cwd` changed, reset
+ * confirmation unless explicitly confirmed on this write. Likewise, preserve
+ * `dismissed_at` if re-detecting the exact same `cwd` unless `preserveDismissed`
+ * is false.
+ */
+export function upsertWebhookRouteCacheEntry(
+  db: Db,
+  row: WebhookRouteCacheRow,
+  opts?: { preserveDismissed?: boolean },
+): void {
+  const existing = readWebhookRouteCacheEntry(db, row.webhook_id, row.route_key);
+  const sameTarget =
+    existing !== null && existing.cwd === row.cwd && (existing.host_id ?? null) === (row.host_id ?? null);
+  const confirmedAt =
+    row.confirmed_at !== null
+      ? row.confirmed_at
+      : sameTarget
+        ? existing.confirmed_at
+        : null;
+  const confirmedBy =
+    row.confirmed_by !== null
+      ? row.confirmed_by
+      : sameTarget
+        ? existing.confirmed_by
+        : null;
+  const dismissedAt =
+    row.dismissed_at !== null
+      ? row.dismissed_at
+      : opts?.preserveDismissed !== false && sameTarget
+        ? existing.dismissed_at
+        : null;
+
+  db.prepare(
+    `INSERT INTO webhook_route_cache (
+       webhook_id, route_key, host_id, cwd, source, confidence, evidence,
+       detected_at, confirmed_at, confirmed_by, git_remote, dismissed_at
+     ) VALUES (
+       @webhook_id, @route_key, @host_id, @cwd, @source, @confidence, @evidence,
+       @detected_at, @confirmed_at, @confirmed_by, @git_remote, @dismissed_at
+     )
+     ON CONFLICT (webhook_id, route_key) DO UPDATE SET
+       host_id      = excluded.host_id,
+       cwd          = excluded.cwd,
+       source       = excluded.source,
+       confidence   = excluded.confidence,
+       evidence     = excluded.evidence,
+       detected_at  = excluded.detected_at,
+       confirmed_at = excluded.confirmed_at,
+       confirmed_by = excluded.confirmed_by,
+       git_remote   = excluded.git_remote,
+       dismissed_at = excluded.dismissed_at`,
+  ).run({
+    ...row,
+    confirmed_at: confirmedAt,
+    confirmed_by: confirmedBy,
+    dismissed_at: dismissedAt,
+  });
+}
+
+export function confirmWebhookRouteCacheEntry(
+  db: Db,
+  webhookId: string,
+  routeKey: string,
+  opts: { cwd?: string; confirmedBy: string; confirmedAt?: number; gitRemote?: string | null },
+): WebhookRouteCacheRow | null {
+  const existing = readWebhookRouteCacheEntry(db, webhookId, routeKey);
+  if (!existing) return null;
+  const now = opts.confirmedAt ?? Date.now();
+  const nextCwd = opts.cwd ?? existing.cwd;
+  const nextGitRemote = opts.gitRemote !== undefined ? opts.gitRemote : existing.git_remote;
+  db.prepare(
+    `UPDATE webhook_route_cache
+        SET cwd = ?,
+            git_remote = ?,
+            confirmed_at = ?,
+            confirmed_by = ?,
+            dismissed_at = NULL
+      WHERE webhook_id = ? AND route_key = ?`,
+  ).run(nextCwd, nextGitRemote, now, opts.confirmedBy, webhookId, routeKey);
+  return readWebhookRouteCacheEntry(db, webhookId, routeKey);
+}
+
+export function dismissWebhookRouteCacheEntry(
+  db: Db,
+  webhookId: string,
+  routeKey: string,
+  dismissedAt = Date.now(),
+): WebhookRouteCacheRow | null {
+  const existing = readWebhookRouteCacheEntry(db, webhookId, routeKey);
+  if (!existing) return null;
+  db.prepare(
+    `UPDATE webhook_route_cache
+        SET dismissed_at = ?,
+            confirmed_at = NULL,
+            confirmed_by = NULL
+      WHERE webhook_id = ? AND route_key = ?`,
+  ).run(dismissedAt, webhookId, routeKey);
+  return readWebhookRouteCacheEntry(db, webhookId, routeKey);
+}
+
+export function deleteWebhookRouteCacheEntry(
+  db: Db,
+  webhookId: string,
+  routeKey: string,
+): boolean {
+  return (
+    db
+      .prepare('DELETE FROM webhook_route_cache WHERE webhook_id = ? AND route_key = ?')
+      .run(webhookId, routeKey).changes > 0
+  );
+}
+
+export function deleteAllWebhookRouteCacheForWebhook(db: Db, webhookId: string): number {
+  return db.prepare('DELETE FROM webhook_route_cache WHERE webhook_id = ?').run(webhookId).changes;
 }
 
 /** Keep the session table from growing forever on a long-lived install. */

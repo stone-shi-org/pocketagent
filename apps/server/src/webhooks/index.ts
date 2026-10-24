@@ -8,6 +8,7 @@ import type {
   JiraWebhookFilter,
   Webhook,
   WebhookAuthMode,
+  WebhookAutoRoute,
   WebhookConversationMode,
   WebhookDelivery,
   WebhookDeliveryCounts,
@@ -19,14 +20,17 @@ import type {
   WebhookHistoryEntry,
   WebhookHit,
   WebhookOverlapPolicy,
+  WebhookRouteCacheEntry,
   WebhookSignatureState,
   WebhookType,
 } from '@pocketagent/protocol';
 import {
+  BAMBOO_PLAN_KEY_RE,
   BAMBOO_SAMPLE_PAYLOAD,
   BambooWebhookFilter as BambooWebhookFilterSchema,
   DEFAULT_BAMBOO_PROMPT_TEMPLATE,
   DEFAULT_JIRA_PROMPT_TEMPLATE,
+  JIRA_PROJECT_KEY_RE,
   JIRA_SAMPLE_PAYLOAD,
   JiraWebhookFilter as JiraWebhookFilterSchema,
   bambooTemplateVariables,
@@ -45,10 +49,12 @@ import type {
   WebhookRow,
 } from '../db/index.js';
 import {
+  confirmWebhookRouteCacheEntry,
   countActiveWebhookDeliveries,
   deleteWebhook,
   deleteWebhookDeliveriesFor,
   deleteWebhookIssueSession,
+  dismissWebhookRouteCacheEntry,
   insertWebhook,
   insertWebhookDelivery,
   insertWebhookHit,
@@ -66,11 +72,21 @@ import {
   readWebhookDelivery,
   readWebhookHits,
   readWebhookIssueSession,
+  readWebhookRouteCacheEntry,
   readWebhooks,
   updateWebhook,
   updateWebhookDelivery,
   upsertWebhookIssueSession,
+  upsertWebhookRouteCacheEntry,
 } from '../db/index.js';
+import { readGitOriginUrl } from '../routes/capabilities.js';
+import {
+  detectAllRoutesForWebhook,
+  detectRouteForKey,
+  discoverCandidateRepos,
+  toWebhookRouteCacheEntry,
+  validateAndPruneRouteCacheSync,
+} from './route-detect.js';
 import { readPlannerModels } from '../planner/store.js';
 import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
@@ -273,6 +289,8 @@ export interface WebhookSpecCommon {
   skipQueueLabelEnabled: boolean;
   /** The Jira display name this webhook's own comments are posted under. See `db/index.ts`'s `agent_identity` doc comment. */
   agentIdentity?: string;
+  /** PA-170: `'off' | 'suggest' | 'auto'`. */
+  autoRoute?: WebhookAutoRoute;
   maxConcurrent: number;
   storePayloads: boolean;
 }
@@ -373,6 +391,8 @@ interface FrozenRun {
   directoryPolicy: WebhookDirectoryPolicy;
   /** Whether `directoryPolicy` above is `'allow'` because of the label specifically. */
   skippedByLabel: boolean;
+  /** PA-170: disclosure string when this delivery was auto-routed via route detection. */
+  autoRoutedReason?: string | null;
 }
 
 export class WebhookService {
@@ -704,12 +724,9 @@ export class WebhookService {
       return accepted('filtered', deliveryId, verdict.reason);
     }
 
-    // 6b. Route by project/plan. An empty map always resolves to `hook.cwd`; a
-    // non-empty one filters an unrouted project/plan rather than guessing.
-    const route =
-      type === 'bamboo'
-        ? resolvePlanRoute(this.routeMapFor(hook) as { planKey: string; cwd: string }[], hook.cwd, routeKeyOf(type, facts))
-        : resolveProjectRoute(this.routeMapFor(hook) as { projectKey: string; cwd: string }[], hook.cwd, routeKeyOf(type, facts));
+    // 6b. Route by project/plan. An explicit map entry wins first, then a
+    // confirmed cache entry, then `autoRoute` ('off' | 'suggest' | 'auto').
+    const route = await this.resolveDeliveryRoute(hook, deliveryId, facts);
     if (!route.matched) {
       this.closeDelivery(hook, deliveryId, 'filtered', route.reason);
       return accepted('filtered', deliveryId, route.reason);
@@ -779,6 +796,7 @@ export class WebhookService {
             },
       directoryPolicy: directoryPolicy.policy,
       skippedByLabel: directoryPolicy.skippedByLabel,
+      autoRoutedReason: route.autoRoutedReason,
     };
     updateWebhookDelivery(this.db, deliveryId, {
       rendered_prompt: prompt.text,
@@ -788,6 +806,7 @@ export class WebhookService {
       // the same "copied at delivery time" discipline `skip_permissions_enabled`
       // already follows.
       queue_skipped_by_label: directoryPolicy.skippedByLabel ? 1 : 0,
+      ...(route.autoRoutedReason !== null ? { reason: route.autoRoutedReason } : {}),
     });
     if (directoryPolicy.skippedByLabel) {
       this.opts.logger?.info(
@@ -821,8 +840,188 @@ export class WebhookService {
       deliveryId,
       sessionId: started.sessionId,
       ...(started.plannerChatId !== undefined ? { plannerChatId: started.plannerChatId } : {}),
-      reason: started.error,
+      reason: started.error ?? route.autoRoutedReason,
       duplicate: false,
+    };
+  }
+
+  /**
+   * PA-170: resolve a delivery's target project directory with precedence:
+   * 1. Explicit `projectMap` / `planMap` entry
+   * 2. Confirmed `webhook_route_cache` entry
+   * 3. `autoRoute` policy (`'off' | 'suggest' | 'auto'`) over unconfirmed
+   *    cache entries (running first-time detection if not yet cached).
+   */
+  private async resolveDeliveryRoute(
+    hook: WebhookRow,
+    deliveryId: string,
+    facts: AnyEventFacts,
+  ): Promise<
+    | { matched: true; cwd: string; autoRoutedReason: string | null }
+    | { matched: false; reason: string }
+  > {
+    const type = hook.type as WebhookType;
+    const routeKey = routeKeyOf(type, facts)?.toUpperCase() ?? null;
+    const explicitMap = this.routeMapFor(hook);
+    const autoRoute = (hook.auto_route ?? 'off') as WebhookAutoRoute;
+
+    // 1. Precedence 1: an explicit projectMap / planMap row always wins.
+    if (routeKey !== null && explicitMap.length > 0) {
+      const hit =
+        type === 'bamboo'
+          ? (explicitMap as BambooPlanMapEntry[]).find(
+              (e) => e.planKey.trim().toUpperCase() === routeKey,
+            )
+          : (explicitMap as JiraProjectMapEntry[]).find(
+              (e) => e.projectKey.trim().toUpperCase() === routeKey,
+            );
+      if (hit !== undefined) {
+        return { matched: true, cwd: hit.cwd, autoRoutedReason: null };
+      }
+    }
+
+    // Validate cached entries for this webhook (invalidates entries whose cwd
+    // left workspaces or whose .git/config remote changed).
+    validateAndPruneRouteCacheSync(this.db, this.opts.workspaces, hook.id);
+
+    // 2. Precedence 2: a confirmed cache entry wins over unconfirmed policy.
+    if (routeKey !== null) {
+      const existingCache = readWebhookRouteCacheEntry(this.db, hook.id, routeKey);
+      if (
+        existingCache !== null &&
+        existingCache.confirmed_at !== null &&
+        existingCache.dismissed_at === null
+      ) {
+        return { matched: true, cwd: existingCache.cwd, autoRoutedReason: null };
+      }
+    }
+
+    // 3. When autoRoute is 'off', use the classic static map behaviour.
+    if (autoRoute === 'off' || routeKey === null) {
+      const staticRoute =
+        type === 'bamboo'
+          ? resolvePlanRoute(
+              explicitMap as { planKey: string; cwd: string }[],
+              hook.cwd,
+              routeKey,
+            )
+          : resolveProjectRoute(
+              explicitMap as { projectKey: string; cwd: string }[],
+              hook.cwd,
+              routeKey,
+            );
+      if (!staticRoute.matched && routeKey !== null) {
+        const existing = readWebhookRouteCacheEntry(this.db, hook.id, routeKey);
+        if (existing === null) {
+          const bambooRepo =
+            type === 'bamboo' ? ((facts as BambooEventFacts).repositoryUrl ?? null) : null;
+          setImmediate(() => {
+            if (this.stopped) return;
+            void detectRouteForKey({
+              db: this.db,
+              workspaces: this.opts.workspaces,
+              hook,
+              routeKey,
+              bambooRepositoryUrl: bambooRepo,
+              now: this.now(),
+            }).catch(() => {});
+          });
+        }
+      }
+      return staticRoute.matched
+        ? { matched: true, cwd: staticRoute.cwd, autoRoutedReason: null }
+        : { matched: false, reason: staticRoute.reason };
+    }
+
+    // 4. autoRoute is 'suggest' or 'auto', and routeKey is not in explicitMap.
+    const bambooRepoUrl =
+      type === 'bamboo' ? ((facts as BambooEventFacts).repositoryUrl ?? null) : null;
+    let cached = readWebhookRouteCacheEntry(this.db, hook.id, routeKey);
+    if (cached === null || (bambooRepoUrl !== null && cached.source !== 'git-history')) {
+      cached = await detectRouteForKey({
+        db: this.db,
+        workspaces: this.opts.workspaces,
+        hook,
+        routeKey,
+        bambooRepositoryUrl: bambooRepoUrl,
+        now: this.now(),
+      });
+    }
+
+    // Single-folder backward compatibility: when no explicit map entries exist,
+    // `hook.cwd` is set, and no git-history / multi-folder candidate was
+    // detected (or the only detected entry is a `history` echo of `hook.cwd`
+    // itself), route to `hook.cwd` as a single-project webhook.
+    if (
+      explicitMap.length === 0 &&
+      hook.cwd.trim() !== '' &&
+      (cached === null || (cached.source === 'history' && cached.cwd === hook.cwd))
+    ) {
+      const candidates = await discoverCandidateRepos(this.opts.workspaces);
+      if (
+        candidates.length === 0 ||
+        (candidates.length === 1 && candidates[0]?.cwd === hook.cwd)
+      ) {
+        return { matched: true, cwd: hook.cwd, autoRoutedReason: null };
+      }
+    }
+
+    const activeSuggestion =
+      cached !== null && cached.dismissed_at === null ? cached : null;
+
+    if (
+      autoRoute === 'auto' &&
+      activeSuggestion !== null &&
+      activeSuggestion.confidence === 'unambiguous'
+    ) {
+      const label = this.opts.workspaces.labelFor(activeSuggestion.cwd);
+      const autoRoutedReason = `auto-routed via ${activeSuggestion.source}: ${label} (${activeSuggestion.evidence})`;
+      this.opts.logger?.info(
+        {
+          webhook: hook.id,
+          delivery: deliveryId,
+          routeKey,
+          cwd: activeSuggestion.cwd,
+          source: activeSuggestion.source,
+          action: 'route_auto',
+        },
+        'webhook delivery auto-routed from cached route detection',
+      );
+      return {
+        matched: true,
+        cwd: activeSuggestion.cwd,
+        autoRoutedReason,
+      };
+    }
+
+    // Suggest mode (or fallback from 'auto' when confidence is 'ambiguous' or no match).
+    if (activeSuggestion !== null) {
+      const label = this.opts.workspaces.labelFor(activeSuggestion.cwd);
+      return {
+        matched: false,
+        reason: `no mapping for ${routeKey}; suggested ${label} (${activeSuggestion.evidence})`,
+      };
+    }
+
+    if (explicitMap.length > 0) {
+      const fallback =
+        type === 'bamboo'
+          ? resolvePlanRoute(
+              explicitMap as { planKey: string; cwd: string }[],
+              hook.cwd,
+              routeKey,
+            )
+          : resolveProjectRoute(
+              explicitMap as { projectKey: string; cwd: string }[],
+              hook.cwd,
+              routeKey,
+            );
+      if (!fallback.matched) return fallback;
+    }
+
+    return {
+      matched: false,
+      reason: `no mapping for ${routeKey}; no workspace repository matched.`,
     };
   }
 
@@ -1051,7 +1250,10 @@ export class WebhookService {
       return;
     }
 
-    updateWebhookDelivery(this.db, deliveryId, { status: 'starting', reason: null });
+    updateWebhookDelivery(this.db, deliveryId, {
+      status: 'starting',
+      reason: frozen.autoRoutedReason ?? null,
+    });
     const started = await this.startRun(hook, deliveryId, frozen);
     // `startRun` failing means no session was ever created, so nothing will
     // ever settle it — the tree has to come back now or the queue stalls on a
@@ -2165,6 +2367,7 @@ export class WebhookService {
       directory_policy: spec.directoryPolicy,
       skip_queue_label_enabled: spec.skipQueueLabelEnabled ? 1 : 0,
       agent_identity: spec.agentIdentity ?? '',
+      auto_route: spec.autoRoute ?? 'suggest',
       max_concurrent: spec.maxConcurrent,
       store_payloads: spec.storePayloads ? 1 : 0,
       created_at: now,
@@ -2226,6 +2429,7 @@ export class WebhookService {
         ? { skip_queue_label_enabled: patch.skipQueueLabelEnabled ? 1 : 0 }
         : {}),
       ...(patch.agentIdentity !== undefined ? { agent_identity: patch.agentIdentity } : {}),
+      ...(patch.autoRoute !== undefined ? { auto_route: patch.autoRoute } : {}),
       ...(patch.maxConcurrent !== undefined ? { max_concurrent: patch.maxConcurrent } : {}),
       ...(patch.storePayloads !== undefined
         ? { store_payloads: patch.storePayloads ? 1 : 0 }
@@ -2472,6 +2676,240 @@ export class WebhookService {
     return rows.find((r) => r.payload_json !== null)?.payload_json ?? null;
   }
 
+  /**
+   * PA-170: explicit "Re-detect" action from the webhook editor.
+   *
+   * Scans workspace repositories and past deliveries for all unmapped keys,
+   * refreshes `webhook_route_cache`, and updates any filtered delivery rows for
+   * this webhook whose key now has a suggestion so the history panel shows it.
+   */
+  async detectRoutes(id: string): Promise<WebhookRouteCacheEntry[]> {
+    const hook = this.get(id);
+    const type = hook.type as WebhookType;
+    const explicitMap = this.routeMapFor(hook);
+    const explicitKeys = new Set(
+      type === 'bamboo'
+        ? (explicitMap as BambooPlanMapEntry[]).map((e) => e.planKey.toUpperCase())
+        : (explicitMap as JiraProjectMapEntry[]).map((e) => e.projectKey.toUpperCase()),
+    );
+    const filter = this.filterFor(hook);
+    const filterKeys =
+      type === 'bamboo'
+        ? ((filter as BambooWebhookFilter).planKeys ?? [])
+        : ((filter as JiraWebhookFilter).projectKeys ?? []);
+
+    const rows = await detectAllRoutesForWebhook({
+      db: this.db,
+      workspaces: this.opts.workspaces,
+      hook,
+      explicitKeys,
+      filterKeys,
+      preserveDismissed: false,
+      now: this.now(),
+    });
+
+    this.refreshFilteredDeliverySuggestionReasons(hook);
+    return rows.map((r) => toWebhookRouteCacheEntry(r, this.opts.workspaces));
+  }
+
+  /**
+   * PA-170: accept a route suggestion for `(id, routeKey)`.
+   *
+   * Writes an explicit `projectMap` / `planMap` entry on the webhook, stamps
+   * `confirmed_at` / `confirmed_by` in `webhook_route_cache`, and records an
+   * audit log entry.
+   */
+  async acceptRoute(
+    id: string,
+    routeKey: string,
+    opts?: { cwd?: string; confirmedBy?: string },
+  ): Promise<{ webhook: Webhook; entry: WebhookRouteCacheEntry | null }> {
+    const hook = this.get(id);
+    const type = hook.type as WebhookType;
+    const key = routeKey.trim().toUpperCase();
+    if (
+      key === '' ||
+      (type === 'jira' && !JIRA_PROJECT_KEY_RE.test(key)) ||
+      (type === 'bamboo' && !BAMBOO_PLAN_KEY_RE.test(key))
+    ) {
+      throw new WebhookServiceError(`"${routeKey}" is not a valid route key.`, 'invalid_filter');
+    }
+
+    const cached = readWebhookRouteCacheEntry(this.db, hook.id, key);
+    const targetCwd = opts?.cwd ?? cached?.cwd;
+    if (!targetCwd) {
+      throw new WebhookServiceError('No route suggestion found for that key.', 'not_found', 404);
+    }
+
+    const resolvedCwd = await this.opts.workspaces.resolveWorkspacePath(targetCwd);
+    const now = this.now();
+    const confirmedBy = opts?.confirmedBy ?? 'operator';
+    const gitRemote = await readGitOriginUrl(resolvedCwd);
+
+    // Update explicit projectMap / planMap on the webhook.
+    const existingMap = this.routeMapFor(hook);
+    const nextMap =
+      type === 'bamboo'
+        ? [
+            ...(existingMap as BambooPlanMapEntry[]).filter(
+              (e) => e.planKey.trim().toUpperCase() !== key,
+            ),
+            { planKey: key, cwd: resolvedCwd },
+          ]
+        : [
+            ...(existingMap as JiraProjectMapEntry[]).filter(
+              (e) => e.projectKey.trim().toUpperCase() !== key,
+            ),
+            { projectKey: key, cwd: resolvedCwd },
+          ];
+
+    updateWebhook(this.db, hook.id, {
+      project_map_json: JSON.stringify(nextMap),
+      updated_at: now,
+    });
+
+    if (cached === null) {
+      upsertWebhookRouteCacheEntry(this.db, {
+        webhook_id: hook.id,
+        route_key: key,
+        host_id: null,
+        cwd: resolvedCwd,
+        source: 'git-history',
+        confidence: 'unambiguous',
+        evidence: 'Confirmed by operator',
+        detected_at: now,
+        confirmed_at: now,
+        confirmed_by: confirmedBy,
+        git_remote: gitRemote,
+        dismissed_at: null,
+      });
+    } else {
+      confirmWebhookRouteCacheEntry(this.db, hook.id, key, {
+        cwd: resolvedCwd,
+        confirmedBy,
+        confirmedAt: now,
+        gitRemote,
+      });
+    }
+
+    const updatedCache = readWebhookRouteCacheEntry(this.db, hook.id, key);
+    this.opts.logger?.info(
+      {
+        webhook: hook.id,
+        routeKey: key,
+        cwd: resolvedCwd,
+        source: updatedCache?.source ?? 'manual',
+        action: 'route_accepted',
+      },
+      'webhook route suggestion accepted',
+    );
+
+    return {
+      webhook: this.toWebhook(this.get(id)),
+      entry: updatedCache ? toWebhookRouteCacheEntry(updatedCache, this.opts.workspaces) : null,
+    };
+  }
+
+  /**
+   * PA-170: dismiss a route suggestion for `(id, routeKey)`.
+   */
+  dismissRoute(
+    id: string,
+    routeKey: string,
+  ): { webhook: Webhook; entry: WebhookRouteCacheEntry } {
+    const hook = this.get(id);
+    const key = routeKey.trim().toUpperCase();
+    const dismissed = dismissWebhookRouteCacheEntry(this.db, hook.id, key, this.now());
+    if (dismissed === null) {
+      throw new WebhookServiceError('No route suggestion found for that key.', 'not_found', 404);
+    }
+
+    this.opts.logger?.info(
+      {
+        webhook: hook.id,
+        routeKey: key,
+        cwd: dismissed.cwd,
+        source: dismissed.source,
+        action: 'route_dismissed',
+      },
+      'webhook route suggestion dismissed',
+    );
+
+    return {
+      webhook: this.toWebhook(this.get(id)),
+      entry: toWebhookRouteCacheEntry(dismissed, this.opts.workspaces),
+    };
+  }
+
+  /**
+   * PA-170: called in the background when a workspace folder is added or
+   * removed. Prunes invalidated entries immediately and re-detects routes for
+   * all webhooks.
+   */
+  async onWorkspacesChanged(): Promise<void> {
+    if (this.stopped) return;
+    validateAndPruneRouteCacheSync(this.db, this.opts.workspaces);
+    for (const hook of this.list()) {
+      if (this.stopped) return;
+      const type = hook.type as WebhookType;
+      const explicitMap = this.routeMapFor(hook);
+      const explicitKeys = new Set(
+        type === 'bamboo'
+          ? (explicitMap as BambooPlanMapEntry[]).map((e) => e.planKey.toUpperCase())
+          : (explicitMap as JiraProjectMapEntry[]).map((e) => e.projectKey.toUpperCase()),
+      );
+      const filter = this.filterFor(hook);
+      const filterKeys =
+        type === 'bamboo'
+          ? ((filter as BambooWebhookFilter).planKeys ?? [])
+          : ((filter as JiraWebhookFilter).projectKeys ?? []);
+      try {
+        await detectAllRoutesForWebhook({
+          db: this.db,
+          workspaces: this.opts.workspaces,
+          hook,
+          explicitKeys,
+          filterKeys,
+          preserveDismissed: true,
+          now: this.now(),
+        });
+        this.refreshFilteredDeliverySuggestionReasons(hook);
+      } catch (err) {
+        this.opts.logger?.warn(
+          { webhook: hook.id, err },
+          'failed to refresh webhook route cache after workspace change',
+        );
+      }
+    }
+  }
+
+  private refreshFilteredDeliverySuggestionReasons(hook: WebhookRow): void {
+    const type = hook.type as WebhookType;
+    const deliveries = readWebhookDeliveries(this.db, {
+      webhookId: hook.id,
+      limit: 50,
+      includeNoise: true,
+    });
+    for (const d of deliveries) {
+      if (d.status !== 'filtered') continue;
+      const routeKey = (type === 'bamboo' ? d.issue_key : d.project_key)?.toUpperCase() ?? null;
+      if (!routeKey) continue;
+      const cached = readWebhookRouteCacheEntry(this.db, hook.id, routeKey);
+      if (cached !== null && cached.confirmed_at === null && cached.dismissed_at === null) {
+        const label = this.opts.workspaces.labelFor(cached.cwd);
+        const suggestedReason = `no mapping for ${routeKey}; suggested ${label} (${cached.evidence})`;
+        if (
+          d.reason !== null &&
+          (d.reason.includes('not in the project routing map') ||
+            d.reason.includes('has no directory mapping') ||
+            d.reason.startsWith(`no mapping for ${routeKey}`))
+        ) {
+          updateWebhookDelivery(this.db, d.id, { reason: suggestedReason });
+        }
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------
   // DTO mapping
   // -------------------------------------------------------------------------
@@ -2481,6 +2919,11 @@ export class WebhookService {
     const filter = this.filterFor(row);
     const routeMap = this.routeMapFor(row);
     const promptTemplateMap = this.promptTemplateMapFor(row);
+    const routeCache = validateAndPruneRouteCacheSync(
+      this.db,
+      this.opts.workspaces,
+      row.id,
+    ).map((r) => toWebhookRouteCacheEntry(r, this.opts.workspaces));
     const workspaceLabel =
       routeMap.length > 0 ? 'Auto-mapped' : this.opts.workspaces.labelFor(row.cwd);
     const config: Webhook['config'] =
@@ -2523,6 +2966,8 @@ export class WebhookService {
       directoryPolicy: row.directory_policy as WebhookDirectoryPolicy,
       skipQueueLabelEnabled: row.skip_queue_label_enabled === 1,
       agentIdentity: row.agent_identity,
+      autoRoute: ((row.auto_route ?? 'off') as WebhookAutoRoute),
+      routeCache,
       maxConcurrent: row.max_concurrent,
       storePayloads: row.store_payloads === 1,
       createdAt: row.created_at,
@@ -2535,6 +2980,21 @@ export class WebhookService {
   }
 
   toDelivery(row: WebhookDeliveryRow): WebhookDelivery {
+    let routeSuggestion: WebhookRouteCacheEntry | null = null;
+    if (row.status === 'filtered' && row.webhook_id !== null) {
+      const hook = readWebhook(this.db, row.webhook_id);
+      if (hook !== null) {
+        validateAndPruneRouteCacheSync(this.db, this.opts.workspaces, hook.id);
+        const routeKey =
+          (hook.type === 'bamboo' ? row.issue_key : row.project_key)?.toUpperCase() ?? null;
+        if (routeKey !== null) {
+          const cached = readWebhookRouteCacheEntry(this.db, hook.id, routeKey);
+          if (cached !== null && cached.confirmed_at === null && cached.dismissed_at === null) {
+            routeSuggestion = toWebhookRouteCacheEntry(cached, this.opts.workspaces);
+          }
+        }
+      }
+    }
     return {
       id: row.id,
       webhookId: row.webhook_id,
@@ -2549,6 +3009,7 @@ export class WebhookService {
       projectKey: row.project_key,
       actor: row.actor,
       reason: row.reason,
+      routeSuggestion,
       skipPermissionsEnabled: row.skip_permissions_enabled === 1,
       queueSkippedByLabel: row.queue_skipped_by_label === 1,
       payloadBytes: row.payload_bytes,

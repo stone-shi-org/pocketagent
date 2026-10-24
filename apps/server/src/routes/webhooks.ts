@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
+  AcceptWebhookRouteRequest,
   CreateWebhookRequest,
   DEFAULT_BAMBOO_PROMPT_TEMPLATE,
   DEFAULT_JIRA_PROMPT_TEMPLATE,
@@ -176,6 +177,7 @@ export async function resolveWebhookUpdatePatch(
       ? { skipQueueLabelEnabled: body.skipQueueLabelEnabled }
       : {}),
     ...(body.agentIdentity !== undefined ? { agentIdentity: body.agentIdentity } : {}),
+    ...(body.autoRoute !== undefined ? { autoRoute: body.autoRoute } : {}),
     ...(body.maxConcurrent !== undefined ? { maxConcurrent: body.maxConcurrent } : {}),
     ...(body.storePayloads !== undefined ? { storePayloads: body.storePayloads } : {}),
   };
@@ -530,6 +532,78 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /**
+   * PA-170: explicit "Re-detect" button in the webhook editor. Scans workspace
+   * repositories and past deliveries for unmapped project/plan keys and returns
+   * the refreshed `webhook_route_cache` entries.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/api/webhooks/:id/routes/detect',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      try {
+        const entries = await webhooks.detectRoutes(request.params.id);
+        return reply.send({ entries });
+      } catch (err) {
+        return mapError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * PA-170: accept a route suggestion for `:routeKey`. Writes an explicit
+   * `projectMap` / `planMap` row, stamps `confirmed_at` / `confirmed_by` in
+   * `webhook_route_cache`, and audits the change.
+   */
+  app.post<{ Params: { id: string; routeKey: string } }>(
+    '/api/webhooks/:id/routes/:routeKey/accept',
+    async (request, reply) => {
+      const parsed = AcceptWebhookRouteRequest.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+      }
+      try {
+        const result = await webhooks.acceptRoute(request.params.id, request.params.routeKey, {
+          ...(parsed.data.cwd !== undefined ? { cwd: parsed.data.cwd } : {}),
+          confirmedBy: 'operator',
+        });
+        auditConfigChange(request, 'webhook route suggestion accepted', {
+          webhookId: request.params.id,
+          routeKey: request.params.routeKey.trim().toUpperCase(),
+          cwd: result.entry?.cwd ?? parsed.data.cwd ?? null,
+          source: result.entry?.source ?? 'manual',
+        });
+        return reply.send(result);
+      } catch (err) {
+        if (err instanceof WorkspaceError) {
+          return badRequest(reply, err.message);
+        }
+        return mapError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * PA-170: dismiss a route suggestion for `:routeKey`.
+   */
+  app.post<{ Params: { id: string; routeKey: string } }>(
+    '/api/webhooks/:id/routes/:routeKey/dismiss',
+    async (request, reply) => {
+      try {
+        const result = webhooks.dismissRoute(request.params.id, request.params.routeKey);
+        auditConfigChange(request, 'webhook route suggestion dismissed', {
+          webhookId: request.params.id,
+          routeKey: request.params.routeKey.trim().toUpperCase(),
+          cwd: result.entry.cwd,
+          source: result.entry.source,
+        });
+        return reply.send(result);
+      } catch (err) {
+        return mapError(reply, err);
+      }
+    },
+  );
+
+  /**
    * The delivery endpoint, registered *inside* this plugin.
    *
    * Nested rather than added to `app.ts`'s list so the encapsulation
@@ -727,6 +801,7 @@ function specFrom(
     directoryPolicy: body.directoryPolicy,
     skipQueueLabelEnabled: body.skipQueueLabelEnabled,
     agentIdentity: body.agentIdentity,
+    autoRoute: body.autoRoute,
     maxConcurrent: body.maxConcurrent,
     storePayloads: body.storePayloads,
   };

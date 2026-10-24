@@ -65,6 +65,55 @@ export const WebhookOverlapPolicy = z.enum(['skip', 'allow', 'queue']);
 export type WebhookOverlapPolicy = z.infer<typeof WebhookOverlapPolicy>;
 
 /**
+ * PA-170: how a webhook handles a project or plan key that has no explicit
+ * `projectMap` / `planMap` row.
+ *
+ * - `off`: never consults detected routes (the default for existing webhooks on
+ *   upgrade, so nothing changes silently).
+ * - `suggest`: filters an unmapped key as today, carrying the detected folder
+ *   and evidence in `reason` so a human can Accept (writing an explicit map
+ *   row) or Dismiss. Default for new webhooks.
+ * - `auto`: routes an *unambiguous* match automatically, recording
+ *   `"auto-routed via <source>: …"` on the delivery row; anything ambiguous or
+ *   weaker falls back to `suggest`.
+ */
+export const WebhookAutoRoute = z.enum(['off', 'suggest', 'auto']);
+export type WebhookAutoRoute = z.infer<typeof WebhookAutoRoute>;
+
+export const WebhookRouteSource = z.enum(['git-history', 'history', 'jira-dev-info', 'fleet']);
+export type WebhookRouteSource = z.infer<typeof WebhookRouteSource>;
+
+export const WebhookRouteConfidence = z.enum(['unambiguous', 'ambiguous']);
+export type WebhookRouteConfidence = z.infer<typeof WebhookRouteConfidence>;
+
+export const WebhookRouteCacheEntry = z.object({
+  webhookId: z.string(),
+  routeKey: z.string(),
+  hostId: z.string().nullable(),
+  cwd: z.string(),
+  workspaceLabel: z.string(),
+  source: WebhookRouteSource,
+  confidence: WebhookRouteConfidence,
+  evidence: z.string(),
+  detectedAt: z.number().int(),
+  confirmedAt: z.number().int().nullable(),
+  confirmedBy: z.string().nullable(),
+  dismissedAt: z.number().int().nullable().optional(),
+});
+export type WebhookRouteCacheEntry = z.infer<typeof WebhookRouteCacheEntry>;
+
+/**
+ * Validated Jira project key: uppercase letters/digits/underscores, 1-16 chars,
+ * starting with a letter.
+ */
+export const JIRA_PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,15}$/;
+
+export const AcceptWebhookRouteRequest = z.object({
+  cwd: z.string().min(1).max(4096).optional(),
+});
+export type AcceptWebhookRouteRequest = z.infer<typeof AcceptWebhookRouteRequest>;
+
+/**
  * More statuses than a cron run has, because most deliveries never become runs.
  *
  * `rejected` auth failed · `invalid` authentic but unusable · `duplicate` body
@@ -369,6 +418,7 @@ const WebhookFields = z
     conversationMode: WebhookConversationMode,
     overlapPolicy: WebhookOverlapPolicy,
     directoryPolicy: WebhookDirectoryPolicy,
+    autoRoute: WebhookAutoRoute,
     /**
      * PA-39: let a single delivery override `directoryPolicy` to `allow` by
      * carrying the bare Jira label `skip-queue` (`JIRA_SKIP_QUEUE_LABEL`).
@@ -416,6 +466,7 @@ export const CreateWebhookRequest = WebhookFields.extend({
   conversationMode: WebhookConversationMode.default('per-delivery'),
   overlapPolicy: WebhookOverlapPolicy.default('skip'),
   directoryPolicy: WebhookDirectoryPolicy.default('queue'),
+  autoRoute: WebhookAutoRoute.default('suggest'),
   maxConcurrent: z.number().int().min(1).max(10).default(2),
   storePayloads: z.boolean().default(true),
   /**
@@ -506,6 +557,8 @@ export const Webhook = z.object({
   conversationMode: WebhookConversationMode,
   overlapPolicy: WebhookOverlapPolicy,
   directoryPolicy: WebhookDirectoryPolicy,
+  autoRoute: WebhookAutoRoute,
+  routeCache: z.array(WebhookRouteCacheEntry).optional(),
   skipQueueLabelEnabled: z.boolean(),
   agentIdentity: z.string(),
   maxConcurrent: z.number().int(),
@@ -524,6 +577,11 @@ export const Webhook = z.object({
   deliveryCounts: WebhookDeliveryCounts,
 });
 export type Webhook = z.infer<typeof Webhook>;
+
+export const WebhookRouteDetectResponse = z.object({
+  entries: z.array(WebhookRouteCacheEntry),
+});
+export type WebhookRouteDetectResponse = z.infer<typeof WebhookRouteDetectResponse>;
 
 /**
  * The one response that carries the secret.
@@ -616,6 +674,8 @@ export const WebhookDelivery = z.object({
    * whether a payload was stored, since the list never carries it.
    */
   retryProblem: z.string().nullable(),
+  /** PA-170: unconfirmed route suggestion when this delivery was filtered for an unmapped key. */
+  routeSuggestion: WebhookRouteCacheEntry.nullable().optional(),
 });
 export type WebhookDelivery = z.infer<typeof WebhookDelivery>;
 

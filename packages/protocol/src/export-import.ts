@@ -14,6 +14,7 @@ import {
 } from './hub-templates.js';
 import {
   WebhookAuthMode,
+  WebhookAutoRoute,
   WebhookConfig,
   WebhookConversationMode,
   WebhookDirectoryPolicy,
@@ -92,6 +93,7 @@ export const WebhookExportData = z.object({
   conversationMode: WebhookConversationMode.optional(),
   overlapPolicy: WebhookOverlapPolicy.optional(),
   directoryPolicy: WebhookDirectoryPolicy.optional(),
+  autoRoute: WebhookAutoRoute.optional(),
   skipQueueLabelEnabled: z.boolean().optional(),
   agentIdentity: z.string().max(200).optional(),
   maxConcurrent: z.number().int().min(1).max(10).optional(),

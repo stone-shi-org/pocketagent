@@ -764,6 +764,39 @@ describing the agent that did not run. `recordEffectiveAgent` now corrects it, w
 far more once the override can cross between a coding agent and a Pocket Agent, since
 `agentDisplayName` and the row's transcript link both key off it.
 
+**Auto-detected project/plan → workspace routing (`webhook_route_cache`, PA-170).** Once
+`projectMap` or `planMap` is non-empty, an unmapped key is filtered rather than falling back to
+the webhook's `cwd`. `webhooks/route-detect.ts` infers candidate mappings from evidence already
+on disk, caches them in `webhook_route_cache` (`ON DELETE CASCADE`, like
+`webhook_issue_sessions`), and lets a human confirm them without relaxing the "unmapped or
+ambiguous → filtered" rule:
+- **Signals (priority order):** (1) `git-history` — for Jira, counts `<KEY>-\d+` mentions across
+  each workspace folder and linked worktree (`treeRootOf`) in `git log -n 2000 --since=180.days.ago`
+  and `git for-each-ref` branch names (`execFile` argv-only, `buildChildEnv`, `realpath` +
+  containment re-checked before spawning, worktree hits rolled up to the main checkout); for
+  Bamboo, matches the payload's `repositoryUrl` against each folder's `.git/config` origin URL
+  (`readGitOriginUrl`, zero `git` subprocesses); (2) `history` — past `webhook_deliveries` and
+  `webhook_issue_sessions` runs for the same key. A candidate is `'unambiguous'` only when it has
+  at least 3 mentions (or an exact Bamboo remote match) and at least 3× the runner-up's score
+  (for low counts 3–9, the runner-up must be 0).
+- **When detection runs:** in the background after an unmapped delivery is recorded and answered
+  2xx, from `POST /api/webhooks/:id/routes/detect` ("Re-detect" in the editor), and in the
+  background when a project folder is added or removed (`onWorkspacesChanged`). **Never on a GET
+  or page render** — list views read only `webhook_route_cache` and prune stale entries
+  synchronously via `realpathSync` + `isContained` and `readGitOriginUrlSync` against the stored
+  `git_remote` with zero subprocesses.
+- **Policy (`autoRoute: 'off' | 'suggest' | 'auto'`):** defaults to `'suggest'` for new webhooks
+  (`CreateWebhookRequest`) and `'off'` for existing ones (column default `'off'`). Precedence:
+  explicit `projectMap`/`planMap` row → confirmed cache entry (`confirmed_at IS NOT NULL`) →
+  `autoRoute` policy for unconfirmed entries. Under `'suggest'`, the delivery is still filtered
+  with the suggestion in `reason` (`no mapping for XY; suggested <cwd> (<evidence>)`) and
+  surfaced on `WebhookDelivery.routeSuggestion`; **Accept** (`POST .../routes/:routeKey/accept`)
+  writes the explicit `projectMap`/`planMap` row, stamps `confirmed_at`/`confirmed_by`, and
+  writes an `auditConfigChange` line, while **Dismiss** (`POST .../routes/:routeKey/dismiss`)
+  suppresses the suggestion. Under `'auto'`, only an `'unambiguous'` match routes automatically
+  (recording `auto-routed via <source>: <cwd> (<evidence>)` on the delivery row and auditing the
+  first auto-route); anything `'ambiguous'` falls back to `'suggest'`.
+
 Known limitations, both inherited and made worse: per-delivery worktrees are not
 garbage-collected either, and a busy Jira project creates them far faster than a nightly job
 does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
@@ -3169,8 +3202,8 @@ These are load-bearing. Several were bugs first.
 - **Deleting a webhook keeps its delivery history.** `webhook_deliveries.webhook_id` is
   `ON DELETE SET NULL`, with `webhook_name`/`agent`/`skip_permissions_enabled` copied onto every
   row so an orphan still describes itself, and `session_id` deliberately not a foreign key — the
-  same reasoning `cron_runs` records. `webhook_issue_sessions` is the one webhook table that
-  CASCADEs, because it is a cache rather than history.
+  same reasoning `cron_runs` records. `webhook_issue_sessions` and `webhook_route_cache` (PA-170)
+  are the webhook tables that CASCADE, because both are caches rather than history.
 - **The webhook secret exists in the database in plaintext and must not exist anywhere else.**
   HMAC is a keyed MAC, so verification needs the key material and "shown once" is a UX choice
   rather than a cryptographic one: it is returned at creation and from an explicit,

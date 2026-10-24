@@ -36,6 +36,12 @@ export interface BambooEventFacts {
   /** Bamboo's longer trigger wording — can embed a commit message from anyone with push access. Untrusted prose. */
   triggerSentence: string | null;
   buildResultUrl: string | null;
+  /**
+   * PA-170: optional repository URL carried by the Bamboo payload (e.g.
+   * `repositoryUrl`, `repository`, `scmUrl`, `vcsRepositoryUrl`), used to
+   * match the plan against workspace git remotes.
+   */
+  repositoryUrl?: string | null;
   startedAt: number | null;
   finishedAt: number | null;
   /** Epoch ms from the payload's own `timestamp`, for the freshness check. Null when unparseable. */
@@ -77,6 +83,8 @@ function splitBuildResultKey(key: string): { planKey: string; buildNumber: numbe
 export function parseBambooEvent(payload: unknown): BambooParseResult {
   const root = asRecord(payload);
   const build = asRecord(root['build']);
+  const plan = asRecord(root['plan']);
+  const repoObj = asRecord(root['repository'] ?? build['repository'] ?? plan['repository']);
 
   const buildResultKey = str(root['buildResultKey']) || str(build['buildResultKey']) || null;
   const split = buildResultKey ? splitBuildResultKey(buildResultKey) : null;
@@ -124,6 +132,21 @@ export function parseBambooEvent(payload: unknown): BambooParseResult {
     str(build['resultsUrl']) ||
     null;
 
+  const repositoryUrl =
+    str(root['repositoryUrl']) ||
+    str(root['repository']) ||
+    str(root['scmUrl']) ||
+    str(root['vcsRepositoryUrl']) ||
+    str(build['repositoryUrl']) ||
+    str(build['repository']) ||
+    str(build['scmUrl']) ||
+    str(build['vcsRepositoryUrl']) ||
+    str(plan['repositoryUrl']) ||
+    str(plan['repository']) ||
+    str(repoObj['url']) ||
+    str(repoObj['repositoryUrl']) ||
+    null;
+
   const startedAt = parseTimestamp(str(root['startedAt']) || str(build['startedAt']));
   const finishedAt = parseTimestamp(str(root['finishedAt']) || str(build['finishedAt']));
   const timestamp = parseTimestamp(str(root['timestamp']) || str(build['timestamp']));
@@ -142,6 +165,7 @@ export function parseBambooEvent(payload: unknown): BambooParseResult {
       triggerReason,
       triggerSentence,
       buildResultUrl,
+      repositoryUrl,
       startedAt,
       finishedAt,
       timestamp,

@@ -61,6 +61,7 @@ export function WebhookHistoryPanel({
   const [error, setError] = useState<string | null>(null);
   const [showNoise, setShowNoise] = useState(false);
   const [detailEntry, setDetailEntry] = useState<WebhookHistoryEntry | null>(null);
+  const [busyAction, setBusyAction] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +85,34 @@ export function WebhookHistoryPanel({
   const onRetried = (outcome: RetryOutcome): void => {
     setDetailEntry(null);
     void load().then(() => setError(retryOutcomeMessage(outcome)));
+  };
+
+  const handleAcceptRoute = async (webhookId: string, routeKey: string, cwd: string): Promise<void> => {
+    if (busyAction) return;
+    setBusyAction(true);
+    try {
+      await api.acceptWebhookRoute(webhookId, routeKey, { cwd });
+      await load();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not accept route suggestion.');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleDismissRoute = async (webhookId: string, routeKey: string): Promise<void> => {
+    if (busyAction) return;
+    setBusyAction(true);
+    try {
+      await api.dismissWebhookRoute(webhookId, routeKey);
+      await load();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not dismiss route suggestion.');
+    } finally {
+      setBusyAction(false);
+    }
   };
 
   const openEntry = (e: WebhookHistoryEntry): void => {
@@ -185,6 +214,40 @@ export function WebhookHistoryPanel({
                 </button>
 
                 <div className="history-row-actions">
+                  {e.kind === 'delivery' &&
+                    e.status === 'filtered' &&
+                    e.webhookId !== null &&
+                    e.routeSuggestion &&
+                    e.routeSuggestion.confirmedAt === null &&
+                    e.routeSuggestion.dismissedAt === null && (
+                      <>
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={busyAction}
+                          title={`Map ${e.routeSuggestion.routeKey} → ${e.routeSuggestion.workspaceLabel ?? e.routeSuggestion.cwd}`}
+                          onClick={() =>
+                            void handleAcceptRoute(
+                              e.webhookId!,
+                              e.routeSuggestion!.routeKey,
+                              e.routeSuggestion!.cwd,
+                            )
+                          }
+                        >
+                          Accept
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busyAction}
+                          title={`Dismiss suggestion for ${e.routeSuggestion.routeKey}`}
+                          onClick={() =>
+                            void handleDismissRoute(e.webhookId!, e.routeSuggestion!.routeKey)
+                          }
+                        >
+                          Dismiss
+                        </button>
+                      </>
+                    )}
                   {e.kind === 'delivery' && (
                     <RetryDeliveryButton
                       delivery={e}

@@ -21,7 +21,7 @@ import { agentBinaryReport } from '../agents/install.js';
 import { auditConfigChange, resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db, cron } =
+  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db, cron, webhooks } =
     app.pocket;
 
   // Merges in the per-agent "last observed live" cache (see `agent_defaults`
@@ -358,6 +358,9 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         { path: added, created: !!parsed.data.create },
         'project folder added; sessions may now run here',
       );
+      setImmediate(() => {
+        void webhooks.onWorkspacesChanged();
+      });
       return reply.send({ ok: true, path: added, label: workspaces.labelFor(added) });
     } catch (err) {
       if (err instanceof WorkspaceError) {
@@ -376,7 +379,13 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
       });
     }
-    return reply.send({ ok: workspaces.remove(parsed.data.path) });
+    const removed = workspaces.remove(parsed.data.path);
+    if (removed) {
+      setImmediate(() => {
+        void webhooks.onWorkspacesChanged();
+      });
+    }
+    return reply.send({ ok: removed });
   });
 
   /** Folders the agents have run in before, minus the ones already added. */

@@ -183,6 +183,58 @@ export async function readGitOriginUrl(root: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * Synchronous counterpart of `readGitOriginUrl`, used when validating cached
+ * webhook route entries during synchronous DTO construction without spawning
+ * `git`.
+ */
+export function readGitOriginUrlSync(root: string): string | null {
+  const dotGit = path.join(root, '.git');
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(dotGit);
+  } catch {
+    return null;
+  }
+
+  const configPaths: string[] = [];
+  if (stat.isDirectory()) {
+    configPaths.push(path.join(dotGit, 'config'));
+  } else if (stat.isFile()) {
+    try {
+      const pointer = fs.readFileSync(dotGit, 'utf8');
+      const match = /^gitdir:\s*(.+)$/m.exec(pointer);
+      if (!match?.[1]) return null;
+      const gitDir = path.resolve(root, match[1].trim());
+      configPaths.push(path.join(gitDir, 'config'));
+      try {
+        const commonRaw = fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim();
+        if (commonRaw) {
+          const commonDir = path.resolve(gitDir, commonRaw);
+          configPaths.push(path.join(commonDir, 'config'));
+        }
+      } catch {
+        // Not a linked worktree with a separate commondir.
+      }
+    } catch {
+      return null;
+    }
+  } else {
+    return null;
+  }
+
+  for (const cfgPath of configPaths) {
+    try {
+      const content = fs.readFileSync(cfgPath, 'utf8');
+      const url = parseGitOriginFromConfig(content);
+      if (url !== null) return sanitizeGitRemoteUrl(url);
+    } catch {
+      // Try next candidate config path.
+    }
+  }
+  return null;
+}
+
 function parseGitOriginFromConfig(content: string): string | null {
   let inOriginSection = false;
   for (const rawLine of content.split(/\r?\n/)) {

@@ -55,6 +55,8 @@ import type {
   WebhookDeliveryDetail,
   WebhookHistoryResponse,
   WebhookPreviewResponse,
+  WebhookRouteCacheEntry,
+  WebhookRouteDetectResponse,
   WebhookSecretResponse,
   WorkspaceEntry,
   PlannerWorkspace,
@@ -966,6 +968,29 @@ export function createApiClient(endpoint: HostEndpoint) {
         method: 'POST',
         body: JSON.stringify(body),
       }),
+
+    /** PA-170: re-detect project/plan → workspace route mappings. */
+    detectWebhookRoutes: (id: string) =>
+      request<WebhookRouteDetectResponse>(`/api/webhooks/${encodeURIComponent(id)}/routes/detect`, {
+        method: 'POST',
+      }),
+
+    /** PA-170: accept a route suggestion, writing an explicit mapping row. */
+    acceptWebhookRoute: (id: string, routeKey: string, body: { cwd?: string } = {}) =>
+      request<{ webhook: Webhook; entry: WebhookRouteCacheEntry | null }>(
+        `/api/webhooks/${encodeURIComponent(id)}/routes/${encodeURIComponent(routeKey)}/accept`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        },
+      ),
+
+    /** PA-170: dismiss a route suggestion. */
+    dismissWebhookRoute: (id: string, routeKey: string) =>
+      request<{ webhook: Webhook; entry: WebhookRouteCacheEntry }>(
+        `/api/webhooks/${encodeURIComponent(id)}/routes/${encodeURIComponent(routeKey)}/dismiss`,
+        { method: 'POST' },
+      ),
 
     // ---- Planner (PA-6) ---------------------------------------------------------
 

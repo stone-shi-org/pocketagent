@@ -9,11 +9,13 @@ import type {
   PlannerWorkspace,
   ProjectInfo,
   Webhook,
+  WebhookAutoRoute,
   WebhookConversationMode,
   WebhookDirectoryPolicy,
   WebhookOverlapPolicy,
   WebhookDelivery,
   WebhookDeliveryCounts,
+  WebhookRouteCacheEntry,
   WebhookType,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
@@ -192,6 +194,9 @@ export function WebhookEditorPage({
   // the assembled comment thread can tell the agent's own past comments
   // from a human's. Blank means unknown — nothing gets trimmed.
   const [agentIdentity, setAgentIdentity] = useState('');
+  const [autoRoute, setAutoRoute] = useState<WebhookAutoRoute>('suggest');
+  const [routeCache, setRouteCache] = useState<WebhookRouteCacheEntry[]>([]);
+  const [detectingRoutes, setDetectingRoutes] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [storePayloads, setStorePayloads] = useState(true);
 
@@ -319,6 +324,8 @@ export function WebhookEditorPage({
       setDirectoryPolicy(hook.directoryPolicy);
       setSkipQueueLabelEnabled(hook.skipQueueLabelEnabled ?? false);
       setAgentIdentity(hook.agentIdentity ?? '');
+      setAutoRoute(hook.autoRoute ?? 'off');
+      setRouteCache(hook.routeCache ?? []);
       setMaxConcurrent(hook.maxConcurrent);
       setStorePayloads(hook.storePayloads);
       setDeliveryPath(hook.deliveryPath);
@@ -767,6 +774,7 @@ export function WebhookEditorPage({
       directoryPolicy,
       skipQueueLabelEnabled,
       agentIdentity: agentIdentity.trim(),
+      autoRoute,
       maxConcurrent,
       storePayloads,
       skipPermissions,
@@ -817,6 +825,7 @@ export function WebhookEditorPage({
           effort: isPocketAgent || effort.trim() === '' ? null : effort.trim(),
         });
         setDeliveryPath(updated.deliveryPath);
+        setRouteCache(updated.routeCache ?? []);
         setSaveStatus({ type: 'success', message: 'Change Saved' });
       }
     } catch (err) {
@@ -861,6 +870,77 @@ export function WebhookEditorPage({
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not render a preview.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runRouteDetection = async (): Promise<void> => {
+    if (isNew || detectingRoutes) return;
+    setDetectingRoutes(true);
+    setError(null);
+    try {
+      const res = await api.detectWebhookRoutes(id);
+      setRouteCache(res.entries);
+      await loadDeliveries();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not detect routes.');
+    } finally {
+      setDetectingRoutes(false);
+    }
+  };
+
+  const acceptRouteSuggestion = async (routeKey: string, cwdOverride?: string): Promise<void> => {
+    if (isNew || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.acceptWebhookRoute(
+        id,
+        routeKey,
+        cwdOverride !== undefined ? { cwd: cwdOverride } : {},
+      );
+      setRouteCache(res.webhook.routeCache ?? []);
+      if (res.webhook.config.type === 'bamboo') {
+        setPlanMap(
+          res.webhook.config.planMap.map((e) => ({
+            id: crypto.randomUUID(),
+            planKey: e.planKey,
+            cwd: e.cwd,
+          })),
+        );
+        if (res.webhook.config.planMap.length > 0) setDirectoryMode('auto-map');
+      } else {
+        setProjectMap(
+          res.webhook.config.projectMap.map((e) => ({
+            id: crypto.randomUUID(),
+            projectKey: e.projectKey,
+            cwd: e.cwd,
+          })),
+        );
+        if (res.webhook.config.projectMap.length > 0) setDirectoryMode('auto-map');
+      }
+      await loadDeliveries();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not accept route suggestion.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismissRouteSuggestion = async (routeKey: string): Promise<void> => {
+    if (isNew || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.dismissWebhookRoute(id, routeKey);
+      setRouteCache(res.webhook.routeCache ?? []);
+      await loadDeliveries();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not dismiss route suggestion.');
     } finally {
       setBusy(false);
     }
@@ -1005,6 +1085,7 @@ export function WebhookEditorPage({
         directoryPolicy,
         skipQueueLabelEnabled,
         agentIdentity: agentIdentity.trim(),
+        autoRoute,
         maxConcurrent,
         storePayloads,
       },
@@ -1077,6 +1158,7 @@ export function WebhookEditorPage({
       if (imported.directoryPolicy) setDirectoryPolicy(imported.directoryPolicy);
       if (imported.skipQueueLabelEnabled !== undefined) setSkipQueueLabelEnabled(imported.skipQueueLabelEnabled);
       if (imported.agentIdentity !== undefined) setAgentIdentity(imported.agentIdentity);
+      if (imported.autoRoute !== undefined) setAutoRoute(imported.autoRoute);
       if (imported.maxConcurrent !== undefined) setMaxConcurrent(imported.maxConcurrent);
       if (imported.storePayloads !== undefined) setStorePayloads(imported.storePayloads);
     },
@@ -1980,6 +2062,91 @@ export function WebhookEditorPage({
               edit this folder directly, unsupervised.
             </div>
           )}
+          <SelectRowNative
+            busy={busy}
+            label="Unmapped project / plan policy"
+            value={autoRoute}
+            options={[
+              { value: 'off', label: 'Off — filter unmapped keys without suggestions' },
+              { value: 'suggest', label: 'Suggest — filter and suggest detected directory (recommended)' },
+              { value: 'auto', label: 'Auto — route unambiguous matches automatically' },
+            ]}
+            help={
+              autoRoute === 'off'
+                ? 'Unmapped keys are filtered when a routing map is configured.'
+                : autoRoute === 'suggest'
+                  ? 'Unmapped keys stay filtered until you confirm a mapping, and the filter reason names the detected repository.'
+                  : 'Only unambiguous matches route automatically (recording the source and evidence on the delivery row). Ambiguous matches still fall back to Suggest.'
+            }
+            onChange={(v) => setAutoRoute(v as WebhookAutoRoute)}
+          />
+          {!isNew && (
+            <div className="settings-row settings-row-stacked">
+              <div className="settings-row-main">
+                <div className="settings-row-info">
+                  <label className="settings-row-label">Detected route suggestions</label>
+                  <p className="transport-hint">
+                    Cached mappings inferred from git commit history, branch names, git remotes, and past deliveries.
+                  </p>
+                </div>
+                <div className="settings-row-control">
+                  <button
+                    type="button"
+                    disabled={busy || detectingRoutes}
+                    onClick={() => void runRouteDetection()}
+                  >
+                    <Icon name="rotate" size={14} />
+                    {detectingRoutes ? 'Detecting…' : 'Re-detect'}
+                  </button>
+                </div>
+              </div>
+              {routeCache.filter((c) => c.confirmedAt === null && c.dismissedAt === null).length === 0 ? (
+                <p className="transport-hint">
+                  No unconfirmed route suggestions right now.
+                </p>
+              ) : (
+                <div className="webhook-route-suggestions">
+                  {routeCache
+                    .filter((c) => c.confirmedAt === null && c.dismissedAt === null)
+                    .map((entry) => (
+                      <div key={entry.routeKey} className="history-row" style={{ padding: '8px 10px' }}>
+                        <div className="history-row-main" style={{ cursor: 'default' }}>
+                          <div className="history-row-primary">
+                            <span className="jira-issue-badge">{entry.routeKey}</span>
+                            <span>→</span>
+                            <code>{entry.workspaceLabel ?? entry.cwd}</code>
+                            <span className="jira-event-badge">{entry.source}</span>
+                            {entry.confidence === 'ambiguous' && (
+                              <span className="history-test-tag">ambiguous</span>
+                            )}
+                          </div>
+                          <div className="history-row-secondary">
+                            <span className="delivery-reason">{entry.evidence}</span>
+                          </div>
+                        </div>
+                        <div className="history-row-actions" style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={busy}
+                            onClick={() => void acceptRouteSuggestion(entry.routeKey, entry.cwd)}
+                          >
+                            Accept
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void dismissRouteSuggestion(entry.routeKey)}
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
         </SectionCard>
       </div>
 
@@ -2405,7 +2572,36 @@ export function WebhookEditorPage({
                           {d.error !== null && <span className="history-row-error">{d.error}</span>}
                         </div>
                       </button>
-                      <div className="history-row-actions">
+                      <div className="history-row-actions" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        {d.status === 'filtered' &&
+                          d.routeSuggestion &&
+                          d.routeSuggestion.confirmedAt === null &&
+                          d.routeSuggestion.dismissedAt === null && (
+                            <>
+                              <button
+                                type="button"
+                                className="primary"
+                                disabled={busy}
+                                title={`Map ${d.routeSuggestion.routeKey} → ${d.routeSuggestion.workspaceLabel ?? d.routeSuggestion.cwd}`}
+                                onClick={() =>
+                                  void acceptRouteSuggestion(
+                                    d.routeSuggestion!.routeKey,
+                                    d.routeSuggestion!.cwd,
+                                  )
+                                }
+                              >
+                                Accept
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                title={`Dismiss suggestion for ${d.routeSuggestion.routeKey}`}
+                                onClick={() => void dismissRouteSuggestion(d.routeSuggestion!.routeKey)}
+                              >
+                                Dismiss
+                              </button>
+                            </>
+                          )}
                         <RetryDeliveryButton
                           delivery={d}
                           onRetried={(outcome) => {

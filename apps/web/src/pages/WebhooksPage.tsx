@@ -130,6 +130,7 @@ export function WebhooksPage({
           conversationMode: imported.conversationMode ?? 'per-delivery',
           overlapPolicy: imported.overlapPolicy ?? 'skip',
           directoryPolicy: imported.directoryPolicy ?? 'queue',
+          autoRoute: imported.autoRoute ?? 'suggest',
           skipQueueLabelEnabled: imported.skipQueueLabelEnabled ?? false,
           agentIdentity: imported.agentIdentity ?? '',
           maxConcurrent: imported.maxConcurrent ?? 2,
