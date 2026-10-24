@@ -149,6 +149,12 @@ for (const era of ['legacy', 'modern'] as Era[]) {
       expect(Array.isArray(res.data.executables)).toBe(true);
       expect(Array.isArray(res.data.agents)).toBe(true);
       expect(typeof res.data.hasWorkspaceIndex).toBe('boolean');
+      expect(res.data.hardware).toBeDefined();
+      expect(typeof res.data.hardware.cpu.model).toBe('string');
+      expect(res.data.hardware.cpu.threads).toBeGreaterThan(0);
+      expect(res.data.hardware.memory.totalBytes).toBeGreaterThan(0);
+      expect(Array.isArray(res.data.hardware.gpus)).toBe(true);
+      expect(typeof res.data.hardware.containerized).toBe('boolean');
       expect(res.data.pocketAgents.map((p: { name: string }) => p.name)).toContain('Pocket Agent');
       expect(Array.isArray(res.data.codingAgents)).toBe(true);
     });

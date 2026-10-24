@@ -2901,11 +2901,12 @@ only fills `${…}` in the compose file and is never passed into a container, so
 must be in the service's `environment:` (`docker/compose.hub.yaml` wires it as
 `${PA_MDNS_ADVERTISE:-false}`), and a backend with no `hostname:` advertises its container id.
 
-### Host capability cards (PA-133)
+### Host capability cards (PA-133, PA-174)
 
 Each backend describes what it can do in a single `HostCapabilities` card (`packages/protocol/src/capabilities.ts`, `capabilitiesVersion: 1`), exposed at `GET /api/capabilities` (authenticated) and as the `get_capabilities` MCP tool (`scope: 'read'`, calling the route through `InternalApiClient` so both surfaces return the exact same shape).
 
-- **Measured facts, computed with zero subprocesses.** `routes/capabilities.ts` (`buildHostCapabilities`) reads `platform`, `arch` and `os.release()`; catalog agents (`INSTALLABLE_AGENT_IDS`) with their `AgentSetupState` derived via `deriveSetupState` from filesystem `available` plus the cached `agent_defaults.last_auth_*` columns (never spawning an auth probe on read); notable executables from the closed `NOTABLE_EXECUTABLES` list (`xcodebuild`, `swift`, `xcrun`, `playwright-cli`, `docker`, `git`, `node`, `python3`, `cargo`, `go`, `libreoffice`) resolved through `resolveExecutable` / `executableSearchDirs`, with `DARWIN_ONLY_EXECUTABLES` (`xcodebuild`, `xcrun`) skipped on non-`darwin` hosts; project folders (`path`, `label`, and `gitRemote` parsed directly from `<folder>/.git/config` or a linked worktree's `gitdir:` `.git` file without spawning `git`); Pocket Agents (`id`, `name`, `identityPrompt`, effective `enabledTools` from `PlannerChatService.enabledToolNamesFor`, and `skillNames` from `PlannerSkillService.listAvailableSkills`); and `hasWorkspaceIndex: boolean` (`docWorkspaces.hasAnyWorkspaceIndex()`, reporting only whether a document workspace index exists on the host, never workspace names, paths, or contents — PA-144).
+- **Measured facts, computed with zero subprocesses on read.** `routes/capabilities.ts` (`buildHostCapabilities`) reads `platform`, `arch` and `os.release()`; catalog agents (`INSTALLABLE_AGENT_IDS`) with their `AgentSetupState` derived via `deriveSetupState` from filesystem `available` plus the cached `agent_defaults.last_auth_*` columns (never spawning an auth probe on read); notable executables from the closed `NOTABLE_EXECUTABLES` list (`xcodebuild`, `swift`, `xcrun`, `playwright-cli`, `docker`, `git`, `node`, `python3`, `cargo`, `go`, `libreoffice`) resolved through `resolveExecutable` / `executableSearchDirs`, with `DARWIN_ONLY_EXECUTABLES` (`xcodebuild`, `xcrun`) skipped on non-`darwin` hosts; project folders (`path`, `label`, and `gitRemote` parsed directly from `<folder>/.git/config` or a linked worktree's `gitdir:` `.git` file without spawning `git`); Pocket Agents (`id`, `name`, `identityPrompt`, effective `enabledTools` from `PlannerChatService.enabledToolNamesFor`, and `skillNames` from `PlannerSkillService.listAvailableSkills`); `hasWorkspaceIndex: boolean` (`docWorkspaces.hasAnyWorkspaceIndex()`, reporting only whether a document workspace index exists on the host, never workspace names, paths, or contents — PA-144); and `hardware` (`capabilities/hardware.ts` — PA-174).
+- **Auto-detected hardware (`hardware?: HostCapabilityHardware`, PA-174).** Reports `cpu` (`os.cpus()[0].model`, `os.availableParallelism()`, and `limitThreads` from cgroup v2 `cpu.max` with v1 `cpu.cfs_quota_us` fallback), `memory` (`os.totalmem()` and `limitBytes` from cgroup v2 `memory.max` with v1 `memory.limit_in_bytes` fallback, treating `max` or kernel `>= 1 PiB` sentinels as `null`), `gpus` (Linux NVIDIA from `/proc/driver/nvidia/gpus/*/information` cross-checked against `/dev/nvidia<minor>` so unexposed container GPUs are never advertised, merged with cached VRAM from the fixed-argv `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits` probe run at boot and on explicit Refresh `POST /api/agents/refresh` / `POST /api/capabilities/refresh`; Linux AMD/Intel from `/sys/class/drm/card*/device` `vendor`/`device`/`mem_info_vram_total` with a PCI-id table and raw hex fallback; macOS from `os.cpus()` with unified memory and one `apple` GPU entry with `vramBytes: null`), and `containerized` (`/.dockerenv`, `/run/.containerenv`, or container cgroup markers). Static facts (CPU model, host total RAM, static GPU inventory, and the `nvidia-smi` VRAM probe) are computed at boot and on Refresh; cgroup limits and `/dev/nvidia<minor>` device presence are re-read per request. Passed through by the Hub's `get_host_capabilities` tool and rendered on `HubPage` (`formatHardwareSummary`).
 - **Operator-declared fields.** `hostDescription` (free text, up to 500 chars) and `hostTags` (up to 20 lowercase slugs matching `^[a-z0-9][a-z0-9._:-]{0,31}$`) live in `settings` (`host_description`, `host_tags` JSON), are editable in Settings (`PATCH /api/settings` and `update_settings`), and are audited through `auditConfigChange` like other runtime settings.
 - **Hub polling, caching, and fallback.** `HealthPollService.tick()` (`apps/hub/src/registry/health.ts`) probes `GET /api/capabilities` alongside `/health` for bound online hosts using their `pah_` credential (`probeBackendCapabilities`, also called immediately on bind) and caches the `HubHostCapabilities` union in memory on `HostRegistry` (`recordCapabilities` / `capabilitiesFor`, surfaced on `HubHostEntry.capabilities`) with `fetchedAt`. An older backend without the route answers 404, which is cached as `{ status: 'unavailable', fetchedAt }` and shown on `HubPage` as `"Capabilities unavailable (upgrade host)"` rather than as an error — feature detection by probing, never by version comparison, the same rule PA-70 uses.
 
@@ -3712,16 +3713,20 @@ These are load-bearing. Several were bugs first.
   can at worst put a wrong row in front of a human. `GET /api/hub/discovery` sits behind the
   Hub session like every other `/api/hub/*` route, and its refresh is a POST so the Origin
   check covers it.
-- **A capability card is behind authentication, spawns no subprocess, and probes only a closed
-  list of executables** (PA-133). A tool, agent and project inventory is a machine fingerprint, so
+- **A capability card is behind authentication, spawns no subprocess on read, and probes only a closed
+  list of executables** (PA-133, PA-174). A tool, agent, hardware and project inventory is a machine fingerprint, so
   nothing in `/health` and nothing in the mDNS TXT record may carry it (`health.test.ts` and
   `mdns-advertise.test.ts` pin both key sets). `GET /api/capabilities` and `get_capabilities`
-  compute `HostCapabilities` exclusively from filesystem checks (`resolveExecutable` over the
-  closed `NOTABLE_EXECUTABLES` list in `packages/protocol/src/capabilities.ts`, and reading
-  `.git/config` directly for git origin URLs) plus the cached `agent_defaults.last_auth_*`
-  columns (`deriveSetupState`) — never spawning a CLI or `git` subprocess on read, never exposing
-  secrets, env values or full `PATH`, and never accepting a path or executable name from the
-  caller. Asserted in `apps/server/tests/capabilities.test.ts`.
+  compute `HostCapabilities` exclusively from filesystem/procfs/sysfs checks (`resolveExecutable` over the
+  closed `NOTABLE_EXECUTABLES` list in `packages/protocol/src/capabilities.ts`, reading
+  `.git/config` directly for git origin URLs, and reading cgroup v1/v2 limits plus `/proc/driver/nvidia`
+  cross-checked against `/dev/nvidia<minor>` and `/sys/class/drm`) plus cached boot/refresh probe state
+  (`agent_defaults.last_auth_*` via `deriveSetupState` and the cached fixed-argv
+  `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits` VRAM probe in
+  `capabilities/hardware.ts`) — never spawning a subprocess on read (only a boot or explicit Refresh
+  probe may spawn the fixed-argv `nvidia-smi` call), never exposing secrets, env values or full `PATH`,
+  and never accepting a path, executable name or argv from the caller. Asserted in
+  `apps/server/tests/capabilities.test.ts`.
 - **A live-listen utterance is never silently discarded, and barge-in commits
   only after the harness has judged it** (PA-85). The mic is open with no
   intent signal, so a filter is unavoidable — but the filter's own mistakes

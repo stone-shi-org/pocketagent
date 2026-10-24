@@ -86,6 +86,50 @@ export const HostCapabilityPocketAgent = z.object({
 });
 export type HostCapabilityPocketAgent = z.infer<typeof HostCapabilityPocketAgent>;
 
+export const HOST_CAPABILITY_GPU_VENDORS = ['nvidia', 'amd', 'apple', 'intel', 'other'] as const;
+export const HostCapabilityGpuVendor = z.enum(HOST_CAPABILITY_GPU_VENDORS);
+export type HostCapabilityGpuVendor = z.infer<typeof HostCapabilityGpuVendor>;
+
+export const HOST_CAPABILITY_GPU_SOURCES = ['proc', 'sysfs', 'smi'] as const;
+export const HostCapabilityGpuSource = z.enum(HOST_CAPABILITY_GPU_SOURCES);
+export type HostCapabilityGpuSource = z.infer<typeof HostCapabilityGpuSource>;
+
+export const HostCapabilityGpu = z.object({
+  vendor: HostCapabilityGpuVendor,
+  model: z.string(),
+  vramBytes: z.number().int().nonnegative().nullable(),
+  source: HostCapabilityGpuSource,
+});
+export type HostCapabilityGpu = z.infer<typeof HostCapabilityGpu>;
+
+export const HostCapabilityCpu = z.object({
+  model: z.string(),
+  threads: z.number().int().positive(),
+  limitThreads: z.number().positive().nullable(),
+});
+export type HostCapabilityCpu = z.infer<typeof HostCapabilityCpu>;
+
+export const HostCapabilityMemory = z.object({
+  totalBytes: z.number().int().nonnegative(),
+  limitBytes: z.number().int().positive().nullable(),
+});
+export type HostCapabilityMemory = z.infer<typeof HostCapabilityMemory>;
+
+/**
+ * PA-174: Auto-detected host hardware summary (CPU, RAM with cgroup limits,
+ * GPU model/VRAM, and containerization flag).
+ *
+ * Optional on `HostCapabilities` so older backends that predate PA-174 still
+ * parse cleanly under `CAPABILITIES_VERSION = 1`.
+ */
+export const HostCapabilityHardware = z.object({
+  cpu: HostCapabilityCpu,
+  memory: HostCapabilityMemory,
+  gpus: z.array(HostCapabilityGpu),
+  containerized: z.boolean(),
+});
+export type HostCapabilityHardware = z.infer<typeof HostCapabilityHardware>;
+
 export const HostCapabilities = z.object({
   capabilitiesVersion: z.number().int().positive(),
   platform: z.string(),
@@ -99,5 +143,7 @@ export const HostCapabilities = z.object({
   pocketAgents: z.array(HostCapabilityPocketAgent),
   /** PA-144: Whether at least one document workspace index exists on this host (contents are never reported). */
   hasWorkspaceIndex: z.boolean().optional(),
+  /** PA-174: Auto-detected hardware summary (CPU, RAM incl. cgroup limits, GPUs, containerized). */
+  hardware: HostCapabilityHardware.optional(),
 });
 export type HostCapabilities = z.infer<typeof HostCapabilities>;

@@ -10,9 +10,19 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import {
   CAPABILITIES_VERSION,
   HostCapabilities,
+  MDNS_TXT_KEYS,
   NOTABLE_EXECUTABLES,
 } from '@pocketagent/protocol';
+import {
+  buildHostHardware,
+  NVIDIA_SMI_ARGS,
+  NVIDIA_SMI_BIN,
+  parseNvidiaSmiCsv,
+  probeNvidiaSmi,
+  refreshHardwareProbe,
+} from '../src/capabilities/hardware.js';
 import { recordAgentAuthProbe } from '../src/db/index.js';
+import { advertisedTxt } from '../src/discovery/mdns.js';
 import { buildHostCapabilities, readGitOriginUrl } from '../src/routes/capabilities.js';
 import { authHeaders, createTestApp, TEST_TOKEN, type TestApp } from './helpers.js';
 
@@ -399,6 +409,296 @@ describe('PA-133: Host capability cards', () => {
     expect(serialized).not.toContain('confidential-mna-deal-room');
     expect(serialized).not.toContain('secret-term-sheet');
     expect(serialized).not.toContain('Project Aurora');
+  });
+
+  it('detects Linux cgroup v2 and v1 CPU/RAM limits and containerization (PA-174)', () => {
+    const cgV2 = path.join(tempDir!, 'cgroup-v2');
+    fs.mkdirSync(cgV2, { recursive: true });
+    fs.writeFileSync(path.join(cgV2, 'cpu.max'), '400000 100000\n');
+    fs.writeFileSync(path.join(cgV2, 'memory.max'), String(8 * 1024 ** 3) + '\n');
+    const dockerEnv = path.join(tempDir!, '.dockerenv');
+    fs.writeFileSync(dockerEnv, '');
+
+    const hwV2 = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      cpuModel: 'AMD EPYC 7763 64-Core Processor',
+      cpuThreads: 16,
+      totalMemoryBytes: 128 * 1024 ** 3,
+      cgroupDir: cgV2,
+      dockerEnvPath: dockerEnv,
+    });
+    expect(hwV2.cpu).toEqual({
+      model: 'AMD EPYC 7763 64-Core Processor',
+      threads: 16,
+      limitThreads: 4,
+    });
+    expect(hwV2.memory).toEqual({
+      totalBytes: 128 * 1024 ** 3,
+      limitBytes: 8 * 1024 ** 3,
+    });
+    expect(hwV2.memory.limitBytes).toBeLessThan(hwV2.memory.totalBytes);
+    expect(hwV2.gpus).toEqual([]);
+    expect(hwV2.containerized).toBe(true);
+
+    // Unlimited cgroup v2 (`max`) and no container markers
+    const cgV2Max = path.join(tempDir!, 'cgroup-v2-max');
+    fs.mkdirSync(cgV2Max, { recursive: true });
+    fs.writeFileSync(path.join(cgV2Max, 'cpu.max'), 'max 100000\n');
+    fs.writeFileSync(path.join(cgV2Max, 'memory.max'), 'max\n');
+
+    const hwUnlimited = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      cpuModel: 'Intel(R) Xeon(R) Gold 6338',
+      cpuThreads: 32,
+      totalMemoryBytes: 64 * 1024 ** 3,
+      cgroupDir: cgV2Max,
+    });
+    expect(hwUnlimited.cpu.limitThreads).toBeNull();
+    expect(hwUnlimited.memory.limitBytes).toBeNull();
+    expect(hwUnlimited.containerized).toBe(false);
+
+    // Cgroup v1 fallback: numeric quota + absurdly large kernel unlimited memory sentinel
+    const cgV1 = path.join(tempDir!, 'cgroup-v1');
+    fs.mkdirSync(path.join(cgV1, 'cpu'), { recursive: true });
+    fs.mkdirSync(path.join(cgV1, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(cgV1, 'cpu', 'cpu.cfs_quota_us'), '250000\n');
+    fs.writeFileSync(path.join(cgV1, 'cpu', 'cpu.cfs_period_us'), '100000\n');
+    fs.writeFileSync(path.join(cgV1, 'memory', 'memory.limit_in_bytes'), '9223372036854771712\n');
+    const procCgroup = path.join(tempDir!, 'proc-self-cgroup');
+    fs.writeFileSync(procCgroup, '12:memory:/docker/0123456789abcdef\n11:cpu,cpuacct:/docker/0123456789abcdef\n');
+
+    const hwV1 = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      cpuModel: 'Intel(R) Core(TM) i9-13900K',
+      cpuThreads: 24,
+      totalMemoryBytes: 64 * 1024 ** 3,
+      cgroupDir: cgV1,
+      procSelfCgroupPath: procCgroup,
+      dockerEnvPath: path.join(tempDir!, 'no-dockerenv'),
+      containerEnvPath: path.join(tempDir!, 'no-containerenv'),
+    });
+    expect(hwV1.cpu.limitThreads).toBe(2.5);
+    expect(hwV1.memory.limitBytes).toBeNull();
+    expect(hwV1.containerized).toBe(true);
+  });
+
+  it('detects NVIDIA GPUs from /proc/driver/nvidia/gpus/*/information gated by /dev/nvidia<minor> and merges cached nvidia-smi VRAM (PA-174)', () => {
+    const procNvidia = path.join(tempDir!, 'proc-nvidia-gpus');
+    const devDir = path.join(tempDir!, 'dev');
+    const gpu0Dir = path.join(procNvidia, '0000:0a:00.0');
+    const gpu1Dir = path.join(procNvidia, '0000:42:00.0');
+    fs.mkdirSync(gpu0Dir, { recursive: true });
+    fs.mkdirSync(gpu1Dir, { recursive: true });
+    fs.mkdirSync(devDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(gpu0Dir, 'information'),
+      [
+        'Model: \t\t NVIDIA GeForce RTX 4090',
+        'IRQ:   \t\t 132',
+        'GPU UUID: \t GPU-11111111-2222-3333-4444-555555555555',
+        'Device Minor: \t 0',
+        'GPU Excluded:\t No',
+      ].join('\n') + '\n',
+    );
+    fs.writeFileSync(
+      path.join(gpu1Dir, 'information'),
+      [
+        'Model: \t\t NVIDIA RTX A6000',
+        'IRQ:   \t\t 133',
+        'GPU UUID: \t GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        'Device Minor: \t 1',
+        'GPU Excluded:\t No',
+      ].join('\n') + '\n',
+    );
+
+    // Only /dev/nvidia0 is exposed into the container -> minor 1 must NOT be advertised.
+    fs.writeFileSync(path.join(devDir, 'nvidia0'), '');
+
+    const withSmi = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      procNvidiaGpusDir: procNvidia,
+      devDir,
+      cachedNvidiaSmi: [{ model: 'NVIDIA GeForce RTX 4090', vramBytes: 24564 * 1024 * 1024 }],
+    });
+    expect(withSmi.gpus).toEqual([
+      {
+        vendor: 'nvidia',
+        model: 'NVIDIA GeForce RTX 4090',
+        vramBytes: 24564 * 1024 * 1024,
+        source: 'smi',
+      },
+    ]);
+
+    // When nvidia-smi is missing or fails, falls back to source: 'proc' and vramBytes: null
+    const withoutSmi = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      procNvidiaGpusDir: procNvidia,
+      devDir,
+      cachedNvidiaSmi: [],
+    });
+    expect(withoutSmi.gpus).toEqual([
+      {
+        vendor: 'nvidia',
+        model: 'NVIDIA GeForce RTX 4090',
+        vramBytes: null,
+        source: 'proc',
+      },
+    ]);
+
+    // When /dev/nvidia0 is also absent (container without --gpus), reports gpus: []
+    const emptyDev = path.join(tempDir!, 'dev-empty');
+    fs.mkdirSync(emptyDev, { recursive: true });
+    const unexposed = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      procNvidiaGpusDir: procNvidia,
+      devDir: emptyDev,
+      cachedNvidiaSmi: [{ model: 'NVIDIA GeForce RTX 4090', vramBytes: 24564 * 1024 * 1024 }],
+    });
+    expect(unexposed.gpus).toEqual([]);
+  });
+
+  it('detects AMD and Intel GPUs from /sys/class/drm/card*/device with PCI-id table lookup and raw-id fallback (PA-174)', () => {
+    const drmDir = path.join(tempDir!, 'sys-drm');
+    const card0Dev = path.join(drmDir, 'card0', 'device');
+    const card1Dev = path.join(drmDir, 'card1', 'device');
+    const card2Dev = path.join(drmDir, 'card2', 'device');
+    const card3Dev = path.join(drmDir, 'card3', 'device');
+    const connectorDev = path.join(drmDir, 'card0-DP-1', 'device');
+    fs.mkdirSync(card0Dev, { recursive: true });
+    fs.mkdirSync(card1Dev, { recursive: true });
+    fs.mkdirSync(card2Dev, { recursive: true });
+    fs.mkdirSync(card3Dev, { recursive: true });
+    fs.mkdirSync(connectorDev, { recursive: true });
+
+    // card0: known AMD GPU with VRAM in bytes
+    fs.writeFileSync(path.join(card0Dev, 'vendor'), '0x1002\n');
+    fs.writeFileSync(path.join(card0Dev, 'device'), '0x744c\n');
+    fs.writeFileSync(path.join(card0Dev, 'mem_info_vram_total'), '25753026560\n');
+
+    // card1: known Intel GPU without mem_info_vram_total
+    fs.writeFileSync(path.join(card1Dev, 'vendor'), '0x8086\n');
+    fs.writeFileSync(path.join(card1Dev, 'device'), '0x56a0\n');
+
+    // card2: unknown AMD PCI ID -> falls back to normalized hex ID
+    fs.writeFileSync(path.join(card2Dev, 'vendor'), '0x1002\n');
+    fs.writeFileSync(path.join(card2Dev, 'device'), '0x9999\n');
+
+    // card3: NVIDIA (0x10de) in sysfs -> ignored so unexposed container GPUs never leak via sysfs
+    fs.writeFileSync(path.join(card3Dev, 'vendor'), '0x10de\n');
+    fs.writeFileSync(path.join(card3Dev, 'device'), '0x1cb1\n');
+
+    // card0-DP-1: connector -> ignored
+    fs.writeFileSync(path.join(connectorDev, 'vendor'), '0x1002\n');
+    fs.writeFileSync(path.join(connectorDev, 'device'), '0x744c\n');
+
+    const hw = buildHostHardware({
+      platform: 'linux',
+      arch: 'x64',
+      sysDrmDir: drmDir,
+    });
+    expect(hw.gpus).toEqual([
+      {
+        vendor: 'amd',
+        model: 'Radeon RX 7900 XTX',
+        vramBytes: 25753026560,
+        source: 'sysfs',
+      },
+      {
+        vendor: 'intel',
+        model: 'Arc A770',
+        vramBytes: null,
+        source: 'sysfs',
+      },
+      {
+        vendor: 'amd',
+        model: '0x9999',
+        vramBytes: null,
+        source: 'sysfs',
+      },
+    ]);
+  });
+
+  it('detects macOS chip name, unified memory, and a single apple GPU entry with vramBytes: null (PA-174)', async () => {
+    t = await createTestApp();
+    const card = await buildHostCapabilities(t.context, {
+      platform: 'darwin',
+      arch: 'arm64',
+      osVersion: '24.2.0',
+      hardware: {
+        cpuModel: 'Apple M3 Max',
+        cpuThreads: 16,
+        totalMemoryBytes: 64 * 1024 ** 3,
+      },
+    });
+    expect(card.hardware).toEqual({
+      cpu: {
+        model: 'Apple M3 Max',
+        threads: 16,
+        limitThreads: null,
+      },
+      memory: {
+        totalBytes: 64 * 1024 ** 3,
+        limitBytes: null,
+      },
+      gpus: [
+        {
+          vendor: 'apple',
+          model: 'Apple M3 Max',
+          vramBytes: null,
+          source: 'sysfs',
+        },
+      ],
+      containerized: false,
+    });
+  });
+
+  it('probes nvidia-smi with fixed argv on Refresh and never exposes hardware in /health or mDNS TXT (PA-174)', async () => {
+    expect(parseNvidiaSmiCsv('Quadro P1000, 4096\nNVIDIA L40S, 46068\n')).toEqual([
+      { model: 'Quadro P1000', vramBytes: 4096 * 1024 * 1024 },
+      { model: 'NVIDIA L40S', vramBytes: 46068 * 1024 * 1024 },
+    ]);
+
+    // Missing executable -> []
+    expect(await probeNvidiaSmi({ executablePath: null })).toEqual([]);
+
+    // Fake nvidia-smi script verifying fixed argv
+    const binDir = path.join(tempDir!, 'smi-bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const fakeSmi = path.join(binDir, NVIDIA_SMI_BIN);
+    const argsFile = path.join(tempDir!, 'smi-args.txt');
+    fs.writeFileSync(
+      fakeSmi,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\necho "NVIDIA A100-SXM4-80GB, 81920"\n`,
+      { mode: 0o755 },
+    );
+
+    const probed = await refreshHardwareProbe({ executablePath: fakeSmi });
+    expect(probed).toEqual([{ model: 'NVIDIA A100-SXM4-80GB', vramBytes: 81920 * 1024 * 1024 }]);
+    const recordedArgs = fs.readFileSync(argsFile, 'utf8').trim().split('\n');
+    expect(recordedArgs).toEqual([...NVIDIA_SMI_ARGS]);
+
+    t = await createTestApp();
+    const healthRes = await t.app.inject({ method: 'GET', url: '/health' });
+    expect(healthRes.statusCode).toBe(200);
+    expect(Object.keys(healthRes.json()).sort()).toEqual([
+      'protocol',
+      'status',
+      'uptimeSeconds',
+      'version',
+    ]);
+    expect(healthRes.json().hardware).toBeUndefined();
+
+    const txt = advertisedTxt('1.5.0');
+    expect(Object.keys(txt).sort()).toEqual(Object.values(MDNS_TXT_KEYS).sort());
+    expect(JSON.stringify(txt)).not.toContain('hardware');
+    expect(JSON.stringify(txt)).not.toContain('gpus');
   });
 });
 

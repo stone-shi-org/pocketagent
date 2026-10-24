@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SERVER_PROTOCOL_RANGE } from '@pocketagent/protocol';
+import { DispatchLimiter, FLEET_TOOLS } from '../src/mcp/tools.js';
 import { HealthPoller } from '../src/registry/health.js';
 import { HostRegistry } from '../src/registry/store.js';
 import { openHubDatabase } from '../src/db.js';
@@ -247,5 +248,142 @@ describe('the health poller', () => {
     expect(entry.status.online).toBe(true);
     expect(entry.status.error).toBeNull();
     expect(entry.capabilities?.status).toBe('unavailable');
+  });
+
+  it('parses hardware when reported by a backend and still accepts an older pre-PA-174 card without hardware (PA-174)', async () => {
+    registry.create({ id: 'gpu01', label: 'gpu01', baseUrl: 'http://gpu01.test' });
+    registry.bind('gpu01', { id: 'cred-3', token: 'pah_secret_token_for_gpu01' }, 'host-gpu01');
+
+    const { impl } = fakeFetch({
+      'http://gpu01.test/health': () => healthBody('1.6.0'),
+      'http://gpu01.test/api/capabilities': () =>
+        new Response(
+          JSON.stringify({
+            capabilitiesVersion: 1,
+            platform: 'linux',
+            arch: 'x64',
+            osVersion: '6.8.0',
+            description: 'GPU workstation',
+            tags: ['gpu'],
+            agents: [],
+            executables: ['git', 'python3'],
+            projects: [],
+            pocketAgents: [],
+            hardware: {
+              cpu: { model: 'AMD EPYC 7763', threads: 32, limitThreads: 8 },
+              memory: { totalBytes: 137438953472, limitBytes: 8589934592 },
+              gpus: [
+                {
+                  vendor: 'nvidia',
+                  model: 'NVIDIA GeForce RTX 4090',
+                  vramBytes: 25757220864,
+                  source: 'smi',
+                },
+              ],
+              containerized: true,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    });
+
+    const poller = new HealthPoller({ registry, fetchImpl: impl, intervalMs: 60_000 });
+    await poller.start();
+    poller.stop();
+
+    const entry = registry.list()[0]!;
+    expect(entry.capabilities?.status).toBe('ok');
+    if (entry.capabilities?.status === 'ok') {
+      expect(entry.capabilities.card.hardware).toEqual({
+        cpu: { model: 'AMD EPYC 7763', threads: 32, limitThreads: 8 },
+        memory: { totalBytes: 137438953472, limitBytes: 8589934592 },
+        gpus: [
+          {
+            vendor: 'nvidia',
+            model: 'NVIDIA GeForce RTX 4090',
+            vramBytes: 25757220864,
+            source: 'smi',
+          },
+        ],
+        containerized: true,
+      });
+    }
+
+    // Verify get_host_capabilities passes hardware through when present and returns null for an older card without it.
+    registry.setMcpCredential('gpu01', { id: 'mcp-1', token: 'pam_token_gpu01' });
+    const getHostCaps = FLEET_TOOLS.find((t) => t.name === 'get_host_capabilities')!;
+    let includeHardware = true;
+    const fakeClient = {
+      call: async (_target: unknown, tool: string) => {
+        if (tool === 'get_host_info') {
+          return { host: { platform: 'linux', arch: 'x64', version: '1.6.0', runningSessions: 0 } };
+        }
+        if (tool === 'get_capabilities') {
+          return {
+            capabilitiesVersion: 1,
+            platform: 'linux',
+            arch: 'x64',
+            osVersion: '6.8.0',
+            description: 'GPU workstation',
+            tags: ['gpu'],
+            agents: [],
+            executables: ['git'],
+            projects: [],
+            pocketAgents: [],
+            ...(includeHardware
+              ? {
+                  hardware: {
+                    cpu: { model: 'AMD EPYC 7763', threads: 32, limitThreads: 8 },
+                    memory: { totalBytes: 137438953472, limitBytes: 8589934592 },
+                    gpus: [
+                      {
+                        vendor: 'nvidia',
+                        model: 'NVIDIA GeForce RTX 4090',
+                        vramBytes: 25757220864,
+                        source: 'smi',
+                      },
+                    ],
+                    containerized: true,
+                  },
+                }
+              : {}),
+          };
+        }
+        return { agents: [], pocketAgents: [], projects: [] };
+      },
+      forget: () => undefined,
+    };
+
+    const ctx = {
+      principal: { id: 'p-1', label: 'test', kind: 'coordinator' as const, scopes: null, hosts: null },
+      depth: 0,
+      signal: new AbortController().signal,
+    };
+    const withHw = (await getHostCaps.handler(
+      { registry, client: fakeClient as never, limiter: new DispatchLimiter() },
+      ctx,
+      { host: 'gpu01' },
+    )) as Record<string, unknown>;
+    expect(withHw.hardware).toEqual({
+      cpu: { model: 'AMD EPYC 7763', threads: 32, limitThreads: 8 },
+      memory: { totalBytes: 137438953472, limitBytes: 8589934592 },
+      gpus: [
+        {
+          vendor: 'nvidia',
+          model: 'NVIDIA GeForce RTX 4090',
+          vramBytes: 25757220864,
+          source: 'smi',
+        },
+      ],
+      containerized: true,
+    });
+
+    includeHardware = false;
+    const withoutHw = (await getHostCaps.handler(
+      { registry, client: fakeClient as never, limiter: new DispatchLimiter() },
+      ctx,
+      { host: 'gpu01' },
+    )) as Record<string, unknown>;
+    expect(withoutHw.hardware).toBeNull();
   });
 });

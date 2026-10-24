@@ -231,8 +231,8 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     scope: 'read',
     title: 'Host capabilities',
     description:
-      'What this PocketAgent machine can do: platform/arch/OS version, operator description and tags, ' +
-      'coding agents with setupState, notable executables on disk, project folders (with git origin URL), ' +
+      'What this PocketAgent machine can do: platform/arch/OS version, hardware (CPU, RAM incl. cgroup limits, GPUs/VRAM), ' +
+      'operator description and tags, coding agents with setupState, notable executables on disk, project folders (with git origin URL), ' +
       'and Pocket Agents (identity prompt, enabled tools, skills). Same HostCapabilities card as GET /api/capabilities.',
     input: {},
     readOnly: true,

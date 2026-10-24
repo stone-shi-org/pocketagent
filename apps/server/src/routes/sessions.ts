@@ -18,6 +18,7 @@ import { readAgentDefaults } from '../db/index.js';
 import { deriveSetupState, refreshAgentAuthStates } from '../agents/auth-probe.js';
 import { refreshAgentVersions } from '../agents/version-probe.js';
 import { agentBinaryReport } from '../agents/install.js';
+import { refreshHardwareProbe } from '../capabilities/hardware.js';
 import { auditConfigChange, resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -118,6 +119,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       sessions.refreshAgentCatalogs(),
       refreshAgentAuthStates(db, agents),
       refreshAgentVersions(db, agents),
+      refreshHardwareProbe(),
     ]);
     return listAgentsWithCache();
   });

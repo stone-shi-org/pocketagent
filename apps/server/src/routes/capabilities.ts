@@ -11,6 +11,11 @@ import {
 } from '@pocketagent/protocol';
 import { deriveSetupState } from '../agents/auth-probe.js';
 import { resolveExecutable } from '../agents/registry.js';
+import {
+  buildHostHardware,
+  refreshHardwareProbe,
+  type HardwareDetectOptions,
+} from '../capabilities/hardware.js';
 import { readAgentDefaults } from '../db/index.js';
 import type { PocketContext } from '../types.js';
 
@@ -23,6 +28,10 @@ export interface BuildCapabilitiesOptions {
    * omitted, `resolveExecutable(bin, platform)` walks `executableSearchDirs(platform)`.
    */
   searchDirs?: readonly string[];
+  /**
+   * PA-174: Optional override for hardware detection paths and fixtures in unit tests.
+   */
+  hardware?: HardwareDetectOptions;
 }
 
 /**
@@ -102,6 +111,11 @@ export async function buildHostCapabilities(
   }));
 
   const hasWorkspaceIndex = pocket.docWorkspaces ? pocket.docWorkspaces.hasAnyWorkspaceIndex() : false;
+  const hardware = buildHostHardware({
+    platform,
+    arch,
+    ...opts?.hardware,
+  });
 
   return {
     capabilitiesVersion: CAPABILITIES_VERSION,
@@ -115,6 +129,7 @@ export async function buildHostCapabilities(
     projects,
     pocketAgents,
     hasWorkspaceIndex,
+    hardware,
   };
 }
 
@@ -275,4 +290,8 @@ function sanitizeGitRemoteUrl(rawUrl: string): string {
 
 export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/capabilities', async () => buildHostCapabilities(app.pocket));
+  app.post('/api/capabilities/refresh', async () => {
+    await refreshHardwareProbe();
+    return buildHostCapabilities(app.pocket);
+  });
 };

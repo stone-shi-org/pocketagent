@@ -117,6 +117,12 @@ describe('HubPage capability cards (PA-133)', () => {
             },
           ],
           hasWorkspaceIndex: true,
+          hardware: {
+            cpu: { model: 'Apple M2 Max', threads: 12, limitThreads: null },
+            memory: { totalBytes: 64 * 1024 ** 3, limitBytes: null },
+            gpus: [{ vendor: 'apple', model: 'Apple M2 Max', vramBytes: null, source: 'sysfs' }],
+            containerized: false,
+          },
         },
       },
     });
@@ -136,6 +142,8 @@ describe('HubPage capability cards (PA-133)', () => {
     expect(html).toContain('Has iOS distribution certificates and photo archive');
     expect(html).toContain('ios-signing');
     expect(html).toContain('photo-archive');
+    expect(html).toContain('Hardware');
+    expect(html).toContain('Apple M2 Max (12 threads) · 64 GB RAM · Apple M2 Max GPU');
     expect(html).toContain('Claude Code (ready)');
     expect(html).toContain('Codex (sign in needed)');
     expect(html).toContain('xcodebuild');
@@ -144,6 +152,78 @@ describe('HubPage capability cards (PA-133)', () => {
     expect(html).toContain('iOS Release Manager');
     expect(html).toContain('Workspace index');
     expect(html).toContain('Available');
+  });
+
+  it('renders containerized GPU/cgroup hardware summary on HubPage and supports older cards without hardware (PA-174)', () => {
+    const gpuContainerHost = makeHostRecord({
+      id: 'dev01',
+      label: 'stone-dev01',
+      capabilities: {
+        status: 'ok',
+        fetchedAt: Date.now(),
+        card: {
+          capabilitiesVersion: 1,
+          platform: 'linux',
+          arch: 'x64',
+          osVersion: '6.8.0',
+          description: '',
+          tags: [],
+          agents: [],
+          executables: ['docker'],
+          projects: [],
+          pocketAgents: [],
+          hardware: {
+            cpu: { model: 'Intel Xeon', threads: 32, limitThreads: 8 },
+            memory: { totalBytes: 128 * 1024 ** 3, limitBytes: 8 * 1024 ** 3 },
+            gpus: [
+              {
+                vendor: 'nvidia',
+                model: 'Quadro P1000',
+                vramBytes: 4 * 1024 ** 3,
+                source: 'smi',
+              },
+            ],
+            containerized: true,
+          },
+        },
+      },
+    });
+    const prePa174Host = makeHostRecord({
+      id: 'old-cap',
+      label: 'old-cap-host',
+      capabilities: {
+        status: 'ok',
+        fetchedAt: Date.now(),
+        card: {
+          capabilitiesVersion: 1,
+          platform: 'linux',
+          arch: 'x64',
+          osVersion: '6.1.0',
+          description: '',
+          tags: [],
+          agents: [],
+          executables: ['git'],
+          projects: [],
+          pocketAgents: [],
+        },
+      },
+    });
+
+    const html = renderToStaticMarkup(
+      <HubPage
+        directory={makeDirectory([gpuContainerHost, prePa174Host])}
+        onOpenHost={vi.fn()}
+        onOpenTemplates={vi.fn()}
+        onOpenTemplate={vi.fn()}
+        onOpenFleetChat={vi.fn()}
+        onApiError={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain(
+      'Intel Xeon (8/32 threads) · 8 GB / 128 GB RAM · Quadro P1000 (4 GB VRAM) · container',
+    );
+    expect(html).toContain('old-cap-host');
   });
 
   it('shows "Capabilities unavailable (upgrade host)" rather than an error when an older host answers 404', () => {

@@ -431,9 +431,9 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
     name: 'get_host_capabilities',
     title: 'What a host can run',
     description:
-      'One host in detail: its platform and architecture (darwin = macOS, where Xcode work goes), the coding ' +
-      'agents installed there and whether they are signed in, its Pocket Agents, and its project folders. Use it ' +
-      'to decide where a task belongs before dispatching.',
+      'One host in detail: its platform and architecture (darwin = macOS, where Xcode work goes), hardware ' +
+      '(CPU, RAM incl. cgroup limits, GPU model/VRAM), the coding agents installed there and whether they are ' +
+      'signed in, its Pocket Agents, and its project folders. Use it to decide where a task belongs before dispatching.',
     inputSchema: {
       type: 'object',
       properties: { host: hostArg },
@@ -476,6 +476,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
         executables: Array.isArray(caps?.executables) ? caps.executables : [],
         agents: Array.isArray(caps?.agents) ? caps.agents : [],
         hasWorkspaceIndex: typeof caps?.hasWorkspaceIndex === 'boolean' ? caps.hasWorkspaceIndex : false,
+        hardware: caps?.hardware ?? null,
         runningSessions: host.runningSessions ?? null,
         codingAgents: ((agents.agents as Record<string, unknown>[] | undefined) ?? []).map((a) => ({
           id: a.id,

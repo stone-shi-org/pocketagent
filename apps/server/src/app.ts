@@ -81,6 +81,7 @@ import { docWorkspaceRoutes } from './routes/doc-workspaces.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { telegramRoutes } from './routes/telegram.js';
 import { capabilitiesRoutes } from './routes/capabilities.js';
+import { ensureHardwareProbed } from './capabilities/hardware.js';
 import { chatReadRoutes } from './routes/chat-read.js';
 import { AdminService } from './admin/index.js';
 import { GeminiLiveService } from './planner/gemini-live.js';
@@ -903,6 +904,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     const hub = hubCredentials.list().find((h) => h.id === id);
     return hub ? hubAsMcpPrincipal(hub) : null;
   }
+
+  // PA-174: compute static hardware facts and run the initial cached `nvidia-smi`
+  // VRAM probe once at boot so `GET /api/capabilities` never spawns a subprocess.
+  await ensureHardwareProbed();
 
   const { interrupted, recovered } = await sessions.init();
   if (recovered > 0) app.log.info({ recovered }, 'reattached to sessions from a previous run');

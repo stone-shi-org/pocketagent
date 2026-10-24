@@ -3,6 +3,7 @@ import {
   negotiateProtocol,
   PROTOCOL_VERSION,
   type DiscoveredHubHost,
+  type HostCapabilityHardware,
   type HubDiscoveryResponse,
   type PushStatusResponse,
 } from '@pocketagent/protocol';
@@ -402,6 +403,42 @@ function formatAgentSetupLabel(setupState: string): string {
   }
 }
 
+export function formatHardwareBytes(bytes: number): string {
+  const gib = bytes / 1024 ** 3;
+  if (gib >= 10) return `${Math.round(gib)} GB`;
+  if (gib >= 1) {
+    const fixed = gib.toFixed(1).replace(/\.0$/, '');
+    return `${fixed} GB`;
+  }
+  const mib = Math.max(1, Math.round(bytes / 1024 ** 2));
+  return `${mib} MB`;
+}
+
+export function formatHardwareSummary(hw: HostCapabilityHardware): string {
+  const cpuLimits =
+    hw.cpu.limitThreads !== null && hw.cpu.limitThreads < hw.cpu.threads
+      ? `${hw.cpu.limitThreads}/${hw.cpu.threads} threads`
+      : `${hw.cpu.threads} ${hw.cpu.threads === 1 ? 'thread' : 'threads'}`;
+  const cpuPart = `${hw.cpu.model} (${cpuLimits})`;
+
+  const memPart =
+    hw.memory.limitBytes !== null && hw.memory.limitBytes < hw.memory.totalBytes
+      ? `${formatHardwareBytes(hw.memory.limitBytes)} / ${formatHardwareBytes(hw.memory.totalBytes)} RAM`
+      : `${formatHardwareBytes(hw.memory.totalBytes)} RAM`;
+
+  const gpuParts = hw.gpus.map((gpu) =>
+    gpu.vramBytes !== null
+      ? `${gpu.model} (${formatHardwareBytes(gpu.vramBytes)} VRAM)`
+      : gpu.vendor === 'apple' && gpu.model === hw.cpu.model
+        ? `${gpu.model} GPU`
+        : gpu.model,
+  );
+
+  const parts = [cpuPart, memPart, ...gpuParts];
+  if (hw.containerized) parts.push('container');
+  return parts.join(' · ');
+}
+
 function HostCard({
   host,
   push,
@@ -489,6 +526,12 @@ function HostCard({
             </div>
           )}
           <dl className="hub-host-facts hub-host-cap-facts">
+            {card.hardware !== undefined && (
+              <>
+                <dt>Hardware</dt>
+                <dd>{formatHardwareSummary(card.hardware)}</dd>
+              </>
+            )}
             <dt>Agents</dt>
             <dd className="hub-cap-list">
               {card.agents.filter((a) => a.available).length === 0 ? (
