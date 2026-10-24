@@ -103,4 +103,21 @@ describe('ShellSection (PA-117)', () => {
     expect(htmlHost2).toContain('zsh');
     expect(htmlHost2).toContain('aria-expanded="true"');
   });
+
+  it('renders a shell icon on each shell session row (PA-175)', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+
+    const html = renderToStaticMarkup(
+      <HostProvider endpoint={hostEndpoint('host-1', '/h/host-1')}>
+        <ShellSection
+          state={dummyState}
+          open={() => {}}
+          onNewShell={() => {}}
+        />
+      </HostProvider>,
+    );
+
+    expect(html).toContain('class="chat-row shell-row"');
+    expect(html).toContain('<span class="project-icon"><svg class="icon folder"');
+  });
 });

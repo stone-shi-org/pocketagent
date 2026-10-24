@@ -6858,8 +6858,34 @@ button.chat-rate-limit-badge {
   border-color: transparent;
 }
 
-/* `.chat-row` is `display: block`, so the row's second line is a block of its
-   own under the title rather than a flex sibling of it. */
+/* PA-175: each shell session row leads with `.project-icon` (`agent-shell`),
+   parallel to the folder icon on Projects and the robot icon on Pocket Agents. */
+.chat-row.shell-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.shell-row .folder {
+  color: var(--text);
+  opacity: 0.9;
+}
+
+.shell-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar .chat-row.shell-row {
+  gap: 8px;
+  padding: 7px 10px 7px 4px;
+}
+
+.sidebar .shell-row .icon.folder {
+  width: 17px;
+  height: 17px;
+}
+
 .shell-row-meta {
   display: flex;
   align-items: center;

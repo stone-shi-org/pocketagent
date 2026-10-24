@@ -162,21 +162,26 @@ export function ShellSection({
           <div key={shell.id} className="chat-line">
             <button
               type="button"
-              className={`chat-row${activeSessionId && activeSessionId === shell.sessionId ? ' active' : ''}`}
+              className={`chat-row shell-row${activeSessionId && activeSessionId === shell.sessionId ? ' active' : ''}`}
               onClick={() => open(shell, { preview: true })}
               onDoubleClick={() => open(shell, { preview: false })}
               title={`${shell.title} — ${shell.cwdLabel}`}
             >
-              <span className="chat-title">
-                <ChatStatusDot state={chatDotState(shell)} />
-                {shell.title}
+              <span className="project-icon">
+                <Icon name="agent-shell" className="folder" />
               </span>
-              <span className="shell-row-meta">
-                {/* "adopted" is the load-bearing word on this row: that pane is
-                    someone else's, so closing this only ever detaches, and the
-                    grid must not be resized from here. */}
-                {shell.adopted && <span className="shell-tag">adopted</span>}
-                <span className="shell-cwd">{shell.cwdLabel}</span>
+              <span className="shell-row-body">
+                <span className="chat-title">
+                  <ChatStatusDot state={chatDotState(shell)} />
+                  {shell.title}
+                </span>
+                <span className="shell-row-meta">
+                  {/* "adopted" is the load-bearing word on this row: that pane is
+                      someone else's, so closing this only ever detaches, and the
+                      grid must not be resized from here. */}
+                  {shell.adopted && <span className="shell-tag">adopted</span>}
+                  <span className="shell-cwd">{shell.cwdLabel}</span>
+                </span>
               </span>
             </button>
 
