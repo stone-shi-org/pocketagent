@@ -63,9 +63,9 @@ interface Props {
 }
 
 const CODING_STARTER_PROMPTS = [
-  'Explain the architecture of this repo',
-  'Run the test suite and check for failures',
-  'Find TODOs and code quality issues',
+  { label: 'Explain the architecture', prompt: 'Explain the architecture of this repo' },
+  { label: 'Run the tests', prompt: 'Run the test suite and check for failures' },
+  { label: 'Find TODOs', prompt: 'Find TODOs and code quality issues' },
 ];
 
 /**

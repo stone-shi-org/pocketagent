@@ -7068,6 +7068,43 @@ button.chat-rate-limit-badge {
   flex: none;
 }
 
+/* One starter chip in its editor: label and prompt stacked, the row's
+   reorder/remove buttons beside them. */
+.starter-prompts-editor-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.starter-prompts-editor-fields {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.starter-prompts-editor-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.starter-prompts-editor-label input,
+.starter-prompts-editor-label textarea {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+}
+@media (max-width: 600px) {
+  .starter-prompts-editor-row {
+    flex-direction: column;
+  }
+}
+
 .planner-badge-btn {
   display: inline-flex;
   align-items: center;

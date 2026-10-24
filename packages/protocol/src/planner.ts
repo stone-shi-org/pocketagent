@@ -18,6 +18,50 @@ import { PlannerLiveProvider } from './gemini-live.js';
  */
 
 /**
+ * One starter chip shown in an empty Pocket Agent chat. `label` is what the
+ * chip says and is kept short because chips sit in a row; `prompt` is what
+ * gets sent when it is tapped, and may be as long as a real message.
+ */
+export const PLANNER_STARTER_PROMPT_LABEL_MAX = 40;
+export const PLANNER_STARTER_PROMPT_TEXT_MAX = 4000;
+export const PLANNER_STARTER_PROMPTS_MAX = 8;
+
+export const PlannerStarterPrompt = z.object({
+  label: z.string().trim().min(1).max(PLANNER_STARTER_PROMPT_LABEL_MAX),
+  prompt: z.string().trim().min(1).max(PLANNER_STARTER_PROMPT_TEXT_MAX),
+});
+export type PlannerStarterPrompt = z.infer<typeof PlannerStarterPrompt>;
+
+export const PlannerStarterPromptList = z.array(PlannerStarterPrompt).max(PLANNER_STARTER_PROMPTS_MAX);
+export type PlannerStarterPromptList = z.infer<typeof PlannerStarterPromptList>;
+
+/**
+ * What an empty chat offers when nothing has been configured: the global list
+ * (`PlannerSettingsDto.starterPrompts`) reads as this until an operator saves
+ * one. Here rather than in `apps/web` so the server's "unset" answer and the
+ * editor's "Reset to defaults" cannot disagree.
+ */
+export const DEFAULT_PLANNER_STARTER_PROMPTS: readonly PlannerStarterPrompt[] = [
+  { label: 'What can you do?', prompt: 'What tasks can you help me with?' },
+  { label: 'Git status', prompt: 'Review git status and recent changes' },
+  { label: 'Open Jira issues', prompt: 'Search open Jira issues' },
+  { label: 'System health', prompt: 'Check system health and status' },
+];
+
+/**
+ * The chips an agent's empty chat shows: the agent's own list when it has
+ * one (an empty list included — that means "no chips"), else the global list.
+ * One function so the chat page and the editor's preview agree.
+ */
+export function effectivePlannerStarterPrompts(
+  agentOverride: readonly PlannerStarterPrompt[] | null | undefined,
+  global: readonly PlannerStarterPrompt[] | null | undefined,
+): readonly PlannerStarterPrompt[] {
+  if (agentOverride) return agentOverride;
+  return global ?? DEFAULT_PLANNER_STARTER_PROMPTS;
+}
+
+/**
  * An app-owned scratch/skills directory for the planner, distinct from a
  * project `WorkspaceEntry`. A project workspace is one of the user's real
  * code repositories — PocketAgent only reads it and checks containment. A
@@ -92,6 +136,13 @@ export const PlannerWorkspace = z.object({
    * predates the column.
    */
   liveProvider: PlannerLiveProvider,
+  /**
+   * This agent's own starter chips, or `null` to use the global list
+   * (`PlannerSettingsDto.starterPrompts`). An empty array is a real value:
+   * this agent shows no chips. Optional so an older backend's response, seen
+   * through a Hub, still parses.
+   */
+  starterPrompts: PlannerStarterPromptList.nullable().optional(),
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
 
@@ -170,6 +221,9 @@ export const UpdatePlannerWorkspaceRequest = z.object({
   /** PA-96: see `PlannerWorkspace.liveProvider`. Trivially reversible, so no
       confirmation step — the disclosure lives in the chat, where it applies. */
   liveProvider: PlannerLiveProvider.optional(),
+  /** See `PlannerWorkspace.starterPrompts`. `null` goes back to the global
+      list; `[]` shows no chips for this agent. */
+  starterPrompts: PlannerStarterPromptList.nullable().optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
@@ -829,6 +883,13 @@ export const PlannerSettingsDto = z.object({
    * to that provider too. Optional so an older backend's response still parses.
    */
   titleModelId: z.string().nullable().optional(),
+  /**
+   * The starter chips every agent's empty chat shows, unless that agent has
+   * its own list (`PlannerWorkspace.starterPrompts`). Reads as
+   * `DEFAULT_PLANNER_STARTER_PROMPTS` until saved. Optional so an older
+   * backend's response still parses.
+   */
+  starterPrompts: PlannerStarterPromptList.optional(),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -885,6 +946,9 @@ export const UpdatePlannerSettingsRequest = z.object({
   /** PA-165: see `PlannerSettingsDto.titleModelId`. `null` (or `''`) means
       "same as the chat". */
   titleModelId: z.string().max(200).nullable().optional(),
+  /** See `PlannerSettingsDto.starterPrompts`. `null` resets to
+      `DEFAULT_PLANNER_STARTER_PROMPTS`; `[]` shows no chips. */
+  starterPrompts: PlannerStarterPromptList.nullable().optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

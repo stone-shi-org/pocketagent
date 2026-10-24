@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
 import { CronOverlapPolicy, CronSchedulePreset, CronWorktreeMode } from './cron.js';
 import { UpdateSettingsRequest } from './http.js';
+import { PlannerStarterPromptList } from './planner.js';
 import {
   ClaudeProviderTemplatePayload,
   HubTemplateKind,
@@ -55,6 +56,8 @@ export const PocketAgentExportData = z.object({
   memoryEnabled: z.boolean().optional(),
   mcpEnabled: z.boolean().optional(),
   disabledTools: z.array(z.string().min(1).max(200)).optional(),
+  /** See `PlannerWorkspace.starterPrompts`; `null` = use the global list. */
+  starterPrompts: PlannerStarterPromptList.nullable().optional(),
 });
 export type PocketAgentExportData = z.infer<typeof PocketAgentExportData>;
 

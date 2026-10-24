@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DEFAULT_PLANNER_STARTER_PROMPTS } from '@pocketagent/protocol';
 import {
   PlannerWorkspaceError,
   PlannerWorkspaceRegistry,
@@ -50,6 +51,10 @@ function makeStore(): PlannerWorkspaceStore {
     setLiveProvider: (id, provider) => {
       const row = rows.find((r) => r.id === id);
       if (row) row.liveProvider = provider;
+    },
+    setStarterPrompts: (id, prompts) => {
+      const row = rows.find((r) => r.id === id);
+      if (row) row.starterPrompts = prompts;
     },
     isSeeded: () => seeded,
     markSeeded: () => {
@@ -759,6 +764,8 @@ describe('planner routes over HTTP', () => {
       meInstruction: null,
       toolsInstruction: null,
       titleModelId: null,
+      // Starter chips read as the built-in list until one is saved.
+      starterPrompts: DEFAULT_PLANNER_STARTER_PROMPTS,
       // Was a hardcoded `MAX_TOOL_ITERATIONS = 8` in `chats.ts`; now a
       // configurable setting (default 20) — see
       // `PlannerSettingsDto.maxToolIterations`'s doc comment.

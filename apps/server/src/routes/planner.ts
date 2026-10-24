@@ -192,6 +192,7 @@ import {
   writePlannerWebSearchEnabled,
   writePlannerYoloEnabled,
   writePlannerTitleModelId,
+  writePlannerStarterPrompts,
   readPlannerModelById,
 } from '../planner/store.js';
 
@@ -590,6 +591,9 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       // which is where it applies, rather than gating this switch.
       if (parsed.data.liveProvider !== undefined) {
         row = app.pocket.plannerWorkspaces.setLiveProvider(id, parsed.data.liveProvider);
+      }
+      if (parsed.data.starterPrompts !== undefined) {
+        row = app.pocket.plannerWorkspaces.setStarterPrompts(id, parsed.data.starterPrompts);
       }
       auditConfigChange(request, 'pocket agent updated', {
         workspace: id,
@@ -1314,6 +1318,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       attachmentInlineTextMaxBytes,
       attachmentInlineExtractMaxTokens,
       titleModelId,
+      starterPrompts,
     } = parsed.data;
     // PA-165: a title model must be a catalogued model, or a typo would
     // silently fall back to the chat's own model on every new chat.
@@ -1381,6 +1386,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       ...(attachmentInlineExtractMaxTokens !== undefined ? { extractMaxTokens: attachmentInlineExtractMaxTokens } : {}),
     });
     if (titleModelRef !== undefined) writePlannerTitleModelId(db, titleModelRef);
+    if (starterPrompts !== undefined) writePlannerStarterPrompts(db, starterPrompts);
     // Field names only: API keys may be among them.
     auditConfigChange(request, 'planner settings updated', {
       fields: Object.keys(parsed.data),

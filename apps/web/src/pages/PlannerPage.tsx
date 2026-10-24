@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
+import { DEFAULT_PLANNER_STARTER_PROMPTS } from '@pocketagent/protocol';
 import type {
   PlannerSettingsDto,
+  PlannerStarterPrompt,
   PlannerToolApprovalRow,
   PlannerToolInfo,
   PlannerWorkspace,
@@ -14,6 +16,7 @@ import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { McpRegistriesSection } from '../components/McpRegistriesSection.js';
 import { SkillsSection } from '../components/SkillsSection.js';
+import { StarterPromptsEditor } from '../components/StarterPromptsEditor.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
@@ -140,6 +143,11 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   // `buildPersonaSystemMessage`). Empty string saves as `null`.
   const saveMeInstruction = (): void => {
     void withBusy(() => api.updatePlannerSettings({ meInstruction: meInstructionInput.trim() || null }));
+  };
+
+  // The global starter chips. `null` resets to the built-in defaults.
+  const saveStarterPrompts = (starterPrompts: PlannerStarterPrompt[] | null): void => {
+    void withBusy(() => api.updatePlannerSettings({ starterPrompts }));
   };
 
   const saveToolsInstruction = (): void => {
@@ -615,6 +623,29 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
               rows={3}
               style={{ width: '100%', resize: 'vertical' }}
             />
+          </div>
+
+          <div className="planner-section">
+            <h3>Starter chips</h3>
+            <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+              Shown in every agent's empty chat, unless that agent has its own list (in its editor
+              page). The chip shows the short label; tapping it sends the prompt.
+            </p>
+            <StarterPromptsEditor
+              idPrefix="planner-global-starter"
+              value={settings?.starterPrompts ?? DEFAULT_PLANNER_STARTER_PROMPTS}
+              busy={busy || settings === null}
+              onSave={saveStarterPrompts}
+            />
+            <button
+              type="button"
+              className="planner-link-btn"
+              style={{ marginTop: 8 }}
+              disabled={busy}
+              onClick={() => saveStarterPrompts(null)}
+            >
+              Reset to defaults
+            </button>
           </div>
 
           <div className="planner-section">

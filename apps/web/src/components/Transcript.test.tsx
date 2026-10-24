@@ -91,7 +91,11 @@ describe('Transcript component', () => {
   });
 
   it('renders starter prompt chips in empty state when provided with onSelectPrompt', () => {
-    const starters = ['Check git status', 'Run tests', 'Fix linter errors'];
+    const starters = [
+      { label: 'Check git status', prompt: 'Check git status' },
+      { label: 'Run tests', prompt: 'Run the whole test suite and summarise every failure' },
+      { label: 'Fix linter errors', prompt: 'Fix linter errors' },
+    ];
     const html = renderToStaticMarkup(
       <Transcript
         state={emptyState}
@@ -103,5 +107,8 @@ describe('Transcript component', () => {
     expect(html).toContain('Check git status');
     expect(html).toContain('Run tests');
     expect(html).toContain('Fix linter errors');
+    // The chip shows the label; a longer prompt is only its tooltip.
+    expect(html).toContain('title="Run the whole test suite and summarise every failure"');
+    expect(html).toContain('>Run tests</button>');
   });
 });

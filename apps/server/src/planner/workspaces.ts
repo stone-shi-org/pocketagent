@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { PlannerLiveProvider } from '@pocketagent/protocol';
+import type { PlannerLiveProvider, PlannerStarterPrompt } from '@pocketagent/protocol';
 import { isContained } from '../workspaces/index.js';
 
 export class PlannerWorkspaceError extends Error {
@@ -40,6 +40,9 @@ export interface PlannerWorkspaceRow {
   identityPrompt: string | null;
   /** PA-96: see `PlannerWorkspace.liveProvider` (protocol package). */
   liveProvider: PlannerLiveProvider;
+  /** See `PlannerWorkspace.starterPrompts` (protocol package). `null` means
+      the global list. */
+  starterPrompts: PlannerStarterPrompt[] | null;
 }
 
 /** Persistence seam, so the registry stays testable without a database. */
@@ -63,6 +66,8 @@ export interface PlannerWorkspaceStore {
   setIdentityPrompt(id: string, identityPrompt: string | null): void;
   /** PA-96: this agent's live-stream provider. */
   setLiveProvider(id: string, provider: PlannerLiveProvider): void;
+  /** This agent's own starter chips, or `null` to use the global list. */
+  setStarterPrompts(id: string, prompts: PlannerStarterPrompt[] | null): void;
   /** PA-29 phase 3: written by `MemoryConsolidationService` after it
       finishes processing this agent (including a cycle with nothing new to
       fold — see that service's own doc comment for why the marker still
@@ -139,6 +144,7 @@ export class PlannerWorkspaceRegistry {
       mcpEnabled: true,
       identityPrompt: null,
       liveProvider: 'pipeline',
+      starterPrompts: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -206,6 +212,7 @@ export class PlannerWorkspaceRegistry {
       mcpEnabled: true,
       identityPrompt: null,
       liveProvider: 'pipeline',
+      starterPrompts: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -327,6 +334,19 @@ export class PlannerWorkspaceRegistry {
     if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
     this.store.setLiveProvider(id, provider);
     const updated = { ...row, liveProvider: provider };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * Set this agent's own starter chips, or `null` to go back to the global
+   * list. Trivially reversible, same posture as `setLiveProvider`.
+   */
+  setStarterPrompts(id: string, prompts: PlannerStarterPrompt[] | null): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setStarterPrompts(id, prompts);
+    const updated = { ...row, starterPrompts: prompts };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
   }

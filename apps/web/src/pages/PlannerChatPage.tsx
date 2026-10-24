@@ -19,7 +19,12 @@ import type {
   PlannerArtifact,
   UndoTurnConflict,
 } from '@pocketagent/protocol';
-import { plannerModelSupportsImages } from '@pocketagent/protocol';
+import {
+  DEFAULT_PLANNER_STARTER_PROMPTS,
+  effectivePlannerStarterPrompts,
+  plannerModelSupportsImages,
+  type PlannerStarterPrompt,
+} from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
@@ -80,13 +85,6 @@ const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
     argumentHint: '<file/photo>',
     aliases: ['attach', 'photo', 'file'],
   },
-];
-
-const PLANNER_STARTER_PROMPTS = [
-  'What tasks can you help me with?',
-  'Review git status and recent changes',
-  'Search open Jira issues',
-  'Check system health and status',
 ];
 
 interface Props {
@@ -344,15 +342,24 @@ export function PlannerChatPage({
   // the default pipeline, which is what every agent had before this existed.
   const chatWorkspaceId = chat?.workspaceId ?? null;
   const [agentDefaultModelId, setAgentDefaultModelId] = useState<string | null>(null);
+  // Starter chips: this agent's own list, else the global one (Settings →
+  // Pocket Agent). Fetched beside the agent; a failure leaves the defaults.
+  const [starterPrompts, setStarterPrompts] =
+    useState<readonly PlannerStarterPrompt[]>(DEFAULT_PLANNER_STARTER_PROMPTS);
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([api.listPlannerWorkspaces(), api.getGeminiLiveSettings()])
-      .then(([{ workspaces }, gemini]) => {
+    void Promise.all([
+      api.listPlannerWorkspaces(),
+      api.getGeminiLiveSettings(),
+      api.getPlannerSettings().catch(() => null),
+    ])
+      .then(([{ workspaces }, gemini, plannerSettings]) => {
         if (cancelled) return;
         const agent = workspaces.find((w) => w.id === chatWorkspaceId);
         setLiveProvider(agent?.liveProvider ?? 'pipeline');
         setAgentDefaultModelId(agent?.defaultModelId ?? null);
         setGeminiAvailable(gemini.available);
+        setStarterPrompts(effectivePlannerStarterPrompts(agent?.starterPrompts, plannerSettings?.starterPrompts));
       })
       .catch(() => {});
     return () => {
@@ -1877,7 +1884,7 @@ export function PlannerChatPage({
         <AttachmentHrefContext.Provider value={attachmentHref}>
           <Transcript
             state={transcript}
-            starterPrompts={PLANNER_STARTER_PROMPTS}
+            starterPrompts={starterPrompts}
             onSelectPrompt={(text) => void handleSend(text)}
             onUndoTurn={(turnId) => void handleUndoTurn(turnId, false)}
             undoingTurnId={undoingTurnId}

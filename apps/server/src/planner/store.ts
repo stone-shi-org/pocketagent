@@ -9,6 +9,7 @@ import type {
   PlannerProviderAuthMode,
   PlannerProviderEndpoint,
   PlannerProviderKind,
+  PlannerStarterPrompt,
 } from '@pocketagent/protocol';
 import {
   ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE,
@@ -18,6 +19,8 @@ import {
   DEFAULT_INLINE_TEXT_MAX_BYTES,
   MAX_INLINE_EXTRACT_MAX_TOKENS,
   MAX_INLINE_TEXT_MAX_BYTES,
+  DEFAULT_PLANNER_STARTER_PROMPTS,
+  PlannerStarterPromptList,
   PromptAttachment,
   PromptImage,
   defaultEndpointsForProviderKind,
@@ -60,6 +63,23 @@ interface PlannerWorkspaceDbRow {
   mcp_enabled: number;
   identity_prompt: string | null;
   live_provider: string | null;
+  starter_prompts_json: string | null;
+}
+
+/**
+ * A stored starter-chip list, or `null` when there is none or it no longer
+ * parses. Reading `null` for a bad row means "use the fallback" rather than
+ * throwing: a row written by a newer build, or edited by hand, must not stop
+ * the agent list (or the settings page) from loading.
+ */
+export function parseStarterPrompts(raw: string | null | undefined): PlannerStarterPrompt[] | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  try {
+    const parsed = PlannerStarterPromptList.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Anything unrecognised reads as the default rather than throwing — a row
@@ -81,6 +101,7 @@ function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
     mcpEnabled: row.mcp_enabled === 1,
     identityPrompt: row.identity_prompt,
     liveProvider: toLiveProvider(row.live_provider),
+    starterPrompts: parseStarterPrompts(row.starter_prompts_json),
   };
 }
 
@@ -93,8 +114,8 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     insert: (row) => {
       db.prepare(
         `INSERT INTO planner_workspaces
-           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled, identity_prompt, live_provider)
-         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled, @identityPrompt, @liveProvider)`,
+           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled, identity_prompt, live_provider, starter_prompts_json)
+         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled, @identityPrompt, @liveProvider, @starterPromptsJson)`,
       ).run({
         id: row.id,
         name: row.name,
@@ -107,6 +128,7 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
         mcpEnabled: row.mcpEnabled ? 1 : 0,
         identityPrompt: row.identityPrompt,
         liveProvider: row.liveProvider,
+        starterPromptsJson: row.starterPrompts === null ? null : JSON.stringify(row.starterPrompts),
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
@@ -130,6 +152,12 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     },
     setLiveProvider: (id, provider) => {
       db.prepare('UPDATE planner_workspaces SET live_provider = ? WHERE id = ?').run(provider, id);
+    },
+    setStarterPrompts: (id, prompts) => {
+      db.prepare('UPDATE planner_workspaces SET starter_prompts_json = ? WHERE id = ?').run(
+        prompts === null ? null : JSON.stringify(prompts),
+        id,
+      );
     },
     setLastConsolidatedAt: (id, at) => {
       db.prepare('UPDATE planner_workspaces SET last_consolidated_at = ? WHERE id = ?').run(at, id);
@@ -1631,6 +1659,15 @@ export const PLANNER_ME_INSTRUCTION_KEY = 'planner_me_instruction';
     chat's own model". */
 export const PLANNER_TITLE_MODEL_ID_KEY = 'planner_title_model_id';
 
+/** The global starter chips, as `PlannerStarterPrompt[]` JSON. Absent (or
+    unparsable) reads as `DEFAULT_PLANNER_STARTER_PROMPTS`. */
+export const PLANNER_STARTER_PROMPTS_KEY = 'planner_starter_prompts';
+
+/** `null` resets to the defaults by removing the stored list. */
+export function writePlannerStarterPrompts(db: Db, prompts: PlannerStarterPrompt[] | null): void {
+  writeSetting(db, PLANNER_STARTER_PROMPTS_KEY, prompts === null ? '' : JSON.stringify(prompts));
+}
+
 /**
  * PA-45 (reporter: "add 'tools' instruction, for environment settings, like
  * ssh key, url for certain things, which environment variable has
@@ -1731,6 +1768,7 @@ export interface PlannerSettingsSnapshot {
   attachmentInlineTextMaxBytes: number;
   attachmentInlineExtractMaxTokens: number;
   titleModelId: string | null;
+  starterPrompts: PlannerStarterPrompt[];
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -1792,6 +1830,8 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
       MAX_INLINE_EXTRACT_MAX_TOKENS,
     ),
     titleModelId: readSetting(db, PLANNER_TITLE_MODEL_ID_KEY) || null,
+    starterPrompts:
+      parseStarterPrompts(readSetting(db, PLANNER_STARTER_PROMPTS_KEY)) ?? [...DEFAULT_PLANNER_STARTER_PROMPTS],
   };
 }
 

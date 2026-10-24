@@ -62,8 +62,9 @@ export function Transcript({
   state: TranscriptState;
   /** Messages from the conversation being resumed, shown above this session. */
   history?: TranscriptItem[];
-  /** Clickable prompt chips shown when the conversation is empty. */
-  starterPrompts?: string[];
+  /** Clickable prompt chips shown when the conversation is empty. The chip
+      shows `label`; tapping it sends `prompt`, which may be much longer. */
+  starterPrompts?: readonly { label: string; prompt: string }[];
   /** Called when a starter prompt chip or follow-up suggestion is picked. */
   onSelectPrompt?: (prompt: string) => void;
   /** PA-143: called when the user clicks "Undo this turn" on a turn that changed workspace files. */
@@ -174,14 +175,15 @@ export function Transcript({
           <p className="empty-prompt-hint">Send a prompt to start the conversation.</p>
           {starterPrompts && starterPrompts.length > 0 && onSelectPrompt && (
             <div className="starter-prompts" aria-label="Starter prompts">
-              {starterPrompts.map((prompt) => (
+              {starterPrompts.map((starter, i) => (
                 <button
-                  key={prompt}
+                  key={`${i}:${starter.label}`}
                   type="button"
                   className="starter-prompt-chip"
-                  onClick={() => onSelectPrompt(prompt)}
+                  title={starter.prompt === starter.label ? undefined : starter.prompt}
+                  onClick={() => onSelectPrompt(starter.prompt)}
                 >
-                  {prompt}
+                  {starter.label}
                 </button>
               ))}
             </div>

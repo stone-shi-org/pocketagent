@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   DEFAULT_PLANNER_IDENTITY_PROMPT,
+  DEFAULT_PLANNER_STARTER_PROMPTS,
   type PlannerAgentMcpRegistryInfo,
   type PlannerAgentSkillInfo,
   type PlannerAgentToolInfo,
@@ -9,6 +10,7 @@ import {
   type PlannerModel,
   type PlannerProvider,
   type PlannerLiveProvider,
+  type PlannerStarterPrompt,
   type PlannerWorkspace,
   type PocketAgentExportData,
   type UpdatePlannerWorkspaceRequest,
@@ -18,6 +20,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { SkillExportDialog } from '../components/SkillExportDialog.js';
+import { StarterPromptsEditor } from '../components/StarterPromptsEditor.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { groupPlannerModelsByProvider, resolvePlannerModelSelection } from '../agent/planner-models.js';
@@ -74,6 +77,10 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   // to decide whether the picker is worth showing at all.
   const [geminiAvailable, setGeminiAvailable] = useState(false);
   const [pipelineConfigured, setPipelineConfigured] = useState(false);
+  // The global starter chips, shown (read-only) while this agent inherits
+  // them and used to seed its own list when it stops inheriting.
+  const [globalStarterPrompts, setGlobalStarterPrompts] =
+    useState<readonly PlannerStarterPrompt[]>(DEFAULT_PLANNER_STARTER_PROMPTS);
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +91,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
         agentTools,
         agentSkills,
         agentMcpRegistries,
+        plannerSettings,
       ] = await Promise.all([
         api.listPlannerWorkspaces(),
         api.listPlannerModels(),
@@ -91,6 +99,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
         api.listPlannerAgentTools(agentId),
         api.listPlannerAgentSkills(agentId),
         api.listPlannerAgentMcpRegistries(agentId),
+        api.getPlannerSettings().catch(() => null),
       ]);
       const found = workspaces.find((w) => w.id === agentId) ?? null;
       setAgent(found);
@@ -101,6 +110,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
       setTools(agentTools.tools);
       setSkills(agentSkills.skills);
       setMcpRegistries(agentMcpRegistries.registries);
+      setGlobalStarterPrompts(plannerSettings?.starterPrompts ?? DEFAULT_PLANNER_STARTER_PROMPTS);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -186,6 +196,11 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
     const trimmed = identityInput.trim();
     if (trimmed === (agent?.identityPrompt ?? '')) return;
     void withBusy(() => api.updatePlannerWorkspace(agentId, { identityPrompt: trimmed || null }));
+  };
+
+  /** This agent's own starter chips, or `null` to use the global list. */
+  const saveStarterPrompts = (starterPrompts: PlannerStarterPrompt[] | null): void => {
+    void withBusy(() => api.updatePlannerWorkspace(agentId, { starterPrompts }));
   };
 
   const setDefaultModel = (modelId: string): void => {
@@ -310,6 +325,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
         memoryEnabled: agent.memoryEnabled,
         mcpEnabled: agent.mcpEnabled,
         disabledTools,
+        starterPrompts: agent.starterPrompts ?? null,
       },
       agent.name,
     );
@@ -328,6 +344,8 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
           identityPrompt: imported.identityPrompt,
           memoryEnabled: imported.memoryEnabled,
           mcpEnabled: imported.mcpEnabled,
+          // Absent in an older export: leave this agent's chips alone.
+          ...(imported.starterPrompts !== undefined ? { starterPrompts: imported.starterPrompts } : {}),
         };
         await api.updatePlannerWorkspace(agentId, patch);
         if (imported.disabledTools && tools) {
@@ -506,6 +524,45 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
             ),
           )}
         </select>
+      </div>
+
+      <div className="planner-section">
+        <h3>Starter chips</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          The chips an empty chat in this agent offers. The chip shows the short label; tapping it
+          sends the prompt.
+        </p>
+        <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={agent.starterPrompts == null}
+            disabled={busy}
+            onChange={(e) =>
+              saveStarterPrompts(e.target.checked ? null : globalStarterPrompts.map((p) => ({ ...p })))
+            }
+          />
+          <span>Use the global list (Settings → Pocket Agent)</span>
+        </label>
+        {agent.starterPrompts == null ? (
+          globalStarterPrompts.length === 0 ? (
+            <p className="planner-row-meta">The global list is empty, so no chips are shown.</p>
+          ) : (
+            <div className="starter-prompts" style={{ justifyContent: 'flex-start', margin: 0 }}>
+              {globalStarterPrompts.map((p, i) => (
+                <span key={i} className="starter-prompt-chip" title={p.prompt} style={{ cursor: 'default' }}>
+                  {p.label}
+                </span>
+              ))}
+            </div>
+          )
+        ) : (
+          <StarterPromptsEditor
+            idPrefix="planner-agent-starter"
+            value={agent.starterPrompts}
+            busy={busy}
+            onSave={saveStarterPrompts}
+          />
+        )}
       </div>
 
       {(geminiAvailable || agent.liveProvider === 'gemini-live') && (

@@ -1735,6 +1735,13 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE webhooks ADD COLUMN auto_route TEXT NOT NULL DEFAULT 'off';
   ${WEBHOOK_ROUTE_CACHE_DDL}
   `,
+
+  // A Pocket Agent's own starter chips (`PlannerStarterPrompt[]` JSON).
+  // NULL = use the global list in `settings(planner_starter_prompts)`, so
+  // upgrading changes no agent.
+  `
+  ALTER TABLE planner_workspaces ADD COLUMN starter_prompts_json TEXT;
+  `,
 ];
 
 /**
@@ -2201,6 +2208,10 @@ export function openDatabase(databasePath: string): Db {
   );
   if (plannerWorkspaceColumns.size > 0 && !plannerWorkspaceColumns.has('live_provider')) {
     db.exec("ALTER TABLE planner_workspaces ADD COLUMN live_provider TEXT NOT NULL DEFAULT 'pipeline'");
+  }
+  // Same hazard for the starter-chips column: every insert writes it.
+  if (plannerWorkspaceColumns.size > 0 && !plannerWorkspaceColumns.has('starter_prompts_json')) {
+    db.exec('ALTER TABLE planner_workspaces ADD COLUMN starter_prompts_json TEXT');
   }
   // PA-106, same positional-migration hazard: probe planner_chats.cron_job_id
   if (plannerChatColumns.size > 0 && !plannerChatColumns.has('cron_job_id')) {
