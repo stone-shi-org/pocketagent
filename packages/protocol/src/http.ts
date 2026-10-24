@@ -449,6 +449,18 @@ export type FixedServerInfo = z.infer<typeof FixedServerInfo>;
  */
 export const RuntimeSettings = z.object({
   skipPermissionsEnabled: z.boolean(),
+  /**
+   * PA-171: let a webhook run that *another* server dispatched to this one
+   * through the Hub start with approvals skipped here. Off by default; when
+   * off, such a run follows this server's own gate (and the global switch
+   * above), never the source webhook's `skipPermissions`. It lives on the
+   * *target* because the source deciding would let one machine switch off
+   * approvals on another. Like `skipPermissionsEnabled`, it is not one of
+   * `SETTINGS_FIELDS` (nothing seeds it from `.env`), it is refused from any
+   * MCP principal and from the planner's `update_settings`, and a session it
+   * applied to says so on every visit. See the eighth override in CLAUDE.md.
+   */
+  webhookDispatchSkipApprovals: z.boolean(),
   logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']),
   /** Comma-separated origins, or `''` for the same-origin-only default. */
   allowedOrigins: z.string(),

@@ -12,6 +12,7 @@ import {
   MCP_SERVER_PATH,
   type AgentInfo,
   type HostCapabilities,
+  type McpDispatchOrigin,
   type McpProtocolEra,
   type McpScope,
   type ProjectInfo,
@@ -53,6 +54,13 @@ export interface McpToolContext {
   principal: McpClientIdentity;
   /** PocketAgent hops already behind this request (`MCP_DEPTH_HEADER`). */
   depth: number;
+  /**
+   * PA-171: where a Hub says this work came from — set only when a
+   * Hub-backed principal carried `MCP_DISPATCH_ORIGIN_META_KEY`. Used for one
+   * decision only: whether this host's "webhook runs dispatched through the
+   * Hub may skip approvals" setting applies.
+   */
+  dispatchOrigin?: McpDispatchOrigin | null;
   /** Which MCP protocol era this call arrived on. */
   era: McpProtocolEra;
   /** The revision a modern request declared; `null` on a legacy session. */
@@ -716,7 +724,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     },
     readOnly: false,
     async handler(deps, ctx, args) {
-      const started = await deps.work.startSession(ctx.principal, ctx.depth, startInput(args));
+      const started = await deps.work.startSession(ctx.principal, ctx.depth, startInput(args), { dispatchOrigin: ctx.dispatchOrigin ?? null });
       return started;
     },
   },
@@ -730,7 +738,9 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     input: { sessionId, prompt: z.string().min(1).max(100_000), attachments: attachmentsInput },
     readOnly: false,
     async handler(deps, ctx, args) {
-      return deps.work.sendPrompt(ctx.principal, ctx.depth, String(args.sessionId), String(args.prompt), attachmentIds(args));
+      return deps.work.sendPrompt(ctx.principal, ctx.depth, String(args.sessionId), String(args.prompt), attachmentIds(args), {
+        dispatchOrigin: ctx.dispatchOrigin ?? null,
+      });
     },
   },
   {
@@ -769,7 +779,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     },
     readOnly: false,
     async handler(deps, ctx, args) {
-      const started = await deps.work.startSession(ctx.principal, ctx.depth, startInput(args));
+      const started = await deps.work.startSession(ctx.principal, ctx.depth, startInput(args), { dispatchOrigin: ctx.dispatchOrigin ?? null });
       const result = await waitWithProgress(ctx, (o) =>
         deps.work.waitForTurn(started.sessionId, (args.timeoutSeconds as number | undefined) ?? MAX_WAIT_SECONDS, o),
       );
@@ -814,11 +824,16 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     },
     readOnly: false,
     async handler(deps, ctx, args) {
-      const id = deps.work.createPocketChat(ctx.principal, ctx.depth, {
-        workspaceId: String(args.workspaceId),
-        ...(typeof args.title === 'string' ? { title: args.title } : {}),
-        ...(typeof args.modelId === 'string' ? { modelId: args.modelId } : {}),
-      });
+      const id = deps.work.createPocketChat(
+        ctx.principal,
+        ctx.depth,
+        {
+          workspaceId: String(args.workspaceId),
+          ...(typeof args.title === 'string' ? { title: args.title } : {}),
+          ...(typeof args.modelId === 'string' ? { modelId: args.modelId } : {}),
+        },
+        { dispatchOrigin: ctx.dispatchOrigin ?? null },
+      );
       return { chatId: id };
     },
   },
@@ -851,10 +866,15 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     },
     readOnly: false,
     async handler(deps, ctx, args) {
-      const id = deps.work.createPocketChat(ctx.principal, ctx.depth, {
-        workspaceId: String(args.workspaceId),
-        ...(typeof args.title === 'string' ? { title: args.title } : {}),
-      });
+      const id = deps.work.createPocketChat(
+        ctx.principal,
+        ctx.depth,
+        {
+          workspaceId: String(args.workspaceId),
+          ...(typeof args.title === 'string' ? { title: args.title } : {}),
+        },
+        { dispatchOrigin: ctx.dispatchOrigin ?? null },
+      );
       await deps.work.sendPocketMessage(ctx.principal, id, String(args.message), attachmentIds(args));
       return waitWithProgress(ctx, (o) =>
         deps.work.waitForPocketTurn(id, (args.timeoutSeconds as number | undefined) ?? MAX_WAIT_SECONDS, o),

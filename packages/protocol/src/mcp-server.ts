@@ -92,6 +92,12 @@ export const McpClientTokenSummary = z.object({
   lastSeenIp: z.string().nullable(),
   /** Coding-agent sessions this client started that are still running. */
   liveSessions: z.number().int().nonnegative(),
+  /**
+   * PA-171: whether a Hub minted this token (with its hub credential). Only
+   * such a token may carry a Hub-stated dispatch origin, so a Hub reads this to
+   * find a dispatch token minted before that rule existed and replace it.
+   */
+  mintedByHub: z.boolean().optional(),
 });
 export type McpClientTokenSummary = z.infer<typeof McpClientTokenSummary>;
 
@@ -148,6 +154,30 @@ export const MCP_DEPTH_META_KEY = 'pocketagent/depth';
  * exactly as before.
  */
 export const MCP_APPROVAL_SCOPE_ARG_META_KEY = 'pocketagent/approvalScopeArg';
+
+/**
+ * PA-171: where a dispatched piece of work came from, as the *Hub* states it in
+ * a backend `tools/call`'s `_meta`. Set only by the Hub, and only for a call
+ * that arrived on a `webhook`-kind Hub MCP token (a source backend's webhook
+ * routing) — no model or MCP client writes it, because the Hub builds every
+ * backend call itself and forwards nothing but the depth from its caller.
+ *
+ * A backend honours it only from a principal a Hub minted (a `pam_` token
+ * minted with a hub credential, or a hub credential itself), and uses it for
+ * exactly one decision: whether its own "webhook runs dispatched through the
+ * Hub may skip approvals" setting applies. It is not a tool *input*, so the
+ * standing rule that no MCP tool input carries `skipPermissions` still holds:
+ * the caller can only say where the work came from, and the target decides.
+ */
+export const MCP_DISPATCH_ORIGIN_META_KEY = 'pocketagent/dispatchOrigin';
+
+export const McpDispatchOrigin = z.object({
+  kind: z.literal('webhook'),
+  /** The Hub host id of the backend whose webhook received the delivery. */
+  sourceHostId: z.string().min(1).max(40),
+  sourceLabel: z.string().min(1).max(200),
+});
+export type McpDispatchOrigin = z.infer<typeof McpDispatchOrigin>;
 
 /** Work-starting tools are refused at or beyond this depth. */
 export const MAX_MCP_CALL_DEPTH = 3;

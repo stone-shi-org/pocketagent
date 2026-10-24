@@ -49,6 +49,7 @@ import {
   writeSettingsField,
   buildRuntimeSettingsSnapshot,
 } from '../settings/index.js';
+import { readWebhookDispatchSkipApprovals } from '../webhooks/routing-store.js';
 import type { WebhookService } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
 import { resolveWebhookUpdatePatch } from '../routes/webhooks.js';
@@ -4401,7 +4402,11 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     readOnly: true,
     async execute(deps) {
-      const snapshot = buildRuntimeSettingsSnapshot(deps.config, deps.sessions.getGlobalSkipPermissions());
+      const snapshot = buildRuntimeSettingsSnapshot(
+        deps.config,
+        deps.sessions.getGlobalSkipPermissions(),
+        readWebhookDispatchSkipApprovals(deps.db),
+      );
       const result: Record<string, unknown> = {
         general: snapshot.settings,
         restartRequiredKeys: snapshot.restartRequiredKeys,
@@ -4454,6 +4459,13 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if ('skipPermissionsEnabled' in rawPatch) {
         return (
           'Refusing: skipPermissionsEnabled cannot be changed through this tool. ' +
+          'A human must flip that switch from the Settings page.'
+        );
+      }
+      // PA-171: the same rule for the other approval switch in this resource.
+      if ('webhookDispatchSkipApprovals' in rawPatch) {
+        return (
+          'Refusing: webhookDispatchSkipApprovals cannot be changed through this tool. ' +
           'A human must flip that switch from the Settings page.'
         );
       }
@@ -4521,7 +4533,14 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       try {
         const existing = webhooks.get(id);
         const result = await resolveWebhookUpdatePatch(
-          { workspaces: deps.workspaces, agents: deps.agents, plannerWorkspaces: deps.plannerWorkspaces, db: deps.db },
+          {
+            workspaces: deps.workspaces,
+            agents: deps.agents,
+            plannerWorkspaces: deps.plannerWorkspaces,
+            db: deps.db,
+            // PA-171: so a patch naming a remote host is judged by the same rule the route uses.
+            ...(webhooks.routing ? { webhookRouting: webhooks.routing } : {}),
+          },
           existing,
           parsed.data,
         );

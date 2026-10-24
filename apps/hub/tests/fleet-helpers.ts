@@ -80,7 +80,14 @@ export async function configureLlm(backend: TestApp): Promise<void> {
   }
 }
 
-export async function startFleet(ids: string[], opts: { llm?: boolean } = {}): Promise<Fleet> {
+export async function startFleet(
+  ids: string[],
+  opts: {
+    llm?: boolean;
+    /** PA-171: fast timings for a backend's remote webhook wait loop. */
+    remoteRunTimings?: { pollMs?: number; approvalPollMs?: number; maxBackoffMs?: number; maxRejections?: number };
+  } = {},
+): Promise<Fleet> {
   const hub = await createTestHub();
   const backends: FleetBackend[] = [];
   for (const id of ids) {
@@ -103,6 +110,10 @@ export async function startFleet(ids: string[], opts: { llm?: boolean } = {}): P
       undefined,
       undefined,
       loggerStream,
+      undefined,
+      undefined,
+      undefined,
+      opts.remoteRunTimings ? { remoteRunTimings: opts.remoteRunTimings } : {},
     );
     await app.app.listen({ host: '127.0.0.1', port: 0 });
     const url = `http://127.0.0.1:${(app.app.server.address() as AddressInfo).port}`;

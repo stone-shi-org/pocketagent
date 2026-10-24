@@ -25,6 +25,7 @@ import {
 } from './lazy-pages.js';
 import { api } from './api/client.js';
 import { useHostDirectory } from './hosts/directory.js';
+import { buildRemoteHostLinks, type RemoteHostLinks } from './hosts/webhook-remote.js';
 import { HostProvider } from './hosts/HostContext.js';
 import { currentHostId, resolveSelection } from './hosts/selected-host.js';
 import { endpointFor, hostSegmentFor, type HostNav } from './hosts/HostNav.js';
@@ -103,6 +104,15 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
   const selection = useMemo(
     () => resolveSelection(hashHostId, route, hosts),
     [hashHostId, route, hosts],
+  );
+
+  // PA-171: webhook deliveries that ran on another host open there.
+  const remoteHosts = useMemo(
+    () =>
+      buildRemoteHostLinks(directory.source, hosts, (routingId, target) =>
+        navigate(target, { hostId: hostSegmentFor(hosts, routingId, target) }),
+      ),
+    [directory.source, hosts, navigate],
   );
 
   const nav = useMemo<HostNav>(
@@ -266,6 +276,7 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
       <PhoneRoute
         route={route}
         navigate={navigate}
+        remoteHosts={remoteHosts}
         onApiError={handleApiError}
         hubVersion={directory.hubVersion}
       />
@@ -284,11 +295,13 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
 function PhoneRoute({
   route,
   navigate,
+  remoteHosts,
   onApiError,
   hubVersion,
 }: {
   route: Route;
   navigate: (route: Route, opts?: { hostId?: string | null }) => void;
+  remoteHosts: RemoteHostLinks;
   onApiError: (error: unknown) => void;
   /** `HostDirectory.hubVersion`, for Settings' version footer (PA-107). */
   hubVersion: string | null;
@@ -395,6 +408,7 @@ function PhoneRoute({
     return (
       <Suspense fallback={<PageFallback />}>
         <WebhooksPage
+          remoteHosts={remoteHosts}
           onBack={() => navigate({ name: 'list' })}
           onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
@@ -410,6 +424,7 @@ function PhoneRoute({
     return (
       <Suspense fallback={<PageFallback />}>
         <WebhookEditorPage
+          remoteHosts={remoteHosts}
           key={route.webhookId}
           webhookId={route.webhookId}
           onBack={() => navigate({ name: 'webhooks' })}

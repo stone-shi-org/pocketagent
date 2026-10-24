@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { buildApp } from '../src/app.js';
+import { buildApp, type BuildAppOptions } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config/index.js';
 import { openDatabase, type Db } from '../src/db/index.js';
 import type { AgyTranscriptStore } from '../src/conversations/agy.js';
@@ -108,7 +108,11 @@ export async function createTestApp(
   /** PA-164: injected so a test can point codex title reads at a fixture directory instead of a real `~/.codex`. */
   codexTranscripts?: CodexTranscriptStore,
   /** PA-165: anything else a test needs to flip on `BuildAppOptions`. */
-  extra: { plannerAiTitles?: boolean } = {},
+  extra: {
+    plannerAiTitles?: boolean;
+    /** PA-171: fast timings for the remote webhook wait loop. */
+    remoteRunTimings?: BuildAppOptions['remoteRunTimings'];
+  } = {},
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -139,6 +143,7 @@ export async function createTestApp(
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     // PA-165: off by default, see `BuildAppOptions.plannerAiTitles`.
     plannerAiTitles: extra.plannerAiTitles ?? false,
+    ...(extra.remoteRunTimings ? { remoteRunTimings: extra.remoteRunTimings } : {}),
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),
     agentInstallFetchScript,

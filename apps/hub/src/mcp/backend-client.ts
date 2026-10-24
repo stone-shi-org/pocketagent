@@ -39,6 +39,8 @@ export const BACKEND_TOOL_ALLOWLIST = new Set([
   'get_attention_snapshot',
   'get_usage',
   'start_session',
+  // PA-171: a per-issue follow-up into a session an earlier dispatch started.
+  'send_prompt',
   'wait_for_turn',
   'create_pocket_chat',
   'send_pocket_message',
@@ -96,7 +98,16 @@ export class BackendMcpClient {
     target: BackendTarget,
     tool: string,
     args: Record<string, unknown>,
-    opts: { depth: number; signal?: AbortSignal; timeoutMs?: number },
+    opts: {
+      depth: number;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      /**
+       * PA-171: extra `_meta` the *Hub* states — only ever the dispatch origin
+       * for a webhook-routing call. Never anything a caller passed in.
+       */
+      meta?: Record<string, unknown>;
+    },
   ): Promise<Record<string, unknown>> {
     if (!BACKEND_TOOL_ALLOWLIST.has(tool)) {
       throw new BackendMcpError(`The Hub does not call "${tool}" on a host.`, 'not_allowed');
@@ -106,7 +117,7 @@ export class BackendMcpClient {
       let result;
       try {
         result = await client.callTool(
-          { name: tool, arguments: args, _meta: { [MCP_DEPTH_META_KEY]: opts.depth } },
+          { name: tool, arguments: args, _meta: { ...(opts.meta ?? {}), [MCP_DEPTH_META_KEY]: opts.depth } },
           { timeout: opts.timeoutMs ?? CALL_TIMEOUT_MS, ...(opts.signal ? { signal: opts.signal } : {}) },
         );
       } catch (err) {

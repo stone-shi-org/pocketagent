@@ -2,7 +2,9 @@ import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
   CreateHubMcpClientTokenRequest,
   EnableHubMcpAttachRequest,
+  SetHubWebhookRoutingRequest,
   type HubMcpAttachState,
+  type HubWebhookRoutingState,
   MCP_SERVER_PATH,
   UpdateHubMcpClientTokenRequest,
   type CreateHubMcpClientTokenResponse,
@@ -10,6 +12,7 @@ import {
   type HubMcpClientTokenListResponse,
 } from '@pocketagent/protocol';
 import { toClientTokenSummary } from '../mcp/tokens.js';
+import { WebhookRoutingServiceError } from '../mcp/webhook-routing.js';
 
 /**
  * PA-169: Hub MCP client tokens — `phm_` tokens an operator mints for a coding
@@ -30,7 +33,27 @@ import { toClientTokenSummary } from '../mcp/tokens.js';
  * Fleet agent whose registry silently 401s.
  */
 export const hubMcpTokenRoutes: FastifyPluginAsync = async (app) => {
-  const { mcpTokens, mcpServer, registry, mcpAttach } = app.hub;
+  const { mcpTokens, mcpServer, registry, mcpAttach, webhookRouting } = app.hub;
+
+  // ---- PA-171: let a backend's webhooks dispatch runs to other hosts --------
+  app.get('/api/hub/webhook-routing', async (): Promise<HubWebhookRoutingState> => webhookRouting.state());
+
+  app.put<{ Params: { hostId: string } }>('/api/hub/webhook-routing/:hostId', async (request, reply) => {
+    const parsed = SetHubWebhookRoutingRequest.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, parsed.error.issues[0]?.message);
+    try {
+      return await webhookRouting.set(request.params.hostId, parsed.data.hubUrl, parsed.data.allowedHosts);
+    } catch (err) {
+      if (err instanceof WebhookRoutingServiceError) {
+        return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message } });
+      }
+      throw err;
+    }
+  });
+
+  app.delete<{ Params: { hostId: string } }>('/api/hub/webhook-routing/:hostId', async (request) =>
+    webhookRouting.disable(request.params.hostId),
+  );
 
   // ---- Phase 3: offer /mcp to the sessions a human starts on each backend --
   app.get('/api/hub/mcp/attach', async (): Promise<HubMcpAttachState> => mcpAttach.state());
@@ -71,7 +94,7 @@ export const hubMcpTokenRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) return badRequest(reply, parsed.error.issues[0]?.message);
     const existing = mcpTokens.get(request.params.id);
     if (!existing) return notFound(reply);
-    if (existing.kind !== 'client') return coordinatorRefusal(reply);
+    if (existing.kind !== 'client') return kindRefusal(reply, existing.kind);
     if (parsed.data.hosts !== undefined) {
       const unknown = unknownHosts(parsed.data.hosts);
       if (unknown.length > 0) return badRequest(reply, `No host ${unknown.map((h) => `"${h}"`).join(', ')} on this Hub.`);
@@ -100,7 +123,7 @@ export const hubMcpTokenRoutes: FastifyPluginAsync = async (app) => {
   app.delete<{ Params: { id: string } }>('/api/hub/mcp/tokens/:id', async (request, reply) => {
     const existing = mcpTokens.get(request.params.id);
     if (!existing) return notFound(reply);
-    if (existing.kind !== 'client') return coordinatorRefusal(reply);
+    if (existing.kind !== 'client') return kindRefusal(reply, existing.kind);
     mcpTokens.revoke(existing.id);
     // The row is gone, so the gate refuses its next request; this also closes
     // any MCP session or listen stream it already holds.
@@ -126,7 +149,15 @@ function notFound(reply: FastifyReply) {
   return reply.code(404).send({ error: { code: 'not_found', message: 'No such Hub MCP token.' } });
 }
 
-function coordinatorRefusal(reply: FastifyReply) {
+function kindRefusal(reply: FastifyReply, kind: string) {
+  if (kind === 'webhook') {
+    return reply.code(409).send({
+      error: {
+        code: 'webhook_routing_token',
+        message: 'This is a backend’s webhook-routing token. Change or switch off webhook routing for that host instead.',
+      },
+    });
+  }
   return reply.code(409).send({
     error: {
       code: 'coordinator_token',

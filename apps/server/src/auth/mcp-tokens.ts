@@ -13,6 +13,13 @@ export interface McpClientIdentity {
   id: string;
   label: string;
   scopes: readonly McpScope[];
+  /**
+   * PA-171: the hub credential behind this principal — the one that minted a
+   * `pam_` token, or the hub credential itself when it reaches `/mcp`. Null
+   * for a token a browser session minted. Only a Hub-backed principal may
+   * carry a Hub-stated dispatch origin (`MCP_DISPATCH_ORIGIN_META_KEY`).
+   */
+  mintedByHubId?: string | null;
 }
 
 export interface MintedMcpClientToken {
@@ -45,17 +52,31 @@ export interface MintedMcpClientToken {
 export class McpTokenStore {
   constructor(private readonly db: Db) {}
 
-  mint(label: string, scopes: readonly McpScope[], now = Date.now()): MintedMcpClientToken {
+  mint(
+    label: string,
+    scopes: readonly McpScope[],
+    now = Date.now(),
+    /** PA-171: the hub credential minting it, when the request came from a Hub. */
+    mintedByHubId: string | null = null,
+  ): MintedMcpClientToken {
     const id = crypto.randomUUID();
     const token = `${MCP_TOKEN_SCHEME_PREFIX}${generateToken(32)}`;
     const unique = normaliseScopes(scopes);
     this.db
       .prepare(
         `INSERT INTO mcp_client_tokens
-           (id, label, token_sha256, token_prefix, scopes_json, created_at, last_seen_at, last_seen_ip)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
+           (id, label, token_sha256, token_prefix, scopes_json, created_at, last_seen_at, last_seen_ip, minted_by_hub_id)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       )
-      .run(id, label, digest(token), token.slice(0, MCP_TOKEN_PREFIX_LENGTH), JSON.stringify(unique), now);
+      .run(
+        id,
+        label,
+        digest(token),
+        token.slice(0, MCP_TOKEN_PREFIX_LENGTH),
+        JSON.stringify(unique),
+        now,
+        mintedByHubId,
+      );
     return { id, label, scopes: unique, token, createdAt: now };
   }
 
@@ -111,7 +132,12 @@ export class McpTokenStore {
 }
 
 function identityOf(row: McpClientTokenRow): McpClientIdentity {
-  return { id: row.id, label: row.label, scopes: parseScopes(row.scopes_json) };
+  return {
+    id: row.id,
+    label: row.label,
+    scopes: parseScopes(row.scopes_json),
+    mintedByHubId: row.minted_by_hub_id ?? null,
+  };
 }
 
 function summaryOf(row: McpClientTokenRow, liveSessions: number): McpClientTokenSummary {
@@ -124,6 +150,7 @@ function summaryOf(row: McpClientTokenRow, liveSessions: number): McpClientToken
     lastSeenAt: row.last_seen_at,
     lastSeenIp: row.last_seen_ip,
     liveSessions,
+    mintedByHub: (row.minted_by_hub_id ?? null) !== null,
   };
 }
 

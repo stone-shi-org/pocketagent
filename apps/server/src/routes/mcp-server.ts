@@ -56,7 +56,10 @@ export const mcpServerRoutes: FastifyPluginAsync = async (app) => {
         error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
       });
     }
-    const minted = mcpTokens.mint(parsed.data.label, parsed.data.scopes);
+    // PA-171: a token a Hub mints records which hub credential did it, which
+    // is the only thing that lets a dispatch origin the Hub states in `_meta`
+    // count for anything on this host.
+    const minted = mcpTokens.mint(parsed.data.label, parsed.data.scopes, Date.now(), request.hubPrincipal?.id ?? null);
     // `warn` when `admin` is granted, whoever asked: that scope can add a
     // project folder, which grants every agent on this machine access to it.
     auditConfigChange(request, 'mcp client token minted', {

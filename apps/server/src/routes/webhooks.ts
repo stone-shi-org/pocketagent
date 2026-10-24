@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
   AcceptWebhookRouteRequest,
@@ -25,7 +26,8 @@ import { WebhookServiceError } from '../webhooks/index.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import { unattendedPlannerModelProblem } from '../planner/store.js';
-import { auditConfigChange, resolveWorkspaceCwdOrReply, webhookAgentProblem } from './shared.js';
+import type { WebhookRoutingStore } from '../webhooks/routing-store.js';
+import { auditConfigChange, webhookAgentProblem } from './shared.js';
 import { webhookDeliveryRoutes } from './webhook-delivery.js';
 
 /** Default page size for a delivery list. */
@@ -41,6 +43,138 @@ export interface WebhookUpdateDeps {
   agents: AgentRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
   db?: Db;
+  /** PA-171: which hosts a row may name. Absent = every row must be local. */
+  webhookRouting?: WebhookRoutingStore;
+}
+
+type TargetResult =
+  | { ok: true; cwd: string; hostId: string | null }
+  | {
+      ok: false;
+      error: string;
+      code?: string;
+      /** A local containment refusal's own code, so create can answer 403/404 as it always has. */
+      workspaceCode?: string;
+    };
+
+/**
+ * PA-171: validate one run target — a directory, and the host it is on.
+ *
+ * A local target is containment-checked exactly as before. A remote one cannot
+ * be: this server cannot see that machine's folders. It is checked for shape
+ * (an absolute path) and for permission (the Hub listed that host for this
+ * server's webhooks), and the target's own `start_session` re-resolves it
+ * against *its* workspace folders when the run starts, refusing anything
+ * outside them. A host naming this server itself is local.
+ */
+async function resolveTarget(
+  deps: WebhookUpdateDeps,
+  cwd: string,
+  rawHostId: string | null | undefined,
+): Promise<TargetResult> {
+  const selfHostId = deps.webhookRouting?.selfHostId() ?? null;
+  const hostId = rawHostId === undefined || rawHostId === null || rawHostId === selfHostId ? null : rawHostId;
+  if (hostId === null) {
+    try {
+      return { ok: true, cwd: await deps.workspaces.resolveWorkspacePath(cwd), hostId: null };
+    } catch (err) {
+      if (err instanceof WorkspaceError) return { ok: false, error: err.message, workspaceCode: err.code };
+      throw err;
+    }
+  }
+  if (deps.webhookRouting === undefined || !deps.webhookRouting.allows(hostId)) {
+    return {
+      ok: false,
+      code: 'remote_host_not_allowed',
+      error:
+        `This server’s webhooks may not dispatch to "${hostId}". ` +
+        'Turn webhook routing on for this server on the Hub page and allow that host.',
+    };
+  }
+  if (!path.posix.isAbsolute(cwd) || cwd.includes('\0')) {
+    return { ok: false, error: `A directory on ${hostId} must be an absolute path on that host.` };
+  }
+  return { ok: true, cwd, hostId };
+}
+
+/** A create-time target refusal, with the status a containment refusal always had. */
+function targetRefusal(
+  reply: FastifyReply,
+  problem: { error: string; code?: string; workspaceCode?: string },
+): FastifyReply {
+  if (problem.workspaceCode !== undefined) {
+    const status = problem.workspaceCode === 'forbidden' ? 403 : problem.workspaceCode === 'not_found' ? 404 : 400;
+    return reply.code(status).send({ error: { code: problem.workspaceCode, message: problem.error } });
+  }
+  return badRequest(reply, problem.error, problem.code);
+}
+
+/** Every row of a project/plan map through `resolveTarget`, keys normalised. */
+async function resolveRouteMap<K extends 'projectKey' | 'planKey'>(
+  deps: WebhookUpdateDeps,
+  key: K,
+  entries: ({ cwd: string; hostId?: string | undefined } & Record<K, string>)[],
+): Promise<
+  | { ok: true; map: ({ cwd: string; hostId?: string } & Record<K, string>)[] }
+  | { ok: false; error: string; code?: string; workspaceCode?: string }
+> {
+  const map: ({ cwd: string; hostId?: string } & Record<K, string>)[] = [];
+  for (const entry of entries) {
+    const target = await resolveTarget(deps, entry.cwd, entry.hostId);
+    if (!target.ok) return target;
+    map.push({
+      [key]: entry[key].trim().toUpperCase(),
+      cwd: target.cwd,
+      ...(target.hostId !== null ? { hostId: target.hostId } : {}),
+    } as { cwd: string; hostId?: string } & Record<K, string>);
+  }
+  return { ok: true, map };
+}
+
+/**
+ * PA-171: the cross-field rules a remote target adds, given the webhook's
+ * effective configuration after this request.
+ *
+ * - The agent is checked here only when something runs *here*. A webhook whose
+ *   every target is remote names an agent (or a `pocket:` agent) on those
+ *   hosts, which their own `start_session` / `create_pocket_chat` validate.
+ * - `current-branch` cannot cross: the Hub's dispatch takes `none` or
+ *   `new-branch` only, because the target mints every branch itself.
+ */
+function remoteTargetProblem(
+  deps: WebhookUpdateDeps,
+  effective: {
+    agent: string;
+    model: string | null;
+    worktreeMode: string;
+    hostId: string | null;
+    map: { hostId?: string | undefined }[];
+  },
+): { error: string; code?: string } | null {
+  const anyRemote = effective.hostId !== null || effective.map.some((e) => e.hostId !== undefined);
+  const anyLocal = effective.hostId === null || effective.map.some((e) => e.hostId === undefined);
+  if (anyRemote && effective.worktreeMode === 'current-branch') {
+    return {
+      error:
+        'A webhook with a target on another host can use worktree mode "none" or "new-branch" only — ' +
+        'the other host mints its branches itself.',
+      code: 'remote_worktree_mode',
+    };
+  }
+  if (!anyLocal) return null;
+  const agentProblem = webhookAgentProblem(deps.agents, deps.plannerWorkspaces, effective.agent);
+  if (agentProblem !== null) return { error: agentProblem };
+  const plannerWsId = parsePocketAgentId(effective.agent);
+  if (plannerWsId !== null && deps.db) {
+    const plannerWs = deps.plannerWorkspaces.get(plannerWsId);
+    const modelProblem = unattendedPlannerModelProblem(deps.db, {
+      workspaceDefaultModelId: plannerWs?.defaultModelId ?? null,
+      modelId: effective.model,
+      noun: 'triggered by a webhook',
+    });
+    if (modelProblem !== null) return { error: modelProblem };
+  }
+  return null;
 }
 
 export type WebhookUpdatePatchResult =
@@ -74,32 +208,20 @@ export async function resolveWebhookUpdatePatch(
     if (slugProblem !== null) return { ok: false, error: slugProblem };
   }
 
+  // PA-171: the top-level target is re-validated whenever its directory *or*
+  // its host changes, since a path valid on one machine says nothing about
+  // another.
   let cwd: string | undefined;
-  if (body.cwd !== undefined) {
-    try {
-      cwd = await deps.workspaces.resolveWorkspacePath(body.cwd);
-    } catch (err) {
-      if (err instanceof WorkspaceError) return { ok: false, error: err.message };
-      throw err;
-    }
-  }
-
-  if (body.agent !== undefined) {
-    const agentProblem = webhookAgentProblem(deps.agents, deps.plannerWorkspaces, body.agent);
-    if (agentProblem !== null) return { ok: false, error: agentProblem };
-  }
-
-  const targetAgent = body.agent ?? existing.agent;
-  const targetPlannerWsId = parsePocketAgentId(targetAgent);
-  if (targetPlannerWsId !== null && deps.db) {
-    const effectiveModel = body.model !== undefined ? body.model : existing.model;
-    const plannerWs = deps.plannerWorkspaces.get(targetPlannerWsId);
-    const modelProblem = unattendedPlannerModelProblem(deps.db, {
-      workspaceDefaultModelId: plannerWs?.defaultModelId ?? null,
-      modelId: effectiveModel ?? null,
-      noun: 'triggered by a webhook',
-    });
-    if (modelProblem !== null) return { ok: false, error: modelProblem };
+  let hostId: string | null | undefined;
+  if (body.cwd !== undefined || body.hostId !== undefined) {
+    const target = await resolveTarget(
+      deps,
+      body.cwd ?? existing.cwd,
+      body.hostId !== undefined ? body.hostId : (existing.host_id ?? null),
+    );
+    if (!target.ok) return { ok: false, error: target.error, ...(target.code ? { code: target.code } : {}) };
+    cwd = target.cwd;
+    hostId = target.hostId;
   }
 
   const effectiveAuthMode = body.authMode ?? existing.auth_mode;
@@ -118,38 +240,37 @@ export async function resolveWebhookUpdatePatch(
     if (body.config.type === 'bamboo') {
       const dupProblem = checkPlanMapDuplicates(body.config.planMap);
       if (dupProblem !== null) return { ok: false, error: dupProblem };
-      const resolved: BambooPlanMapEntry[] = [];
-      for (const entry of body.config.planMap) {
-        try {
-          const resolvedCwd = await deps.workspaces.resolveWorkspacePath(entry.cwd);
-          resolved.push({ planKey: entry.planKey.trim().toUpperCase(), cwd: resolvedCwd });
-        } catch (err) {
-          if (err instanceof WorkspaceError) return { ok: false, error: err.message };
-          throw err;
-        }
-      }
-      routeMap = resolved;
+      const resolved = await resolveRouteMap(deps, 'planKey', body.config.planMap);
+      if (!resolved.ok) return { ok: false, error: resolved.error, ...(resolved.code ? { code: resolved.code } : {}) };
+      routeMap = resolved.map;
       const templateDup = checkBambooPromptTemplateMapDuplicates(body.config.promptTemplateMap);
       if (templateDup !== null) return { ok: false, error: templateDup };
       promptTemplateMap = body.config.promptTemplateMap;
     } else {
       const dupProblem = checkProjectMapDuplicates(body.config.projectMap);
       if (dupProblem !== null) return { ok: false, error: dupProblem };
-      const resolved: JiraProjectMapEntry[] = [];
-      for (const entry of body.config.projectMap) {
-        try {
-          const resolvedCwd = await deps.workspaces.resolveWorkspacePath(entry.cwd);
-          resolved.push({ projectKey: entry.projectKey.trim().toUpperCase(), cwd: resolvedCwd });
-        } catch (err) {
-          if (err instanceof WorkspaceError) return { ok: false, error: err.message };
-          throw err;
-        }
-      }
-      routeMap = resolved;
+      const resolved = await resolveRouteMap(deps, 'projectKey', body.config.projectMap);
+      if (!resolved.ok) return { ok: false, error: resolved.error, ...(resolved.code ? { code: resolved.code } : {}) };
+      routeMap = resolved.map;
       const templateDup = checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
       if (templateDup !== null) return { ok: false, error: templateDup };
       promptTemplateMap = body.config.promptTemplateMap;
     }
+  }
+
+  // The rules that depend on the whole effective configuration, checked once
+  // every changed piece of it has been resolved.
+  const effectiveMap: { hostId?: string | undefined }[] =
+    routeMap ?? (JSON.parse(existing.project_map_json || '[]') as { hostId?: string }[]);
+  const targetProblem = remoteTargetProblem(deps, {
+    agent: body.agent ?? existing.agent,
+    model: (body.model !== undefined ? body.model : existing.model) ?? null,
+    worktreeMode: body.worktreeMode ?? existing.worktree_mode,
+    hostId: hostId !== undefined ? hostId : (existing.host_id ?? null),
+    map: effectiveMap,
+  });
+  if (targetProblem !== null) {
+    return { ok: false, error: targetProblem.error, ...(targetProblem.code ? { code: targetProblem.code } : {}) };
   }
 
   const patch = {
@@ -159,6 +280,7 @@ export async function resolveWebhookUpdatePatch(
     ...(body.config !== undefined ? { filter: body.config.filter, routeMap, promptTemplateMap } : {}),
     ...(body.authMode !== undefined ? { authMode: body.authMode } : {}),
     ...(cwd !== undefined ? { cwd } : {}),
+    ...(hostId !== undefined ? { hostId } : {}),
     ...(body.agent !== undefined ? { agent: body.agent } : {}),
     ...(body.worktreeMode !== undefined ? { worktreeMode: body.worktreeMode } : {}),
     ...(body.model !== undefined ? { model: body.model } : {}),
@@ -185,7 +307,8 @@ export async function resolveWebhookUpdatePatch(
 }
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
-  const { webhooks, workspaces, agents, plannerWorkspaces, db } = app.pocket;
+  const { webhooks, workspaces, agents, plannerWorkspaces, db, webhookRouting } = app.pocket;
+  const deps: WebhookUpdateDeps = { workspaces, agents, plannerWorkspaces, db, webhookRouting };
 
   const mapError = (reply: FastifyReply, err: unknown): FastifyReply | never => {
     if (err instanceof WebhookServiceError) {
@@ -243,22 +366,9 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const slugProblem = checkSlug(slug);
     if (slugProblem !== null) return badRequest(reply, slugProblem);
 
-    const cwd = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
-    if (cwd === null) return reply;
-
-    const agentProblem = webhookAgentProblem(agents, plannerWorkspaces, body.agent);
-    if (agentProblem !== null) return badRequest(reply, agentProblem);
-
-    const plannerWsId = parsePocketAgentId(body.agent);
-    if (plannerWsId !== null) {
-      const plannerWs = plannerWorkspaces.get(plannerWsId);
-      const modelProblem = unattendedPlannerModelProblem(db, {
-        workspaceDefaultModelId: plannerWs?.defaultModelId ?? null,
-        modelId: body.model ?? null,
-        noun: 'triggered by a webhook',
-      });
-      if (modelProblem !== null) return badRequest(reply, modelProblem);
-    }
+    const target = await resolveTarget(deps, body.cwd, body.hostId);
+    if (!target.ok) return targetRefusal(reply, target);
+    const cwd = target.cwd;
 
     // Bamboo cannot compute a request signature — it only supports a static
     // custom header — so `hmac` would 401 every real delivery forever with no
@@ -272,11 +382,26 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
       );
     }
 
-    const routeMap =
+    const dupProblem =
       body.config.type === 'bamboo'
-        ? await resolvePlanMap(workspaces, body.config.planMap, reply)
-        : await resolveProjectMap(workspaces, body.config.projectMap, reply);
-    if (routeMap === null) return reply;
+        ? checkPlanMapDuplicates(body.config.planMap)
+        : checkProjectMapDuplicates(body.config.projectMap);
+    if (dupProblem !== null) return badRequest(reply, dupProblem);
+    const resolvedMap =
+      body.config.type === 'bamboo'
+        ? await resolveRouteMap(deps, 'planKey', body.config.planMap)
+        : await resolveRouteMap(deps, 'projectKey', body.config.projectMap);
+    if (!resolvedMap.ok) return targetRefusal(reply, resolvedMap);
+    const routeMap = resolvedMap.map as JiraProjectMapEntry[] | BambooPlanMapEntry[];
+
+    const targetProblem = remoteTargetProblem(deps, {
+      agent: body.agent,
+      model: body.model ?? null,
+      worktreeMode: body.worktreeMode,
+      hostId: target.hostId,
+      map: routeMap,
+    });
+    if (targetProblem !== null) return badRequest(reply, targetProblem.error, targetProblem.code);
 
     const templateMapDup =
       body.config.type === 'bamboo'
@@ -285,7 +410,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     if (templateMapDup !== null) return badRequest(reply, templateMapDup);
 
     try {
-      const created = webhooks.create(specFrom(body, routeMap, body.config.promptTemplateMap, slug, cwd));
+      const created = webhooks.create(specFrom(body, routeMap, body.config.promptTemplateMap, slug, cwd, target.hostId));
       return reply.code(201).send({
         webhook: webhooks.toWebhook(created.row),
         secret: created.secret,
@@ -303,7 +428,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     }
     try {
       const existing = webhooks.get(request.params.id);
-      const result = await resolveWebhookUpdatePatch({ workspaces, agents, plannerWorkspaces, db }, existing, parsed.data);
+      const result = await resolveWebhookUpdatePatch(deps, existing, parsed.data);
       if (!result.ok) return badRequest(reply, result.error, result.code);
       const updated = webhooks.update(request.params.id, result.patch);
       auditConfigChange(request, 'webhook updated', {
@@ -704,52 +829,6 @@ function checkBambooPromptTemplateMapDuplicates(entries: BambooPromptTemplateMap
   return checkTemplateMapDuplicates(entries, (e) => e.buildState, 'build state');
 }
 
-/**
- * Validate and resolve every row of a project map, the same way the
- * webhook's own `cwd` is resolved — each directory must be inside a
- * workspace folder. Returns `null` once the reply has already been sent;
- * callers should `return reply` in that case, exactly like
- * `resolveWorkspaceCwdOrReply`.
- */
-async function resolveProjectMap(
-  workspaces: WorkspaceRegistry,
-  entries: { projectKey: string; cwd: string }[],
-  reply: FastifyReply,
-): Promise<JiraProjectMapEntry[] | null> {
-  const dupProblem = checkProjectMapDuplicates(entries);
-  if (dupProblem !== null) {
-    badRequest(reply, dupProblem);
-    return null;
-  }
-  const resolved: JiraProjectMapEntry[] = [];
-  for (const entry of entries) {
-    const cwd = await resolveWorkspaceCwdOrReply(workspaces, entry.cwd, reply);
-    if (cwd === null) return null;
-    resolved.push({ projectKey: entry.projectKey.trim().toUpperCase(), cwd });
-  }
-  return resolved;
-}
-
-/** The Bamboo equivalent of `resolveProjectMap`, keyed on plan key instead of project key. */
-async function resolvePlanMap(
-  workspaces: WorkspaceRegistry,
-  entries: { planKey: string; cwd: string }[],
-  reply: FastifyReply,
-): Promise<BambooPlanMapEntry[] | null> {
-  const dupProblem = checkPlanMapDuplicates(entries);
-  if (dupProblem !== null) {
-    badRequest(reply, dupProblem);
-    return null;
-  }
-  const resolved: BambooPlanMapEntry[] = [];
-  for (const entry of entries) {
-    const cwd = await resolveWorkspaceCwdOrReply(workspaces, entry.cwd, reply);
-    if (cwd === null) return null;
-    resolved.push({ planKey: entry.planKey.trim().toUpperCase(), cwd });
-  }
-  return resolved;
-}
-
 /** The reveal/rotate responses must never sit in an intermediary's cache. */
 function noStore(reply: FastifyReply): FastifyReply {
   return reply.header('cache-control', 'no-store');
@@ -780,10 +859,12 @@ function specFrom(
   promptTemplateMap: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[],
   slug: string,
   cwd: string,
+  hostId: string | null,
 ): WebhookSpec {
   const common = {
     slug,
     cwd,
+    hostId,
     name: body.name,
     enabled: body.enabled,
     authMode: body.authMode,

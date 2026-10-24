@@ -20,7 +20,7 @@ pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real
 pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
 pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
 pnpm demo:attachments-ui  # PA-136/137: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports, text read
-pnpm demo:fleet           # PA-134/169: Hub /mcp + Fleet agent + a coding agent's client token — real Chrome
+pnpm demo:fleet           # PA-134/169/171: Hub /mcp + Fleet agent + client token + webhook routed to another host — real Chrome
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -180,7 +180,7 @@ PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, stre
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
 pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
 pnpm demo:attachments-ui  # PA-136/137: scratch server + fake LLM; files attached in real Chrome, phone and desktop
-pnpm demo:fleet           # PA-134/169: two real backends + a real Hub + fake LLM and push service; real Chrome
+pnpm demo:fleet           # PA-134/169/171: two real backends + a real Hub + fake LLM and push service; real Chrome
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -277,8 +277,18 @@ copyable `mcpServers` snippet. A real MCP SDK client, which is what a coding age
 - is refused on dev01, naming it, before any backend is dialed;
 - dispatches to mac01 itself, gets the target's approval as a push, and `wait`s to `complete`.
 
-Revoking the token on the page stops its very next call. Like `demo:attachments-ui`, it needs
-`PLAYWRIGHT_BROWSERS_PATH` pointing at a directory with the revision Playwright wants.
+Revoking the token on the page stops its very next call. PA-171's criteria follow. Webhook routing
+is turned on for dev01 → mac01, and dev01 then shows:
+- one Jira webhook (PA → dev01's folder, XY → mac01) running PA locally and XY on mac01, checked
+  on mac01's own API;
+- a Pocket Agent webhook routed to mac01 that stays `running` on mac01's approval, gets it by push
+  deep-linked to mac01, settles `succeeded` once answered there, and continues the same chat on
+  the issue's next delivery;
+- routing switched off, and then the Hub killed, each failing a delivery with its own reason and
+  nothing run on dev01.
+
+Like `demo:attachments-ui`, it needs `PLAYWRIGHT_BROWSERS_PATH` pointing at a directory with the
+revision Playwright wants.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -797,6 +807,71 @@ ambiguous → filtered" rule:
   (recording `auto-routed via <source>: <cwd> (<evidence>)` on the delivery row and auditing the
   first auto-route); anything `'ambiguous'` falls back to `'suggest'`.
 
+**A mapping row can name another agent server** (PA-171). One webhook and one Jira URL can now
+reach several machines. `JiraProjectMapEntry` / `BambooPlanMapEntry` carry an optional `hostId`
+(a Hub host id; absent means this server, so every existing row is unchanged), and so does the
+webhook's top-level target (`webhooks.host_id`). Everything up to the route is exactly as before:
+signature over raw bytes, freshness, the idempotency insert, filter, route, caps, overlap, render.
+Past that, a remote route runs a different composite: `RemoteRunExecutor` (`runs/remote.ts`)
+calls the Hub's `/mcp` through `HubDispatchClient` (`runs/hub-dispatch.ts`):
+- `dispatch_coding_task` starts a coding run, or `dispatch_pocket_task` for a `pocket:` agent on
+  that host.
+- `dispatch_prompt` sends a per-issue follow-up.
+- A loop of short `wait` polls settles it, reporting into the same row through a sink.
+
+The credential is a `webhook`-kind Hub MCP token the Hub mints for this backend, `dispatch` only,
+limited to the hosts allowed on the Hub page. It is stored as `secret-box` ciphertext by
+`WebhookRoutingStore`, written only by the Hub or a cookie session to `POST /api/webhook-routing`,
+and never returned. The rules that carry the design:
+- **Containment is the target's.** A remote `cwd` cannot be checked here. The route checks that it
+  is an absolute path and that the host is on the Hub's list for this server
+  (`remote_host_not_allowed`). The target's own `start_session` re-resolves it against its own
+  folders. A row naming this server's own Hub id is local, containment included. The agent is
+  checked locally only when some target is local. `current-branch` cannot cross
+  (`remote_worktree_mode`), because the target mints every branch itself: `branchBase` is minted
+  here from the webhook name and the *validated* subject key, never from Jira text. A
+  component-shared `feature/<component>` branch is not expressible remotely, so a remote
+  `new-branch` run always gets a fresh one.
+- **No local fallback.** A dispatch can fail because routing is not set up here, the Hub is
+  unreachable, it rejects the token, it refuses the host, or the target refuses the folder. Each
+  fails the delivery with its own reason, answered 2xx and retryable (PA-125). "Route XY to mac01"
+  and "mac01 is down" are different situations, for the reason an unmapped project is filtered
+  rather than run in the default `cwd`. A refusal that names a cap (the target's per-client
+  session cap, the Hub's `DispatchLimiter`, matched by `remoteCapRefusal`) is `throttled`.
+- **Settling asks the target, never a clock.** `awaiting_approval` keeps the delivery `running`
+  (`remoteState`) with no timeout, like a local run parked on an approval. A transport failure
+  backs off and asks again, because the Hub restarting says nothing about the work on the target.
+  Only `complete`, `ended`, a gone session or routing switched off settles it. The polls are short
+  (a one-second `wait`, then a sleep) because the Hub's `DispatchLimiter` counts wait calls in
+  flight: a held 60-second wait per remote run would lock the Fleet coordinator out of a busy
+  host.
+- **A restart resumes waiting.** `remote_ref` (`session:` / `chat:` on `remote_host_id`) is
+  persisted before the loop starts. `markStaleWebhookDeliveriesFailed` leaves a row that has one,
+  `init()` re-attaches a waiter, and the 30 s sweep is the backstop. A row with a host and no ref
+  that is not mid-dispatch never reached its target and is failed.
+- **Caps.** A remote run counts against its own webhook's `max_concurrent` (`isRunActive` is true
+  while its row is open) but not the global webhook budget. That budget keeps *local* session
+  slots free for a human, and a remote run holds none here. The target's caps and the Hub's
+  limiter apply on top.
+- **per-issue.** `webhook_issue_sessions.host_id` joins PA-26's agent rule in `ownsConversation`:
+  a conversation lives on one host, so a host change drops the row and starts fresh (logged as
+  such), and NULL means this server. The next delivery on the same host is `dispatch_prompt`
+  into the cached `session:` / `chat:` ref; the target's `send_prompt` resumes a finished session
+  itself and returns the new id, which becomes the issue's conversation. A ref the target no
+  longer has (`No session …`) is forgotten and the run starts fresh.
+- **Approval is the target's** (see the eighth override in the invariants list). Nothing here
+  carries the webhook's `skipPermissions` across: the remote run starts with
+  `skip_permissions_enabled = 0` on its row, and only the target's own answer
+  (`StartSessionResult.skipPermissionsEnabled`) can set it. So history never claims a bypass that
+  did not happen.
+
+The delivery's `sessionId` / `plannerChatId` are ids *on that host*, linked through the Hub at
+`#/h/<remoteHostId>/s/<id>`. A Pocket Agent model id is a `planner_models` row on *this* server
+and so is not sent; the remote Pocket Agent's own default runs. Known limitations: PA-170's
+detection only ever proposes local folders, so `hostId` is set by hand; a Jira `agent:` label is
+still resolved against this server's own registry; and `effort` does not cross the Hub's
+`dispatch_coding_task`.
+
 Known limitations, both inherited and made worse: per-delivery worktrees are not
 garbage-collected either, and a busy Jira project creates them far faster than a nightly job
 does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
@@ -829,7 +904,10 @@ writes `session_prompt_queue`, and `RunQueue` never touches a table). One instan
 `<project>/.worktrees/x`. Those are separate checkouts, and blocking across them would
 serialize the very parallelism worktrees exist to provide. Same tree, or no conflict. Runs that
 mint their own directory (`current-branch`, or `new-branch` with a per-run minted name) get **no
-key at all** and never queue. `worktreePathFor` is exported and used by both
+key at all** and never queue. Neither does a run routed to another host (PA-171): its tree is on
+that machine, whose own `start_session` goes through *its* `PromptQueueService`. The delivery shows
+`queued (remote)` when the target says so, and a key here would only block a local tree the run
+never touches. `worktreePathFor` is exported and used by both
 `WorktreeService.create` and the key computation, because the queue names a directory before it
 exists and two copies of that formula would eventually disagree.
 
@@ -2985,6 +3063,34 @@ Hub, `mcp-server/fleet-attach.ts` and `routes/fleet-mcp.ts` on the backend).
 - **Known limitation.** The flag is not persisted, so a finished session's history row does not
   record it. It cannot dispatch once finished, so there is nothing left to disclose.
 
+### Webhook routing through the Hub (PA-171)
+
+A third `phm_` kind, `webhook`, lets one backend's webhooks dispatch runs to other hosts. The
+backend half (routing, settling, per-issue) is in "Inbound webhooks" above. The Hub's half:
+- **`WebhookRoutingService`** (`mcp/webhook-routing.ts`) is `HubMcpAttachService`'s shape. The
+  "Webhook routing" card on `HubPage` turns it on per *source* backend with an allowlist of target
+  hosts (`PUT /api/hub/webhook-routing/:hostId`, `DELETE` to switch off, behind the cookie). Each
+  source gets its own `webhook` token (`mintWebhook`: scopes `['dispatch']`, the allowed hosts),
+  handed over once with `pah_` to `POST /api/webhook-routing` with the Hub's `/mcp` URL, the
+  source's own host id, and the target labels for its editor. `hub_webhook_routing` (migration #6,
+  CASCADE from the source host) tracks it. Changing the allowlist re-mints, because the Hub holds
+  only the digest and the backend needs the labels. The MCP clients card lists the token but
+  refuses to edit or revoke it (409 `webhook_routing_token`). Removing a host withdraws it as a
+  source and drops it from every allowlist.
+- **The token's kind is what states the origin.** On a `dispatch_*` call from a `webhook`
+  principal, the Fleet tools add `MCP_DISPATCH_ORIGIN_META_KEY` (`{kind: 'webhook', sourceHostId,
+  sourceLabel}`, from the Hub's own routing row) to the backend call's `_meta`. That is the only
+  `_meta` the Hub writes beyond the depth, and nothing from the caller is forwarded. A webhook
+  token whose routing row has gone is refused rather than dispatched as a plain client. Whether
+  the origin lets a run skip approvals is the target's setting alone (the eighth override).
+- **`dispatch_prompt(host, ref, prompt)`** (scope `dispatch`, target-scoped like every
+  `dispatch_*`) is the per-issue follow-up. It calls the target's `send_prompt` (now on
+  `BACKEND_TOOL_ALLOWLIST`) or `send_pocket_message`, and returns the new ref when the target
+  resumed a finished session. `dispatch_coding_task` gained an optional `branchBase`, passed
+  through to `start_session`, which still mints the branch.
+- **A webhook token dispatches with the per-host tokens a client uses.** `depsFor` gives it
+  first-use minting, and the Fleet agent's disable keeps them while one exists.
+
 ### Fleet administration in three tiers (PA-135)
 
 Beyond task dispatch (PA-134), fleet administration is split across three tiers that follow the
@@ -3284,6 +3390,39 @@ These are load-bearing. Several were bugs first.
   have every path inside the workspace); and it is disclosed persistently in the workspace header,
   the Workspace panel, and on `PlannerChat.docWorkspaceAutoApproveEdits`. Asserted in
   `apps/server/tests/doc-workspaces.test.ts`.
+- **`webhookDispatchSkipApprovals` is the eighth override, and it belongs to the *target*
+  machine** (PA-171). A webhook run another server routes here through the Hub may start with
+  approvals skipped only while this host's own switch is on. It lives in `settings` like the
+  global switch, is off by default, and is read fresh on every dispatched start.
+  - **Off is the default, and it means "follow this host".** The run obeys this host's own gate,
+    plus its global skip-permissions switch if that is on. The source webhook's `skipPermissions`
+    never crosses: a source that decided would let any machine that can send webhooks switch off
+    approvals on another.
+  - **Three things must all hold.** The Hub states the run is a webhook run
+    (`MCP_DISPATCH_ORIGIN_META_KEY` in the call's `_meta`, written by the Hub only for a call on a
+    `webhook`-kind token, from its own routing row). The principal carrying it is one a Hub stands
+    behind (`mcp_client_tokens.minted_by_hub_id`, or a hub credential), and `dispatchOriginOf`
+    ignores the key from anyone else. And the switch is on.
+  - **It is not a tool input,** so "no MCP tool input carries `skipPermissions`" still holds, and
+    the Fleet coordinator's and ordinary client tokens' dispatches are never covered.
+  - **Only a person or the operator's Hub can set it.** `PATCH /api/settings` refuses it from an
+    MCP principal, and the planner's `update_settings` refuses it outright.
+  - **It is disclosed and recorded.** Each bypass is logged at `warn` naming the source host. The
+    session's own `skipPermissionsEnabled` badge shows on every visit, and a Pocket Agent chat gets
+    `skipToolApprovalsEnabled`. The source's delivery row records what the target reported.
+  - **A dispatch token minted before PA-171 has no hub provenance** (`mintedByHub` false on the
+    backend's token list), so the origin is ignored from it. Saving webhook routing on the Hub
+    replaces exactly such tokens on the allowed targets (`FleetService.ensureDispatchProvenance`),
+    and keeps current ones, because re-minting resets the per-client cap and ownership of work
+    already started there. Asserted in `apps/server/tests/webhook-dispatch-approvals.test.ts` and
+    `apps/hub/tests/hub-webhook-routing.test.ts`.
+- **A remote webhook run never falls back to this server, and approval is never carried across**
+  (PA-171). A mapping row that names a host runs there or not at all. Not set up, Hub unreachable,
+  token refused, host not allowed and folder refused by the target each fail the delivery with its
+  own reason, answered 2xx and retryable. Its row starts with `skip_permissions_enabled = 0`, and
+  only the target's report can change that. While its row is open it counts against its own
+  webhook's cap, settles only on what the target reports, and survives a restart from
+  `remote_ref`. Asserted in `apps/server/tests/webhooks-remote.test.ts` and `pnpm demo:fleet`.
 - **One agent per working tree, and occupancy is derived rather than leased.** `RunQueue`
   (`runs/queue.ts`) keys on `treeRootOf` — the working tree, so a cwd below a tree root rolls up
   to it, and a run in `<project>` deliberately does **not** conflict with one in
@@ -3298,7 +3437,8 @@ These are load-bearing. Several were bugs first.
   neither does a **Pocket Agent** delivery (PA-10): it has no cwd, no worktree and no session, so
   there is no checkout to contend for and nothing this queue's derived occupancy could observe.
   Two pocket runs in one planner workspace can still touch the same scratch files; serializing
-  that would need occupancy derived from in-flight pocket runs rather than sessions.
+  that would need occupancy derived from in-flight pocket runs rather than sessions. A run routed
+  to another host (PA-171) takes no key here either; the target's own queue serialises it.
 - **A queued delivery is a third class of row, in neither `OPEN_DELIVERY` nor
   `NOISE_STATUSES`.** It holds no session, so counting it in `capReason` makes a queue throttle
   itself, force-failing it in `markStaleWebhookDeliveriesFailed` destroys work already answered
@@ -3426,7 +3566,8 @@ These are load-bearing. Several were bugs first.
   refused** rather than dropped from the list or dialed without a credential. The Hub itself
   accepts its own session cookie and, since PA-134, exactly one bearer class: a `phm_` token
   (PA-169: of two kinds, the Fleet coordinator's with every scope and host, and an operator-minted
-  `client` held by the Hub to its own scopes and host allowlist on every call), on the exact path
+  `client` held by the Hub to its own scopes and host allowlist on every call; PA-171 adds a third,
+  a backend's `webhook` routing token, `dispatch` only and host-limited like a client), on the exact path
   `/mcp` and nowhere else. A `phm_` token is minted only behind the Hub's cookie, so no MCP
   principal can mint, widen or revoke one — checked before the gate's early return, by
   exact match (`/mcpx`, `/mcp/x` stay the shell), with the cookie counting for nothing there. A
@@ -3527,7 +3668,10 @@ These are load-bearing. Several were bugs first.
   `apps/server/tests/mcp-server.test.ts`. A turn that needs approval reports
   `awaiting_approval` and waits, with no timeout, for a human in PocketAgent; `wait_for_turn`'s
   own timeout ends the wait, never the turn. An MCP-started session obeys exactly the approval
-  gate a human-started one does, and an MCP-created Pocket Agent chat is never pre-approved. The
+  gate a human-started one does, and an MCP-created Pocket Agent chat is never pre-approved —
+  with one exception, which is the target host's own decision rather than the caller's: PA-171's
+  `webhookDispatchSkipApprovals` (the eighth override, above), for a Hub-stated webhook run on a
+  Hub-minted token only. The
   planner's raw `exec_command`/`bash`/`write_file`/`rmdir` are not re-exported: MCP has no
   pause/resume, so they would be a remote shell with no gate. Agent installation and server
   restart stay unreachable from it, like from every other unattended trigger.
@@ -3864,7 +4008,8 @@ These are load-bearing. Several were bugs first.
   reasoning, `McpClientsSection.tsx` (PA-118's `/mcp` URL for a client config) and
   `FleetAgentCard.tsx` (PA-134's prefill for the Hub address a coordinator dials, labelled as the
   browser's and editable) and `HubMcpClientsCard.tsx` (PA-169's prefill for the Hub address a
-  coding agent dials, likewise). `SecretReveal.tsx` composes a
+  coding agent dials, likewise) and `HubWebhookRoutingCard.tsx` (PA-171's prefill for the Hub
+  address a source backend dispatches webhook runs through, likewise). `SecretReveal.tsx` composes a
   webhook's *delivery* URL for a human to paste into Jira; the server deliberately has no notion
   of its own external origin, so that one stays — but it is only valid for the host that served
   the bundle. For any host reached through a path prefix, this origin is the *gateway's*, and a

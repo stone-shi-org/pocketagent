@@ -60,6 +60,8 @@ export const HUB_FLEET_TOOL_NAMES = [
   'dispatch_pocket_task',
   'dispatch_coding_task',
   'wait',
+  // PA-171: a follow-up prompt into work an earlier dispatch started.
+  'dispatch_prompt',
   'list_pending_approvals',
   // PA-135 Tier 1: read-only fleet views (approval-exempt)
   'fleet_versions',
@@ -178,7 +180,7 @@ export type MoveHubFleetRequest = z.infer<typeof MoveHubFleetRequest>;
  * coding agent (Claude Code, Codex, any MCP client), with its own scopes and an
  * optional host allowlist.
  */
-export const HubMcpTokenKind = z.enum(['coordinator', 'client']);
+export const HubMcpTokenKind = z.enum(['coordinator', 'client', 'webhook']);
 export type HubMcpTokenKind = z.infer<typeof HubMcpTokenKind>;
 
 /**
@@ -257,6 +259,7 @@ export const HUB_FLEET_TOOL_SCOPES: Readonly<Record<HubFleetToolName, HubMcpScop
   dispatch_pocket_task: 'dispatch',
   dispatch_coding_task: 'dispatch',
   wait: 'dispatch',
+  dispatch_prompt: 'dispatch',
   list_pending_approvals: 'read',
   fleet_versions: 'read',
   fleet_drain_state: 'read',
@@ -329,3 +332,75 @@ export type EnableHubMcpAttachRequest = z.infer<typeof EnableHubMcpAttachRequest
 
 /** The scopes of the token a Hub mints for a backend's sessions: never `admin`. */
 export const HUB_MCP_ATTACH_SCOPES: readonly HubMcpScope[] = ['read', 'dispatch'];
+
+// ---- PA-171: webhook routing through the Hub ----------------------------------
+
+/**
+ * The only scope a webhook-routing token carries. `wait` and every `dispatch_*`
+ * tool are `dispatch`; the editor's host and folder pickers read through the
+ * browser's own Hub session instead, so the backend never needs `read`.
+ */
+export const HUB_WEBHOOK_ROUTING_SCOPES: readonly HubMcpScope[] = ['dispatch'];
+
+/**
+ * What a Hub hands a backend so its webhooks can dispatch to other hosts: the
+ * Hub's `/mcp` URL, a `webhook`-kind Hub MCP token minted for that backend, the
+ * backend's own id on this Hub (so a row naming itself is local) and the hosts
+ * the token may reach, with their labels for the editor. Sent with the Hub's
+ * `pah_` credential to `POST /api/webhook-routing`, stored as `secret-box`
+ * ciphertext, never returned.
+ */
+export const WebhookRoutingHost = z.object({ id: HubHostId, label: z.string().min(1).max(200) });
+export type WebhookRoutingHost = z.infer<typeof WebhookRoutingHost>;
+
+export const SetWebhookRoutingRequest = z.object({
+  url: HubFleetUrl,
+  token: z.string().min(16).max(200).startsWith(HUB_MCP_TOKEN_SCHEME_PREFIX),
+  selfHostId: HubHostId,
+  hosts: z.array(WebhookRoutingHost).max(MAX_HUB_MCP_TOKEN_HOSTS),
+});
+export type SetWebhookRoutingRequest = z.infer<typeof SetWebhookRoutingRequest>;
+
+/** A backend's webhook-routing state, for its webhook editor. Never the token. */
+export const WebhookRoutingState = z.object({
+  /** A Hub URL and a decryptable token are both stored. */
+  configured: z.boolean(),
+  url: z.string().nullable(),
+  tokenPrefix: z.string().nullable(),
+  /** Stored, but will not decrypt (`POCKETAGENT_SETTINGS_ENC_KEY` rotated). */
+  unreadable: z.boolean(),
+  /** This backend's own id on the Hub; a row naming it runs locally. */
+  selfHostId: z.string().nullable(),
+  /** The hosts a mapping row may name, as the Hub last reported them. */
+  hosts: z.array(WebhookRoutingHost),
+  updatedAt: z.number().nullable(),
+});
+export type WebhookRoutingState = z.infer<typeof WebhookRoutingState>;
+
+/** One backend's routing state as the Hub page shows it. */
+export const HubWebhookRoutingHost = z.object({
+  hostId: z.string(),
+  label: z.string(),
+  /** `routed` = the backend holds a token; `none` = not set up; `failed` = the last attempt did not land. */
+  state: z.enum(['routed', 'none', 'failed']),
+  /** Hosts this backend's webhooks may dispatch to. */
+  allowedHosts: z.array(z.string()),
+  tokenPrefix: z.string().nullable(),
+  message: z.string().nullable(),
+});
+export type HubWebhookRoutingHost = z.infer<typeof HubWebhookRoutingHost>;
+
+export const HubWebhookRoutingState = z.object({
+  hosts: z.array(HubWebhookRoutingHost),
+});
+export type HubWebhookRoutingState = z.infer<typeof HubWebhookRoutingState>;
+
+/**
+ * Turn routing on (or change its allowlist) for one source backend. An empty
+ * `allowedHosts` is refused: switch routing off instead.
+ */
+export const SetHubWebhookRoutingRequest = z.object({
+  hubUrl: HubFleetUrl,
+  allowedHosts: z.array(HubHostId).min(1).max(MAX_HUB_MCP_TOKEN_HOSTS),
+});
+export type SetHubWebhookRoutingRequest = z.infer<typeof SetHubWebhookRoutingRequest>;

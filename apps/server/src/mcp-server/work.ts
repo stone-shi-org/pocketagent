@@ -1,4 +1,10 @@
-import type { AgentEvent, EffortLevel, McpTurnState, PermissionRequestEvent } from '@pocketagent/protocol';
+import type {
+  AgentEvent,
+  EffortLevel,
+  McpDispatchOrigin,
+  McpTurnState,
+  PermissionRequestEvent,
+} from '@pocketagent/protocol';
 import {
   clampTitle,
   MAX_MCP_ATTACHMENT_BYTES,
@@ -35,6 +41,7 @@ import { PlannerChatError } from '../planner/chats.js';
 import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history.js';
 import { structuredAgentProblem } from '../routes/shared.js';
 import { mintBranchName } from '../runs/executor.js';
+import { readWebhookDispatchSkipApprovals } from '../webhooks/routing-store.js';
 import { summarizeEvents, truncateTail } from '../planner/tools.js';
 
 /**
@@ -120,6 +127,17 @@ export interface StartSessionResult {
   cwd: string;
   state: 'running' | 'queued';
   queuePosition?: number;
+  /**
+   * PA-171: whether the session this started runs with approvals skipped — by
+   * this host's global switch, or by its webhook-dispatch setting. Reported so
+   * a source webhook can record what its remote run *actually* ran with.
+   */
+  skipPermissionsEnabled?: boolean;
+}
+
+/** PA-171: per-call context that is not a tool input. */
+export interface DispatchOpts {
+  dispatchOrigin?: McpDispatchOrigin | null;
 }
 
 export interface McpWorkServiceOptions {
@@ -210,8 +228,10 @@ export class McpWorkService {
     principal: McpClientIdentity,
     depth: number,
     input: StartSessionInput,
+    opts: DispatchOpts = {},
   ): Promise<StartSessionResult> {
     this.assertMayStart(principal, depth);
+    const skipPermissions = this.webhookDispatchSkips(principal, opts.dispatchOrigin ?? null, 'session');
 
     // Structured only, and never a provider an operator has marked
     // attended-only: the same check cron and webhooks use, so an MCP caller
@@ -272,6 +292,8 @@ export class McpWorkService {
         ...(input.resumeConversationId !== undefined
           ? { resumeAgentSessionId: input.resumeConversationId, forkSession: false }
           : {}),
+        // PA-171: the eighth override, and only it. Never an input field.
+        ...(skipPermissions ? { skipPermissions: true } : {}),
       });
       if (created.transport !== 'structured') {
         throw new McpWorkError('This agent produced a terminal session; MCP can only drive structured ones.', 'not_structured');
@@ -296,7 +318,38 @@ export class McpWorkService {
     );
 
     const sent = this.deliverPrompt(session, withNotes(input.prompt, landed.notes));
-    return { sessionId: session.id, cwd, ...sent };
+    return {
+      sessionId: session.id,
+      cwd,
+      ...sent,
+      skipPermissionsEnabled: this.opts.sessions.toInfo(session).skipPermissionsEnabled === true,
+    };
+  }
+
+  /**
+   * PA-171: whether this host lets a webhook run that another server dispatched
+   * here through the Hub skip approvals — the eighth override of the approval
+   * rule, and the only path by which an MCP-started session or chat may.
+   *
+   * Three things must all hold, read fresh on every start: the Hub stated the
+   * work is a webhook run (`dispatchOrigin`, honoured by the MCP server only
+   * from a Hub-backed principal), and this host's own setting is on. The source
+   * webhook's `skipPermissions` is never consulted — it is not this host's
+   * decision to make. Logged at `warn` when it applies, naming the source, so
+   * every bypassed run is on this host's own record.
+   */
+  private webhookDispatchSkips(
+    principal: McpClientIdentity,
+    origin: McpDispatchOrigin | null,
+    what: 'session' | 'chat',
+  ): boolean {
+    if (origin === null || origin.kind !== 'webhook') return false;
+    if (!readWebhookDispatchSkipApprovals(this.opts.db)) return false;
+    this.opts.logger?.warn(
+      { mcpClient: principal.label, sourceHostId: origin.sourceHostId, sourceLabel: origin.sourceLabel, what },
+      'webhook run dispatched through the Hub skips approvals on this host (webhookDispatchSkipApprovals is on)',
+    );
+    return true;
   }
 
   /**
@@ -356,6 +409,7 @@ export class McpWorkService {
     sessionId: string,
     prompt: string,
     attachmentIds: readonly string[] = [],
+    opts: DispatchOpts = {},
   ): Promise<StartSessionResult & { resumedFrom?: string }> {
     const info = this.opts.sessions.find(sessionId);
     if (!info) throw new McpWorkError(`No session ${sessionId}.`, 'not_found');
@@ -380,7 +434,7 @@ export class McpWorkService {
       }
       const sent = this.deliverPrompt(live as StructuredLikeSession, withNotes(prompt, notes));
       this.opts.logger?.info({ mcpClient: principal.label, sessionId }, 'mcp client prompted a session');
-      return { sessionId, cwd: info.cwd, ...sent };
+      return { sessionId, cwd: info.cwd, ...sent, skipPermissionsEnabled: info.skipPermissionsEnabled === true };
     }
     if (!info.agentSessionId) {
       throw new McpWorkError(`Session ${sessionId} has finished and has no conversation to resume.`, 'not_resumable');
@@ -392,7 +446,7 @@ export class McpWorkService {
       title: info.title,
       resumeConversationId: info.agentSessionId,
       ...(attachmentIds.length > 0 ? { attachments: [...attachmentIds] } : {}),
-    });
+    }, opts);
     return { ...resumed, resumedFrom: sessionId };
   }
 
@@ -551,6 +605,7 @@ export class McpWorkService {
     principal: McpClientIdentity,
     depth: number,
     input: { workspaceId: string; title?: string; modelId?: string },
+    opts: DispatchOpts = {},
   ): string {
     if (depth >= MAX_MCP_CALL_DEPTH) {
       throw new McpWorkError(
@@ -567,13 +622,18 @@ export class McpWorkService {
       throw new McpWorkError(unattendedProblem, 'agent_not_allowed');
     }
     try {
-      // `skipToolApprovals` is deliberately never passed: it is a server-only
-      // field (the fifth override) that only an unattended trigger with its
-      // own skip decision may set, and an MCP caller has no such decision.
+      // `skipToolApprovals` is a server-only field (the fifth override) that
+      // only an unattended trigger with its own skip decision may set. An MCP
+      // caller has no such decision; the one exception is PA-171's — a webhook
+      // run the Hub dispatched here, on a host whose operator turned on
+      // `webhookDispatchSkipApprovals`. That is this host's decision, read
+      // here, never a value the caller supplies.
+      const skipToolApprovals = this.webhookDispatchSkips(principal, opts.dispatchOrigin ?? null, 'chat');
       const chat = this.opts.plannerChats.create({
         workspaceId: input.workspaceId,
         title: input.title ?? `MCP · ${principal.label}`,
         ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
+        ...(skipToolApprovals ? { skipToolApprovals: true } : {}),
       });
       recordMcpOwnedWork(this.opts.db, {
         kind: 'planner_chat',

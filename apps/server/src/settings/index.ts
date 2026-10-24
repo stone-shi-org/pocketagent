@@ -108,8 +108,10 @@ export function fromDtoValue(field: SettingsField, dtoValue: unknown): unknown {
 export function buildRuntimeSettingsSnapshot(
   config: Config,
   skipPermissionsEnabled: boolean,
+  /** PA-171: the target-side webhook-dispatch switch, stored outside `SETTINGS_FIELDS` like the one above. */
+  webhookDispatchSkipApprovals = false,
 ): { settings: Record<string, unknown>; restartRequiredKeys: string[] } {
-  const settings: Record<string, unknown> = { skipPermissionsEnabled };
+  const settings: Record<string, unknown> = { skipPermissionsEnabled, webhookDispatchSkipApprovals };
   for (const field of SETTINGS_FIELDS) {
     settings[dtoKeyFor(field)] = toDtoValue(field, config[field.key]);
   }

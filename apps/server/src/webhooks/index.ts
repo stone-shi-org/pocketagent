@@ -97,6 +97,8 @@ import type { CustomClaudeProviderStore } from '../agents/custom-providers-store
 import { safeTokenEqual } from '../auth/index.js';
 import type { PocketRunSpec, RunSink, RunSpec } from '../runs/executor.js';
 import { RunExecutor, mintBranchName } from '../runs/executor.js';
+import type { RemoteRunExecutor, RemoteRunSink, RemoteStartOutcome, RemoteStartSpec } from '../runs/remote.js';
+import type { WebhookRoutingStore } from './routing-store.js';
 import type { PlannerChatService } from '../planner/chats.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import type { QueueStore, QueuedItem } from '../runs/queue.js';
@@ -260,6 +262,13 @@ export interface WebhookServiceOptions {
   customClaudeProviders: CustomClaudeProviderStore;
   /** Ceiling shared with interactive sessions; the reservation is carved from it. */
   maxSessions: number;
+  /**
+   * PA-171: where remote runs go and who may be named. Absent (most tests, and
+   * any server never set up for routing) means every mapping row is local — a
+   * row naming a host fails its delivery with a reason rather than running here.
+   */
+  webhookRouting?: WebhookRoutingStore;
+  remoteRuns?: RemoteRunExecutor;
   logger?: {
     info: (o: object, m?: string) => void;
     warn: (o: object, m?: string) => void;
@@ -275,6 +284,8 @@ export interface WebhookSpecCommon {
   enabled: boolean;
   authMode: WebhookAuthMode;
   cwd: string;
+  /** PA-171: the host the top-level `cwd` is on; null/absent = this server. */
+  hostId?: string | null;
   agent: string;
   worktreeMode: 'none' | 'new-branch' | 'current-branch';
   model: string | null;
@@ -393,6 +404,12 @@ interface FrozenRun {
   skippedByLabel: boolean;
   /** PA-170: disclosure string when this delivery was auto-routed via route detection. */
   autoRoutedReason?: string | null;
+  /**
+   * PA-171: the host the route named, or null for this server. Frozen with
+   * the rest, though a remote run never queues here: the field is optional so
+   * a spec frozen before it existed reads as local.
+   */
+  hostId?: string | null;
 }
 
 export class WebhookService {
@@ -409,6 +426,12 @@ export class WebhookService {
    */
   private readonly queue: RunQueue;
   private readonly heldKeys = new Map<string, string>();
+  /**
+   * PA-171: deliveries mid-dispatch to another host — the row is open, its
+   * `remote_host_id` is set, and there is no `remote_ref` yet. The sweep must
+   * not mistake one for a dispatch that died with nothing to wait on.
+   */
+  private readonly dispatching = new Set<string>();
   private unsubscribeTreeIdle: (() => void) | null = null;
   /**
    * Set by `stop()`. The one deferred re-check in
@@ -503,6 +526,12 @@ export class WebhookService {
     // Only now is the liveness picture true, so only now can the queue decide
     // what is free. `markStaleWebhookDeliveriesFailed` deliberately leaves
     // `queued` rows alone (see `QUEUED_DELIVERY`), so this adopts them.
+    // PA-171: `markStaleWebhookDeliveriesFailed` leaves a remote row with a
+    // ref alone — its work is on another machine and survived this restart —
+    // so waiting resumes now rather than on the first sweep.
+    for (const row of readActiveWebhookDeliveries(this.db)) {
+      if ((row.remote_host_id ?? null) !== null) this.resumeRemoteRun(row);
+    }
     this.unsubscribeTreeIdle = this.opts.sessions.onTreeIdle(() => this.queue.pump());
     this.queue.init();
     this.timer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
@@ -523,6 +552,8 @@ export class WebhookService {
     this.queue.clear();
     this.heldKeys.clear();
     this.executor.abandonAll('The server shut down while this delivery was in progress.');
+    // PA-171: stop watching, settle nothing — the next boot resumes each wait.
+    this.opts.remoteRuns?.stopAll();
   }
 
   /**
@@ -535,6 +566,13 @@ export class WebhookService {
   sweep(): void {
     try {
       for (const row of readActiveWebhookDeliveries(this.db)) {
+        // PA-171: a remote run, checked first because it may also carry a
+        // `planner_chat_id` / `session_id` — ids on another host, which the
+        // local liveness checks below know nothing about.
+        if ((row.remote_host_id ?? null) !== null) {
+          this.resumeRemoteRun(row);
+          continue;
+        }
         // PA-10: a pocket run. Still-parked and still-streaming runs are both
         // `isPocketRunAlive`, since a pocket run only leaves the executor's
         // in-flight map when it settles — so reaching here means the turn is
@@ -797,6 +835,7 @@ export class WebhookService {
       directoryPolicy: directoryPolicy.policy,
       skippedByLabel: directoryPolicy.skippedByLabel,
       autoRoutedReason: route.autoRoutedReason,
+      hostId: route.hostId,
     };
     updateWebhookDelivery(this.db, deliveryId, {
       rendered_prompt: prompt.text,
@@ -834,8 +873,9 @@ export class WebhookService {
     return {
       // PA-10: keyed on `started`, not on `sessionId !== null` — a Pocket Agent
       // run succeeds with no session at all, and the old test would have
-      // reported every one of them as failed.
-      status: started.started ? 'running' : 'failed',
+      // reported every one of them as failed. PA-171: a remote dispatch a cap
+      // refused is `throttled`, answered 2xx and retryable like a local one.
+      status: started.started ? 'running' : started.throttled === true ? 'throttled' : 'failed',
       httpStatus: 202,
       deliveryId,
       sessionId: started.sessionId,
@@ -853,6 +893,41 @@ export class WebhookService {
    *    cache entries (running first-time detection if not yet cached).
    */
   private async resolveDeliveryRoute(
+    hook: WebhookRow,
+    deliveryId: string,
+    facts: AnyEventFacts,
+  ): Promise<
+    | { matched: true; cwd: string; hostId: string | null; autoRoutedReason: string | null }
+    | { matched: false; reason: string }
+  > {
+    const routed = await this.resolveDeliveryRouteLocal(hook, deliveryId, facts);
+    if (!routed.matched) return routed;
+    return { ...routed, hostId: this.hostForRoute(hook, routeKeyOf(hook.type as WebhookType, facts), routed.cwd) };
+  }
+
+  /**
+   * PA-171: which host a matched route runs on.
+   *
+   * An explicit map row carries its own `hostId`; a route that landed on the
+   * webhook's own `cwd` carries the webhook's top-level `host_id`; anything the
+   * PA-170 cache or detection supplied is local, because detection only ever
+   * looks at this machine's folders. A host equal to this server's own id on
+   * the Hub is local too — normalised at the route, and again here for a
+   * webhook saved before routing was set up.
+   */
+  private hostForRoute(hook: WebhookRow, rawKey: string | null, cwd: string): string | null {
+    const key = rawKey?.toUpperCase() ?? null;
+    const map = this.routeMapFor(hook) as { projectKey?: string; planKey?: string; cwd: string; hostId?: string }[];
+    let hostId: string | null = null;
+    const row =
+      key === null ? undefined : map.find((e) => (e.projectKey ?? e.planKey ?? '').trim().toUpperCase() === key);
+    if (row !== undefined) hostId = row.hostId ?? null;
+    else if (cwd === hook.cwd) hostId = hook.host_id ?? null;
+    if (hostId !== null && hostId === this.opts.webhookRouting?.selfHostId()) return null;
+    return hostId;
+  }
+
+  private async resolveDeliveryRouteLocal(
     hook: WebhookRow,
     deliveryId: string,
     facts: AnyEventFacts,
@@ -1045,13 +1120,17 @@ export class WebhookService {
     // same scratch files; serializing *that* would need occupancy derived from
     // in-flight pocket runs rather than sessions, which is a separate change.
     if (frozen.spec.kind === 'pocket') return null;
+    // PA-171: a remote run's working tree is on another machine. Its target
+    // serialises it there (`start_session` → `PromptQueueService`), so a key
+    // here would only block a local tree the run never touches.
+    if ((frozen.hostId ?? null) !== null) return null;
     if (hook.conversation_mode === 'per-issue') {
       // PA-26: the *agent-aware* lookup, so this stays consistent with what
       // `startRun` will actually do. A delivery whose label moved it to another
       // agent abandons that conversation, and with it that conversation's
       // worktree — keying it there would park the new run behind a tree it is
       // never going to enter.
-      const mapped = this.issueConversationFor(hook, frozen.subjectKey, frozen.agent);
+      const mapped = this.issueConversationFor(hook, frozen.subjectKey, frozen.agent, null);
       if (mapped !== null && (mapped.cwd === frozen.cwd || isContained(frozen.cwd, mapped.cwd))) {
         return treeRootOf(mapped.cwd);
       }
@@ -1074,7 +1153,12 @@ export class WebhookService {
    * there is no reason to believe the cached id belongs to `agent`, and
    * resuming an unverifiable id is the wedge this feature exists to prevent.
    */
-  private ownsConversation(cached: WebhookIssueSessionRow, agent: string): boolean {
+  private ownsConversation(cached: WebhookIssueSessionRow, agent: string, hostId: string | null): boolean {
+    // PA-171: a conversation lives on one host. A session or chat id on mac01
+    // means nothing on dev01, so a delivery routed elsewhere starts fresh —
+    // PA-26's agent rule, applied to the machine. NULL is this server, which
+    // is what every row written before the column existed is.
+    if ((cached.host_id ?? null) !== hostId) return false;
     if (cached.agent !== null) return cached.agent === agent;
     const owner = readLastRunAgentForIssue(this.db, cached.webhook_id, cached.issue_key);
     return owner !== null && owner === agent;
@@ -1106,11 +1190,12 @@ export class WebhookService {
     hook: WebhookRow,
     subjectKey: string,
     agent: string,
+    hostId: string | null,
   ): WebhookIssueSessionRow | null {
     if (hook.conversation_mode !== 'per-issue') return null;
     const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
     if (mapped === null) return null;
-    return this.ownsConversation(mapped, agent) ? mapped : null;
+    return this.ownsConversation(mapped, agent, hostId) ? mapped : null;
   }
 
   /**
@@ -1278,15 +1363,18 @@ export class WebhookService {
     sessionId: string | null;
     plannerChatId?: string;
     error: string | null;
+    /** PA-171: a remote dispatch a cap refused, closed as `throttled`. */
+    throttled?: boolean;
   }> {
     const { subjectKey, prompt, cwd } = frozen;
+    const hostId = frozen.hostId ?? null;
     const startedAt = this.now();
     updateWebhookDelivery(this.db, deliveryId, { started_at: startedAt });
     // PA-26: the sink stamps the conversation cache with the agent that is
     // actually running, which is what makes the mismatch below detectable at
     // all — `frozen.agent`, never `hook.agent`, or a label-overridden delivery
     // would cache the configured agent it did not use.
-    const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd, frozen.agent);
+    const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd, frozen.agent, null);
 
     // The saved agent may have been a coding agent that a Jira label moved to a
     // Pocket Agent (or the reverse), so the row's own `agent` is corrected to
@@ -1305,7 +1393,8 @@ export class WebhookService {
     // owner when there was one.
     if (hook.conversation_mode === 'per-issue') {
       const cached = readWebhookIssueSession(this.db, hook.id, subjectKey);
-      if (cached !== null && !this.ownsConversation(cached, frozen.agent)) {
+      if (cached !== null && !this.ownsConversation(cached, frozen.agent, hostId)) {
+        const hostChanged = (cached.host_id ?? null) !== hostId;
         const from =
           cached.agent ??
           readLastRunAgentForIssue(this.db, hook.id, subjectKey) ??
@@ -1317,11 +1406,23 @@ export class WebhookService {
             subject: subjectKey,
             from,
             to: frozen.agent,
+            ...(hostChanged ? { fromHost: cached.host_id ?? 'local', toHost: hostId ?? 'local' } : {}),
           },
-          'webhook per-issue conversation restarted because the agent changed',
+          hostChanged
+            ? 'webhook per-issue conversation restarted because the host changed'
+            : 'webhook per-issue conversation restarted because the agent changed',
         );
+        // PA-171: dropped now rather than by the run's first `remember`, so a
+        // remote dispatch that fails before it has a ref cannot leave the old
+        // host's ids for the next delivery to try.
+        if (hostChanged) deleteWebhookIssueSession(this.db, hook.id, subjectKey);
       }
     }
+
+    // PA-171: a run on another host. Everything above this line — the row's
+    // effective agent, the per-issue restart decision — is identical; what
+    // follows is the remote composite instead of worktree → session → prompt.
+    if (hostId !== null) return this.startRemoteRun(hook, deliveryId, frozen, hostId, startedAt);
 
     // PA-10: a Pocket Agent run. Checked before everything below because none
     // of it applies — the three `per-issue` session cases are about resuming a
@@ -1333,7 +1434,7 @@ export class WebhookService {
       // a `pocket:<id>` label can name a *different* one — whose tools, model
       // and workspace are genuinely another agent's. Resuming across that
       // would be the same bug as resuming across two coding agents.
-      const mapped = this.issueConversationFor(hook, subjectKey, frozen.agent);
+      const mapped = this.issueConversationFor(hook, subjectKey, frozen.agent, null);
       const outcome = await this.executor.startPocketAgent(
         deliveryId,
         {
@@ -1353,7 +1454,7 @@ export class WebhookService {
     const codingSpec = frozen.spec.run;
 
     if (hook.conversation_mode === 'per-issue') {
-      const mapped = this.issueConversationFor(hook, subjectKey, frozen.agent);
+      const mapped = this.issueConversationFor(hook, subjectKey, frozen.agent, null);
       const sameProject = mapped !== null && (mapped.cwd === cwd || isContained(cwd, mapped.cwd));
 
       // Case 1: the conversation is still live in the same project directory.
@@ -1400,6 +1501,206 @@ export class WebhookService {
   }
 
   /**
+   * PA-171: start one delivery on another host through the Hub, and watch it.
+   *
+   * The remote half of `startRun`, reporting into the same row. Three rules
+   * carry it. **No local fallback**: a host that is down, a token the Hub
+   * refuses, a folder the target rejects — each fails this delivery with the
+   * reason, because "route XY to mac01" and "mac01 is down" are different
+   * situations, exactly as an unmapped project is filtered rather than run in
+   * the default `cwd`. **Approval is the target's**: nothing here carries a
+   * skip decision across; whether the run may skip approvals there is that
+   * host's own setting, and the row records what the target actually started
+   * it with. **A cap refusal is `throttled`**, answered 2xx and retryable.
+   */
+  private async startRemoteRun(
+    hook: WebhookRow,
+    deliveryId: string,
+    frozen: FrozenRun,
+    hostId: string,
+    startedAt: number,
+  ): Promise<{ started: boolean; sessionId: string | null; error: string | null; throttled?: boolean }> {
+    const routing = this.opts.webhookRouting;
+    const remote = this.opts.remoteRuns;
+    const fail = (error: string): { started: false; sessionId: null; error: string } => {
+      this.settleDelivery(deliveryId, hook.id, 'failed', error, startedAt);
+      return { started: false, sessionId: null, error };
+    };
+    // Recorded before anything else, so even a refusal below reads as "for
+    // mac01". Skip-permissions is cleared: a remote run is not started with a
+    // bypass from here, and only the target's answer can set it again.
+    updateWebhookDelivery(this.db, deliveryId, {
+      remote_host_id: hostId,
+      skip_permissions_enabled: 0,
+      cwd: frozen.cwd,
+    });
+    if (routing === undefined || remote === undefined || routing.credential() === null) {
+      return fail(
+        `Webhook routing is not set up on this server, so this delivery cannot run on ${hostId}. ` +
+          'Turn webhook routing on for this host on the Hub page.',
+      );
+    }
+    if (!routing.allows(hostId)) {
+      return fail(
+        `This server’s webhooks may not dispatch to ${hostId}. Add it to this host’s webhook routing on the Hub page.`,
+      );
+    }
+    const label = routing.labelFor(hostId);
+    const remember = this.issueRememberer(hook, frozen.subjectKey, startedAt, frozen.cwd, frozen.agent, hostId);
+    const sink = this.remoteSink(deliveryId, hook, startedAt, hostId, remember);
+
+    this.dispatching.add(deliveryId);
+    try {
+      let outcome: RemoteStartOutcome | null = null;
+      // PA-26 on another host: the issue's conversation is already there, so
+      // this is its next turn. The target resumes a finished session itself.
+      const mapped = this.issueConversationFor(hook, frozen.subjectKey, frozen.agent, hostId);
+      const ref =
+        mapped === null
+          ? null
+          : frozen.spec.kind === 'pocket'
+            ? mapped.planner_chat_id !== null
+              ? `chat:${mapped.planner_chat_id}`
+              : null
+            : mapped.session_id !== null
+              ? `session:${mapped.session_id}`
+              : null;
+      if (ref !== null) {
+        outcome = await remote.start(deliveryId, { kind: 'follow-up', hostId, ref, prompt: frozen.prompt }, sink);
+        if (!outcome.ok && outcome.gone) {
+          // The cached conversation no longer exists there. Forget it and
+          // start fresh, rather than failing every later delivery the same way.
+          deleteWebhookIssueSession(this.db, hook.id, frozen.subjectKey);
+          outcome = null;
+        }
+      }
+      outcome ??= await remote.start(deliveryId, this.remoteSpecFor(hook, frozen, hostId), sink);
+      if (outcome.ok) return { started: true, sessionId: null, error: null };
+      const error = `${outcome.error}`;
+      if (outcome.throttled) {
+        this.closeDelivery(hook, deliveryId, 'throttled', error);
+        updateWebhookDelivery(this.db, deliveryId, { error });
+        return { started: false, sessionId: null, error, throttled: true };
+      }
+      this.opts.logger?.warn(
+        { webhook: hook.id, delivery: deliveryId, host: hostId, hostLabel: label },
+        'webhook delivery could not be dispatched to its remote host',
+      );
+      return fail(error);
+    } finally {
+      this.dispatching.delete(deliveryId);
+    }
+  }
+
+  /**
+   * The Hub dispatch for a frozen run. Every field is structured and decided
+   * here: the title is the webhook's name and the validated subject key, the
+   * branch base is minted from the same (the target mints the final name), and
+   * Jira text crosses only inside the already-fenced prompt.
+   */
+  private remoteSpecFor(hook: WebhookRow, frozen: FrozenRun, hostId: string): RemoteStartSpec {
+    const title = `${hook.name} · ${frozen.subjectKey}`.slice(0, 200);
+    if (frozen.spec.kind === 'pocket') {
+      return {
+        kind: 'pocket',
+        hostId,
+        pocketAgentId: frozen.spec.run.plannerWorkspaceId,
+        title,
+        // A Pocket Agent model is a `planner_models` row id on *this* server,
+        // meaningless on the target: the remote Pocket Agent's own default runs.
+        modelId: null,
+        prompt: frozen.prompt,
+      };
+    }
+    const run = frozen.spec.run;
+    return {
+      kind: 'coding',
+      hostId,
+      cwd: frozen.cwd,
+      agent: frozen.agent,
+      title,
+      model: run.model ?? null,
+      // `current-branch` is refused for a remote row at the route; a spec that
+      // still carries it (saved before the row was made remote) runs in place.
+      worktree: run.worktree.mode === 'new-branch' ? 'new-branch' : 'none',
+      branchBase: remoteBranchBase(hook.name, frozen.subjectKey),
+      prompt: frozen.prompt,
+    };
+  }
+
+  /**
+   * How a remote run reports into its delivery row. Built again from the row
+   * alone when a restarted server (or the sweep) resumes waiting, which is why
+   * it takes the webhook as nullable: a deleted webhook's open delivery still
+   * settles.
+   */
+  private remoteSink(
+    deliveryId: string,
+    hook: WebhookRow | null,
+    startedAt: number,
+    hostId: string,
+    remember: ReturnType<WebhookService['issueRememberer']> | null,
+  ): RemoteRunSink {
+    return {
+      onRemoteRef: ({ ref, sessionId, chatId, cwd, state, skipPermissionsEnabled }) => {
+        updateWebhookDelivery(this.db, deliveryId, {
+          status: 'running',
+          remote_host_id: hostId,
+          remote_ref: ref,
+          remote_state: state,
+          session_id: sessionId,
+          planner_chat_id: chatId,
+          ...(cwd !== null ? { cwd } : {}),
+          ...(skipPermissionsEnabled !== null ? { skip_permissions_enabled: skipPermissionsEnabled ? 1 : 0 } : {}),
+        });
+        if (hook !== null) {
+          updateWebhook(this.db, hook.id, {
+            last_delivery_at: startedAt,
+            last_delivery_status: 'running',
+            last_error: null,
+          });
+        }
+        remember?.({
+          ...(sessionId !== null ? { sessionId } : {}),
+          ...(chatId !== null ? { plannerChatId: chatId } : {}),
+          ...(cwd !== null ? { cwd } : {}),
+        });
+      },
+      onRemoteState: (state) => {
+        updateWebhookDelivery(this.db, deliveryId, { remote_state: state });
+      },
+      onSettled: (status, error) => {
+        updateWebhookDelivery(this.db, deliveryId, { remote_state: null });
+        this.settleDelivery(deliveryId, hook?.id ?? null, status, error, startedAt);
+      },
+    };
+  }
+
+  /**
+   * PA-171: the remote half of the sweep. An open remote row with a ref and no
+   * live wait loop is picked back up — that is both the 30 s backstop and how a
+   * restarted server resumes waiting. One with no ref that is not mid-dispatch
+   * never reached its target, and nothing will ever settle it otherwise.
+   */
+  private resumeRemoteRun(row: WebhookDeliveryRow): void {
+    const hostId = row.remote_host_id;
+    if (hostId === null || hostId === undefined) return;
+    if (row.remote_ref === null || row.remote_ref === undefined) {
+      if (this.dispatching.has(row.id)) return;
+      this.settleDelivery(row.id, row.webhook_id, 'failed', row.error ?? `The dispatch to ${hostId} did not complete.`);
+      return;
+    }
+    const remote = this.opts.remoteRuns;
+    if (remote === undefined || remote.isWaiting(row.id)) return;
+    const hook = row.webhook_id !== null ? readWebhook(this.db, row.webhook_id) : null;
+    const remember =
+      hook !== null && row.issue_key !== null
+        ? this.issueRememberer(hook, row.issue_key, row.started_at ?? row.received_at, row.cwd ?? hook.cwd, row.agent, hostId)
+        : null;
+    remote.watch(row.id, hostId, row.remote_ref, this.remoteSink(row.id, hook, row.started_at ?? row.received_at, hostId, remember));
+  }
+
+  /**
    * Correct the delivery row's `agent` to what is actually about to run.
    *
    * `blankRow` copies the webhook's *configured* agent, because the row has to
@@ -1426,13 +1727,27 @@ export class WebhookService {
     resolvedCwd: string,
     /** PA-26: the agent actually running, stamped on the conversation cache. */
     agent: string,
+    /** PA-171: the host it runs on; null = this server. */
+    hostId: string | null,
   ): RunSink {
-    const remember = (patch: {
-      sessionId?: string;
-      agentSessionId?: string;
-      plannerChatId?: string;
-      cwd?: string;
-    }): void => {
+    const remember = this.issueRememberer(hook, issueKey, startedAt, resolvedCwd, agent, hostId);
+    return this.localSink(hook, deliveryId, startedAt, remember);
+  }
+
+  /**
+   * The per-issue cache writer one run uses — shared by the local sink and the
+   * remote one (PA-171), so a remote conversation is remembered by the same
+   * rules: a stale row is dropped, never patched.
+   */
+  private issueRememberer(
+    hook: WebhookRow,
+    issueKey: string,
+    startedAt: number,
+    resolvedCwd: string,
+    agent: string,
+    hostId: string | null,
+  ): (patch: { sessionId?: string; agentSessionId?: string; plannerChatId?: string; cwd?: string }) => void {
+    return (patch) => {
       if (hook.conversation_mode !== 'per-issue') return;
       const cached = readWebhookIssueSession(this.db, hook.id, issueKey);
       // PA-26: a row describing another agent's conversation is not this run's
@@ -1452,7 +1767,7 @@ export class WebhookService {
       // the same test `issueConversationFor` used to decline the row, so a run
       // that is genuinely continuing it (a same-owner resume) still updates in
       // place.
-      const stale = cached !== null && !this.ownsConversation(cached, agent);
+      const stale = cached !== null && !this.ownsConversation(cached, agent, hostId);
       if (stale) deleteWebhookIssueSession(this.db, hook.id, issueKey);
       const existing = stale ? null : cached;
       // `resolvedCwd`, not `hook.cwd`: the routed directory for *this*
@@ -1466,11 +1781,19 @@ export class WebhookService {
         planner_chat_id: patch.plannerChatId ?? existing?.planner_chat_id ?? null,
         agent,
         cwd,
+        host_id: hostId,
         created_at: existing?.created_at ?? startedAt,
         updated_at: startedAt,
       });
     };
+  }
 
+  private localSink(
+    hook: WebhookRow,
+    deliveryId: string,
+    startedAt: number,
+    remember: ReturnType<WebhookService['issueRememberer']>,
+  ): RunSink {
     return {
       onCwd: (cwd) => {
         updateWebhookDelivery(this.db, deliveryId, { cwd });
@@ -1598,6 +1921,9 @@ export class WebhookService {
     if (delivery === null || delivery.issue_key === null || delivery.agent_session_id === null) {
       return;
     }
+    // PA-171: a remote conversation's liveness is the target's to judge; a
+    // gone one is dropped by `startRemoteRun` when the target says so.
+    if ((delivery.remote_host_id ?? null) !== null) return;
     const cached = readWebhookIssueSession(this.db, webhookId, delivery.issue_key);
     if (cached === null) return;
     if (cached.agent_session_id !== delivery.agent_session_id) return;
@@ -1706,6 +2032,11 @@ export class WebhookService {
     return this.queue;
   }
 
+  /** PA-171: the routing store, for the planner's `update_webhook` validation. */
+  get routing(): WebhookRoutingStore | undefined {
+    return this.opts.webhookRouting;
+  }
+
   /** 1-based place in line, or null when this delivery is not waiting. */
   queuePositionOf(deliveryId: string): number | null {
     return this.queue.positionOf(deliveryId);
@@ -1736,7 +2067,7 @@ export class WebhookService {
       // name one conversation, and rendered the issue twice.
       const resumesConversationId =
         hook !== null && hook.conversation_mode === 'per-issue' && row.issue_key !== null
-          ? (this.issueConversationFor(hook, row.issue_key, row.agent)?.agent_session_id ?? null)
+          ? (this.issueConversationFor(hook, row.issue_key, row.agent, null)?.agent_session_id ?? null)
           : null;
       list.push({
         id: row.id,
@@ -2055,6 +2386,10 @@ export class WebhookService {
    * the row open, so this is a delivery still mid-composite.
    */
   private isRunActive(row: WebhookDeliveryRow): boolean {
+    // PA-171: a remote run is active for as long as its row is open — that is
+    // what lets it count against this webhook's own cap. Its liveness is the
+    // target's to report, through the wait loop, never inferred here.
+    if ((row.remote_host_id ?? null) !== null) return true;
     // PA-10: a pocket run has no session, so the "no session yet" shortcut
     // below would make one look active forever — including one parked on an
     // approval that nobody will ever answer after a restart. Liveness for a
@@ -2354,6 +2689,7 @@ export class WebhookService {
       project_map_json: JSON.stringify(spec.type === 'bamboo' ? spec.planMap : spec.projectMap),
       prompt_template_map_json: JSON.stringify(spec.promptTemplateMap ?? []),
       cwd: spec.cwd,
+      host_id: spec.hostId ?? null,
       agent: spec.agent,
       worktree_mode: spec.worktreeMode,
       model: spec.model,
@@ -2409,6 +2745,7 @@ export class WebhookService {
         : {}),
       ...(patch.authMode !== undefined ? { auth_mode: patch.authMode } : {}),
       ...(patch.cwd !== undefined ? { cwd: patch.cwd } : {}),
+      ...(patch.hostId !== undefined ? { host_id: patch.hostId } : {}),
       ...(patch.agent !== undefined ? { agent: patch.agent } : {}),
       ...(patch.worktreeMode !== undefined ? { worktree_mode: patch.worktreeMode } : {}),
       ...(patch.model !== undefined ? { model: patch.model } : {}),
@@ -2953,6 +3290,7 @@ export class WebhookService {
       config,
       cwd: row.cwd,
       workspaceLabel,
+      hostId: row.host_id ?? null,
       agent: row.agent,
       agentDisplayName: this.agentDisplayName(row.agent),
       worktreeMode: row.worktree_mode as 'none' | 'new-branch' | 'current-branch',
@@ -3027,6 +3365,9 @@ export class WebhookService {
       queuePosition: row.status === 'queued' ? this.queue.positionOf(row.id) : null,
       retryOf: row.retry_of ?? null,
       retryProblem: row.webhook_id === null ? 'This webhook has been deleted.' : retryProblem(row),
+      remoteHostId: row.remote_host_id ?? null,
+      remoteRef: row.remote_ref ?? null,
+      remoteState: row.status === 'running' ? ((row.remote_state as WebhookDelivery['remoteState']) ?? null) : null,
     };
   }
 
@@ -3234,6 +3575,22 @@ function scrubSecrets(value: unknown, depth = 0): unknown {
     return out;
   }
   return value;
+}
+
+/**
+ * PA-171: a readable branch base for a remote `new-branch` run, from the
+ * webhook's own name and the *validated* subject key — never Jira text. The
+ * target mints the final, unique name from it (PA-118's repeating-job rule).
+ */
+export function remoteBranchBase(hookName: string, subjectKey: string): string {
+  const base = `${hookName}-${subjectKey}`
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/g, '');
+  return base || 'webhook';
 }
 
 export { DEFAULT_JIRA_PROMPT_TEMPLATE, DEFAULT_BAMBOO_PROMPT_TEMPLATE };

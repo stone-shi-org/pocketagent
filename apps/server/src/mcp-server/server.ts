@@ -18,6 +18,8 @@ import { z } from 'zod';
 import {
   MCP_DEPTH_HEADER,
   MCP_DEPTH_META_KEY,
+  MCP_DISPATCH_ORIGIN_META_KEY,
+  McpDispatchOrigin,
   MCP_MODERN_PROTOCOL_VERSIONS,
   MCP_POCKET_CHAT_RESOURCE_PREFIX,
   MCP_SESSION_RESOURCE_PREFIX,
@@ -408,6 +410,7 @@ export class McpServerService {
             {
               principal,
               depth: Math.max(depth, depthOf(meta?.[MCP_DEPTH_META_KEY])),
+              dispatchOrigin: dispatchOriginOf(principal, meta?.[MCP_DISPATCH_ORIGIN_META_KEY]),
               era,
               protocolVersion,
               signal: ctx.mcpReq.signal,
@@ -644,6 +647,21 @@ function okResult(result: unknown) {
 
 function errorResult(message: string) {
   return { isError: true, content: [{ type: 'text' as const, text: message }] };
+}
+
+/**
+ * PA-171: the dispatch origin a Hub stated for this call, or null.
+ *
+ * Honoured only from a principal a Hub stands behind (`mintedByHubId`): a token
+ * minted with a hub credential, or a hub credential itself. From anyone else —
+ * a token an operator minted for Claude Code, say — the key is ignored outright,
+ * because `_meta` authenticates nothing and the only thing this value decides
+ * is whether a run may skip approvals here.
+ */
+function dispatchOriginOf(principal: McpClientIdentity, raw: unknown): McpDispatchOrigin | null {
+  if (!principal.mintedByHubId || raw === undefined) return null;
+  const parsed = McpDispatchOrigin.safeParse(raw);
+  return parsed.success ? parsed.data : null;
 }
 
 function depthOf(raw: unknown): number {

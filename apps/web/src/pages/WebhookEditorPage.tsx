@@ -16,6 +16,7 @@ import type {
   WebhookDelivery,
   WebhookDeliveryCounts,
   WebhookRouteCacheEntry,
+  WebhookRoutingState,
   WebhookType,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
@@ -46,6 +47,18 @@ import type { WebhookExportData } from '@pocketagent/protocol';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
 import { RetryDeliveryButton, retryOutcomeMessage } from '../components/RetryDeliveryButton.js';
+import {
+  isRemoteHost,
+  remoteCwdProblem,
+  remoteDeliveryRoute,
+  remoteDeliveryStateText,
+  remoteDisclosure,
+  remoteTargetHosts,
+  routingHostLabel,
+  routingHostOptions,
+  serializeMapRow,
+  type RemoteHostLinks,
+} from '../hosts/webhook-remote.js';
 
 interface Props {
   /** `'new'` for an unsaved webhook. */
@@ -55,6 +68,12 @@ interface Props {
   onOpenChat: (conversationId: string) => void;
   /** PA-10: opens a Pocket Agent delivery's chat — its only transcript. */
   onOpenPlannerChat: (chatId: string) => void;
+  /**
+   * PA-171: how a delivery that ran on another host opens there. Absent when
+   * no Hub is answering, in which case such a transcript is not reachable from
+   * this page and the row says so.
+   */
+  remoteHosts?: RemoteHostLinks;
   onDone: () => void;
   onBack?: () => void;
 }
@@ -106,6 +125,12 @@ const BAMBOO_WEBHOOK_TEMPLATE = `{
   "finishedAt": "\${bamboo.date.finished}"
 }`;
 
+/**
+ * One editable map row. `id` is a client-only React key; `hostId` (PA-171) is
+ * absent for this server, exactly as the protocol spells it.
+ */
+type MapRow<K extends string> = { id: string; cwd: string; hostId?: string | undefined } & Record<K, string>;
+
 const csvToList = (raw: string): string[] =>
   raw
     .split(',')
@@ -131,6 +156,7 @@ export function WebhookEditorPage({
   onOpenSession,
   onOpenChat,
   onOpenPlannerChat,
+  remoteHosts,
   onDone,
   onBack,
 }: Props): JSX.Element {
@@ -175,6 +201,10 @@ export function WebhookEditorPage({
   const [enabled, setEnabled] = useState(true);
   const [authMode, setAuthMode] = useState<'hmac' | 'bearer'>('hmac');
   const [cwd, setCwd] = useState('');
+  /** PA-171: the host the top-level `cwd` is on; null = this server. */
+  const [hostId, setHostId] = useState<string | null>(null);
+  /** PA-171: which hosts a target may name. Null on a server without the route, or before it answers. */
+  const [routing, setRouting] = useState<WebhookRoutingState | null>(null);
   const [agent, setAgent] = useState('claude');
   const [promptTemplate, setPromptTemplate] = useState(DEFAULT_JIRA_PROMPT_TEMPLATE);
   const [worktreeMode, setWorktreeMode] = useState<CronWorktreeMode>('new-branch');
@@ -217,7 +247,7 @@ export function WebhookEditorPage({
   const [excludeTriggerReasons, setExcludeTriggerReasons] = useState('');
 
   // ---- Per-plan routing (Bamboo's equivalent of the Jira project map) --------
-  const [planMap, setPlanMap] = useState<{ id: string; planKey: string; cwd: string }[]>([]);
+  const [planMap, setPlanMap] = useState<MapRow<'planKey'>[]>([]);
 
   // ---- Per-build-state prompt template routing (Bamboo) -----------------------
   const [bambooPromptTemplateMap, setBambooPromptTemplateMap] = useState<
@@ -226,9 +256,7 @@ export function WebhookEditorPage({
 
   // ---- Per-project routing ----------------------------------------------------
   // `id` is a client-only key for React's benefit; it never reaches the server.
-  const [projectMap, setProjectMap] = useState<{ id: string; projectKey: string; cwd: string }[]>(
-    [],
-  );
+  const [projectMap, setProjectMap] = useState<MapRow<'projectKey'>[]>([]);
   /**
    * A UI-only concept — the server only ever sees `cwd` and `config.projectMap`,
    * exactly as before. `workspace` and `auto-map` used to be able to coexist
@@ -273,9 +301,13 @@ export function WebhookEditorPage({
       api.listPlannerWorkspaces().catch(() => ({ workspaces: [] as PlannerWorkspace[] })),
       api.listPlannerModels().catch(() => ({ models: [] as PlannerModel[] })),
       api.listPlannerProviders().catch(() => ({ providers: [] as PlannerProvider[] })),
+      // PA-171: tolerated like the two above — a server predating webhook
+      // routing answers 404, and the editor then looks exactly as it did.
+      api.getWebhookRouting().catch(() => null),
     ])
-      .then(([a, w, p, hook, pocket, pm, pp]) => {
+      .then(([a, w, p, hook, pocket, pm, pp, rt]) => {
         if (cancelled) return;
+        setRouting(rt);
         setAgents(a.agents);
         setPocketAgents(pocket.workspaces);
         setPlannerModels(pm.models);
@@ -312,6 +344,7 @@ export function WebhookEditorPage({
       setEnabled(hook.enabled);
       setAuthMode(hook.authMode);
       setCwd(hook.cwd);
+      setHostId(hook.hostId ?? null);
       setAgent(hook.agent);
       setPromptTemplate(hook.promptTemplate);
       setWorktreeMode(hook.worktreeMode);
@@ -337,7 +370,12 @@ export function WebhookEditorPage({
         setNotificationTypes((f.notificationTypes ?? []).join(', '));
         setExcludeTriggerReasons((f.excludeTriggerReasons ?? []).join(', '));
         setPlanMap(
-          hook.config.planMap.map((e) => ({ id: crypto.randomUUID(), planKey: e.planKey, cwd: e.cwd })),
+          hook.config.planMap.map((e) => ({
+            id: crypto.randomUUID(),
+            planKey: e.planKey,
+            cwd: e.cwd,
+            hostId: e.hostId,
+          })),
         );
         setDirectoryMode(hook.config.planMap.length > 0 ? 'auto-map' : 'workspace');
         setBambooPromptTemplateMap(
@@ -367,6 +405,7 @@ export function WebhookEditorPage({
           id: crypto.randomUUID(),
           projectKey: e.projectKey,
           cwd: e.cwd,
+          hostId: e.hostId,
         })),
       );
       setDirectoryMode(hook.config.projectMap.length > 0 ? 'auto-map' : 'workspace');
@@ -470,13 +509,16 @@ export function WebhookEditorPage({
     // directory to check (each mapped project has its own, validated
     // server-side at save time), so this must not nag based on it.
     if (directoryMode === 'auto-map') return true;
+    // PA-171: a path on another host says nothing about this server's folder
+    // of the same name; that host checks it when the run starts.
+    if (isRemoteHost(routing, hostId)) return true;
     const ws = workspaces.find((w) => w.path === cwd);
     if (ws !== undefined) return ws.isGitRepo;
     const proj = flatProjects.find((p) => p.cwd === cwd);
     // Unknown means "do not nag": a directory neither list knows about is not
     // evidence that it is not a repo.
     return proj?.isGitRepo ?? true;
-  }, [directoryMode, cwd, workspaces, flatProjects]);
+  }, [directoryMode, cwd, workspaces, flatProjects, routing, hostId]);
 
   useEffect(() => {
     // Fall back rather than letting the user save something that cannot work.
@@ -543,7 +585,7 @@ export function WebhookEditorPage({
   };
   const updateProjectRoute = (
     id: string,
-    patch: Partial<{ projectKey: string; cwd: string }>,
+    patch: Partial<Omit<MapRow<'projectKey'>, 'id'>>,
   ): void => {
     setProjectMap((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   };
@@ -552,9 +594,9 @@ export function WebhookEditorPage({
   const cleanedProjectMap = useMemo(
     () =>
       projectMap
-        .map((r) => ({ projectKey: r.projectKey.trim().toUpperCase(), cwd: r.cwd }))
+        .map((r) => serializeMapRow(routing, 'projectKey', r.projectKey.trim().toUpperCase(), r.cwd.trim(), r.hostId))
         .filter((r) => r.projectKey !== '' && r.cwd !== ''),
-    [projectMap],
+    [projectMap, routing],
   );
 
   /** The one thing Save must refuse — mirrors the route's own duplicate check. */
@@ -625,15 +667,15 @@ export function WebhookEditorPage({
   const removePlanRoute = (id: string): void => {
     setPlanMap((prev) => prev.filter((r) => r.id !== id));
   };
-  const updatePlanRoute = (id: string, patch: Partial<{ planKey: string; cwd: string }>): void => {
+  const updatePlanRoute = (id: string, patch: Partial<Omit<MapRow<'planKey'>, 'id'>>): void => {
     setPlanMap((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   };
   const cleanedPlanMap = useMemo(
     () =>
       planMap
-        .map((r) => ({ planKey: r.planKey.trim().toUpperCase(), cwd: r.cwd }))
+        .map((r) => serializeMapRow(routing, 'planKey', r.planKey.trim().toUpperCase(), r.cwd.trim(), r.hostId))
         .filter((r) => r.planKey !== '' && r.cwd !== ''),
-    [planMap],
+    [planMap, routing],
   );
   const planMapDuplicate = useMemo(() => {
     const seen = new Set<string>();
@@ -679,6 +721,55 @@ export function WebhookEditorPage({
   }, [cleanedBambooPromptTemplateMap]);
   const effectiveBambooPromptTemplateMap =
     promptTemplateMode === 'by-issue-type' ? cleanedBambooPromptTemplateMap : [];
+
+  // ---- PA-171: remote targets ------------------------------------------------
+  /**
+   * Empty unless this host's routing is configured (or a saved row already
+   * names a host), which is what keeps a standalone install's editor looking
+   * exactly as it did before remote targets existed.
+   */
+  const hostOptions = useMemo(
+    () =>
+      routingHostOptions(routing, [
+        hostId,
+        ...(type === 'bamboo' ? planMap : projectMap).map((r) => r.hostId),
+      ]),
+    [routing, hostId, type, planMap, projectMap],
+  );
+  const showHostPicker = hostOptions.length > 0;
+  const hostSelectOptions = useMemo(
+    () => [{ value: '', label: 'This server' }, ...hostOptions],
+    [hostOptions],
+  );
+  const hostLabel = (id: string): string => routingHostLabel(routing, id);
+  const topIsRemote = isRemoteHost(routing, hostId);
+  const remoteTargets = remoteTargetHosts(
+    routing,
+    directoryMode,
+    hostId,
+    type === 'bamboo' ? planMap : projectMap,
+  );
+  const remoteLines = remoteDisclosure(
+    remoteTargets.map(hostLabel),
+    isPocketAgent ? 'none' : worktreeMode,
+  );
+  const localDirValues = useMemo(() => new Set(dirOptions.map((o) => o.value)), [dirOptions]);
+
+  /**
+   * Moving a target between machines keeps its path only where the path is
+   * still meaningful: a local folder may well exist at the same path over
+   * there, but a remote path that is not one of this server's folders would
+   * leave the local picker showing one value while saving another.
+   */
+  const changeTopHost = (next: string): void => {
+    const nextHost = next === '' ? null : next;
+    setHostId(nextHost);
+    if (!isRemoteHost(routing, nextHost) && !localDirValues.has(cwd)) setCwd(dirOptions[0]?.value ?? '');
+  };
+  const rowHostPatch = (row: { cwd: string }, next: string): { hostId: string | undefined; cwd?: string } =>
+    next === '' || !isRemoteHost(routing, next)
+      ? { hostId: undefined, ...(localDirValues.has(row.cwd) ? {} : { cwd: '' }) }
+      : { hostId: next };
 
   const slugProblem =
     slug.trim() === '' ? null : WEBHOOK_SLUG_RE.test(slug.trim()) ? null : 'Lowercase letters, digits and dashes only.';
@@ -741,6 +832,31 @@ export function WebhookEditorPage({
         return;
       }
     }
+    if (remoteTargets.length > 0 && !isPocketAgent && worktreeMode === 'current-branch') {
+      const msg = 'A worktree on the current branch cannot run on another host. Pick a new worktree per delivery or the project directory itself.';
+      setError(msg);
+      setSaveStatus({ type: 'error', message: msg });
+      return;
+    }
+    {
+      // The server refuses a relative remote path too; checking here names the row.
+      const remoteRows: { label: string; cwd: string }[] = [];
+      if (topIsRemote && directoryMode === 'workspace') remoteRows.push({ label: 'The project directory', cwd });
+      if (directoryMode === 'auto-map') {
+        for (const r of type === 'bamboo' ? cleanedPlanMap : cleanedProjectMap) {
+          if (r.hostId) remoteRows.push({ label: 'planKey' in r ? r.planKey : r.projectKey, cwd: r.cwd });
+        }
+      }
+      for (const r of remoteRows) {
+        const problem = r.cwd.trim() === '' ? 'Enter an absolute path on that host.' : remoteCwdProblem(r.cwd);
+        if (problem !== null) {
+          const msg = `${r.label}: ${problem}`;
+          setError(msg);
+          setSaveStatus({ type: 'error', message: msg });
+          return;
+        }
+      }
+    }
     setBusy(true);
     setError(null);
 
@@ -762,7 +878,10 @@ export function WebhookEditorPage({
               promptTemplateMap: effectivePromptTemplateMap,
             },
       authMode,
-      cwd,
+      cwd: topIsRemote ? cwd.trim() : cwd,
+      // PA-171: `null` rather than omitted, so moving the target back to this
+      // server on an existing webhook actually clears the stored host.
+      hostId: topIsRemote ? hostId : null,
       agent,
       promptTemplate,
       // PA-10: a Pocket Agent run has no project checkout to branch, so saving
@@ -908,6 +1027,7 @@ export function WebhookEditorPage({
             id: crypto.randomUUID(),
             planKey: e.planKey,
             cwd: e.cwd,
+            hostId: e.hostId,
           })),
         );
         if (res.webhook.config.planMap.length > 0) setDirectoryMode('auto-map');
@@ -917,6 +1037,7 @@ export function WebhookEditorPage({
             id: crypto.randomUUID(),
             projectKey: e.projectKey,
             cwd: e.cwd,
+            hostId: e.hostId,
           })),
         );
         if (res.webhook.config.projectMap.length > 0) setDirectoryMode('auto-map');
@@ -958,7 +1079,18 @@ export function WebhookEditorPage({
     }
   };
 
+  /** PA-171: the remote host's name, preferring the directory's, then the routing list's. */
+  const deliveryHostLabel = (hubHostId: string): string => remoteHosts?.label(hubHostId) ?? hostLabel(hubHostId);
+
   const openDelivery = (d: WebhookDelivery): void => {
+    // PA-171 first: a dispatched delivery's ids are ids on *that* host, so
+    // opening them here would show this host's session of the same id, or none.
+    if (d.remoteHostId !== null) {
+      const route = remoteDeliveryRoute(d);
+      const routingId = remoteHosts?.routingId(d.remoteHostId) ?? null;
+      if (route !== null && routingId !== null) remoteHosts?.open(routingId, route);
+      return;
+    }
     // PA-10: a Pocket Agent delivery has exactly one place to go and no tiers
     // to fall back through — the chat *is* the transcript, live or finished —
     // so it is checked first and independently of the session rule below.
@@ -2020,15 +2152,38 @@ export function WebhookEditorPage({
             }
             onChange={(v) => setDirectoryMode(v as 'workspace' | 'auto-map')}
           />
-          {directoryMode === 'workspace' && (
+          {directoryMode === 'workspace' && showHostPicker && (
             <SelectRowNative
               busy={busy}
-              label="Project"
-              value={cwd}
-              options={dirOptions}
-              onChange={setCwd}
+              label="Host"
+              value={topIsRemote ? (hostId ?? '') : ''}
+              options={hostSelectOptions}
+              help="Which agent server runs every delivery. Another host is reached through the Hub."
+              onChange={changeTopHost}
             />
           )}
+          {directoryMode === 'workspace' &&
+            (topIsRemote && hostId !== null ? (
+              // This server cannot browse that machine's folders, so the path is
+              // typed — and checked against that host's own folders when it runs.
+              <TextRow
+                label="Project"
+                mono
+                placeholder="/absolute/path/on/that/host"
+                value={cwd}
+                busy={busy}
+                help={remoteCwdProblem(cwd) ?? `Validated on ${hostLabel(hostId)} when it runs.`}
+                onChange={setCwd}
+              />
+            ) : (
+              <SelectRowNative
+                busy={busy}
+                label="Project"
+                value={cwd}
+                options={dirOptions}
+                onChange={setCwd}
+              />
+            ))}
           {!isPocketAgent && (
             <SelectRowNative
               busy={busy || !selectedIsRepo}
@@ -2038,7 +2193,13 @@ export function WebhookEditorPage({
                 selectedIsRepo
                   ? [
                       { value: 'new-branch', label: 'A new worktree per delivery' },
-                      { value: 'current-branch', label: 'A worktree on the current branch' },
+                      {
+                        value: 'current-branch',
+                        label:
+                          remoteTargets.length > 0
+                            ? 'A worktree on the current branch (this server only)'
+                            : 'A worktree on the current branch',
+                      },
                       { value: 'none', label: 'The project directory itself' },
                     ]
                   : [{ value: 'none', label: 'The project directory itself' }]
@@ -2052,6 +2213,16 @@ export function WebhookEditorPage({
               }
               onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
             />
+          )}
+          {remoteLines.length > 0 && (
+            // Standing, not a one-off notice: the approval boundary for these
+            // runs is on a different machine, which nothing else on this page
+            // would tell you.
+            <div className="warn-callout" role="note">
+              {remoteLines.map((line) => (
+                <p key={line}>{line}</p>
+              ))}
+            </div>
           )}
           {!isPocketAgent && !selectedIsRepo && skipPermissions && (
             // The one containment boundary is unavailable here, and the approval
@@ -2175,22 +2346,51 @@ export function WebhookEditorPage({
                     aria-label="Bamboo plan key"
                     onChange={(e) => updatePlanRoute(row.id, { planKey: e.target.value })}
                   />
-                  <select
-                    className="settings-select project-map-dir"
-                    value={row.cwd}
-                    disabled={busy}
-                    aria-label="Directory"
-                    onChange={(e) => updatePlanRoute(row.id, { cwd: e.target.value })}
-                  >
-                    <option value="" disabled>
-                      Choose a directory
-                    </option>
-                    {dirOptions.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
+                  {showHostPicker && (
+                    <select
+                      className="settings-select project-map-host"
+                      value={isRemoteHost(routing, row.hostId) ? row.hostId : ''}
+                      disabled={busy}
+                      aria-label="Host"
+                      onChange={(e) => updatePlanRoute(row.id, rowHostPatch(row, e.target.value))}
+                    >
+                      {hostSelectOptions.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {isRemoteHost(routing, row.hostId) ? (
+                    <input
+                      type="text"
+                      className="settings-input mono project-map-dir"
+                      value={row.cwd}
+                      placeholder="/absolute/path/on/that/host"
+                      disabled={busy}
+                      spellCheck={false}
+                      aria-label={`Directory on ${hostLabel(row.hostId)}`}
+                      title={`Validated on ${hostLabel(row.hostId)} when it runs`}
+                      onChange={(e) => updatePlanRoute(row.id, { cwd: e.target.value })}
+                    />
+                  ) : (
+                    <select
+                      className="settings-select project-map-dir"
+                      value={row.cwd}
+                      disabled={busy}
+                      aria-label="Directory"
+                      onChange={(e) => updatePlanRoute(row.id, { cwd: e.target.value })}
+                    >
+                      <option value="" disabled>
+                        Choose a directory
                       </option>
-                    ))}
-                  </select>
+                      {dirOptions.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     type="button"
                     className="round-btn project-map-remove"
@@ -2201,6 +2401,11 @@ export function WebhookEditorPage({
                     <Icon name="close" size={16} />
                   </button>
                 </div>
+                {isRemoteHost(routing, row.hostId) && (
+                  <p className="transport-hint">
+                    {remoteCwdProblem(row.cwd) ?? `Validated on ${hostLabel(row.hostId)} when it runs.`}
+                  </p>
+                )}
               </div>
             ))}
             <button type="button" disabled={busy} onClick={addPlanRoute}>
@@ -2241,22 +2446,51 @@ export function WebhookEditorPage({
                     aria-label="Jira project key"
                     onChange={(e) => updateProjectRoute(row.id, { projectKey: e.target.value })}
                   />
-                  <select
-                    className="settings-select project-map-dir"
-                    value={row.cwd}
-                    disabled={busy}
-                    aria-label="Directory"
-                    onChange={(e) => updateProjectRoute(row.id, { cwd: e.target.value })}
-                  >
-                    <option value="" disabled>
-                      Choose a directory
-                    </option>
-                    {dirOptions.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
+                  {showHostPicker && (
+                    <select
+                      className="settings-select project-map-host"
+                      value={isRemoteHost(routing, row.hostId) ? row.hostId : ''}
+                      disabled={busy}
+                      aria-label="Host"
+                      onChange={(e) => updateProjectRoute(row.id, rowHostPatch(row, e.target.value))}
+                    >
+                      {hostSelectOptions.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {isRemoteHost(routing, row.hostId) ? (
+                    <input
+                      type="text"
+                      className="settings-input mono project-map-dir"
+                      value={row.cwd}
+                      placeholder="/absolute/path/on/that/host"
+                      disabled={busy}
+                      spellCheck={false}
+                      aria-label={`Directory on ${hostLabel(row.hostId)}`}
+                      title={`Validated on ${hostLabel(row.hostId)} when it runs`}
+                      onChange={(e) => updateProjectRoute(row.id, { cwd: e.target.value })}
+                    />
+                  ) : (
+                    <select
+                      className="settings-select project-map-dir"
+                      value={row.cwd}
+                      disabled={busy}
+                      aria-label="Directory"
+                      onChange={(e) => updateProjectRoute(row.id, { cwd: e.target.value })}
+                    >
+                      <option value="" disabled>
+                        Choose a directory
                       </option>
-                    ))}
-                  </select>
+                      {dirOptions.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     type="button"
                     className="round-btn project-map-remove"
@@ -2267,6 +2501,11 @@ export function WebhookEditorPage({
                     <Icon name="close" size={16} />
                   </button>
                 </div>
+                {isRemoteHost(routing, row.hostId) && (
+                  <p className="transport-hint">
+                    {remoteCwdProblem(row.cwd) ?? `Validated on ${hostLabel(row.hostId)} when it runs.`}
+                  </p>
+                )}
               </div>
             ))}
             <button type="button" disabled={busy} onClick={addProjectRoute}>
@@ -2520,8 +2759,15 @@ export function WebhookEditorPage({
             ) : (
               <div className="webhook-history-panel" style={{ border: 'none', background: 'transparent' }}>
                 {visibleDeliveries.map((d) => {
+                  const remoteLabel = d.remoteHostId !== null ? deliveryHostLabel(d.remoteHostId) : null;
+                  const remoteRoute = remoteDeliveryRoute(d);
+                  const remoteReachable =
+                    d.remoteHostId !== null && remoteRoute !== null && (remoteHosts?.routingId(d.remoteHostId) ?? null) !== null;
+                  const remoteState = remoteLabel !== null ? remoteDeliveryStateText(d, remoteLabel) : null;
                   const openable =
-                    d.sessionId !== null || d.agentSessionId !== null || d.plannerChatId !== null;
+                    d.remoteHostId !== null
+                      ? remoteReachable
+                      : d.sessionId !== null || d.agentSessionId !== null || d.plannerChatId !== null;
                   return (
                     <div key={d.id} className={`history-row${DID_NOT_RUN.has(d.status) ? ' inert' : ''}`}>
                       <button
@@ -2531,12 +2777,23 @@ export function WebhookEditorPage({
                         onClick={() => openDelivery(d)}
                         title={
                           openable
-                            ? 'Open this delivery’s transcript'
-                            : (d.reason ?? 'No transcript available')
+                            ? remoteLabel !== null
+                              ? `Open this delivery’s transcript on ${remoteLabel}`
+                              : 'Open this delivery’s transcript'
+                            : remoteLabel !== null && remoteRoute !== null
+                              ? `Ran on ${remoteLabel} — open it through the Hub`
+                              : (d.reason ?? 'No transcript available')
                         }
                       >
                         <div className="history-row-primary">
                           <WebhookStatusIcon status={d.status} />
+
+                          {remoteLabel !== null && (
+                            <span className="history-host-tag" title={`Ran on ${remoteLabel}`}>
+                              {remoteLabel}
+                            </span>
+                          )}
+                          {remoteState !== null && <span className="history-remote-state">{remoteState}</span>}
 
                           {d.issueKey && (
                             <span className="jira-issue-badge">{d.issueKey}</span>
@@ -2568,6 +2825,11 @@ export function WebhookEditorPage({
 
                         <div className="history-row-secondary">
                           <span className="history-row-time">{formatRelative(d.receivedAt)}</span>
+                          {d.remoteRef !== null && !remoteReachable && (
+                            <span className="delivery-reason">
+                              <code>{d.remoteRef}</code> on {remoteLabel} — open through the Hub
+                            </span>
+                          )}
                           {d.reason !== null && <span className="delivery-reason">{d.reason}</span>}
                           {d.error !== null && <span className="history-row-error">{d.error}</span>}
                         </div>

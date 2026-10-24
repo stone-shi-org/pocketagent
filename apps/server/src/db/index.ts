@@ -465,6 +465,34 @@ const WEBHOOK_ROUTE_CACHE_DDL = `
  * silently depended on the migration under test being the last one in the
  * array — and broke the moment another was appended (PA-10).
  */
+/**
+ * PA-171's columns, named once because they are added twice — by the migration
+ * below and by `openDatabase`'s positional-migration repair.
+ *
+ * - `webhooks.host_id`: the host the top-level `cwd` is on.
+ * - `webhook_deliveries.remote_host_id` / `remote_ref` / `remote_state`: where a
+ *   remote run went (`session:<id>` / `chat:<id>` on that host) and what the
+ *   last Hub `wait` reported while it is open. A row with `remote_ref` set is
+ *   *not* a dead server's leftover at boot: the work lives on another machine,
+ *   so `markStaleWebhookDeliveriesFailed` leaves it alone and the service
+ *   resumes waiting on it.
+ * - `webhook_issue_sessions.host_id`: the host a per-issue conversation lives
+ *   on. A session id is not portable across hosts, so a host change is treated
+ *   like PA-26's agent change: the row is dropped and the next run starts fresh.
+ * - `mcp_client_tokens.minted_by_hub_id`: the hub credential that minted this
+ *   token, if one did. Only such a token (or a hub credential itself) may carry
+ *   a Hub-stated `MCP_DISPATCH_ORIGIN_META_KEY`; for every other principal the
+ *   key is ignored.
+ */
+const PA171_REMOTE_WEBHOOK_COLUMNS: readonly { table: string; column: string }[] = [
+  { table: 'webhooks', column: 'host_id' },
+  { table: 'webhook_deliveries', column: 'remote_host_id' },
+  { table: 'webhook_deliveries', column: 'remote_ref' },
+  { table: 'webhook_deliveries', column: 'remote_state' },
+  { table: 'webhook_issue_sessions', column: 'host_id' },
+  { table: 'mcp_client_tokens', column: 'minted_by_hub_id' },
+];
+
 export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE IF NOT EXISTS sessions (
@@ -1742,6 +1770,12 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_workspaces ADD COLUMN starter_prompts_json TEXT;
   `,
+
+  // PA-171: webhook routing to another agent server through the Hub.
+  // Every column is nullable and NULL means "this server" (or, for
+  // `minted_by_hub_id`, "not minted by a Hub"), so upgrading changes nothing
+  // about an existing webhook, delivery, per-issue conversation or token.
+  PA171_REMOTE_WEBHOOK_COLUMNS.map((c) => `ALTER TABLE ${c.table} ADD COLUMN ${c.column} TEXT;`).join('\n'),
 ];
 
 /**
@@ -2347,6 +2381,15 @@ export function openDatabase(databasePath: string): Db {
     db.exec("ALTER TABLE webhooks ADD COLUMN auto_route TEXT NOT NULL DEFAULT 'off'");
   }
   db.exec(WEBHOOK_ROUTE_CACHE_DDL);
+  // PA-171, same positional-migration hazard: every remote-routing column.
+  for (const { table, column } of PA171_REMOTE_WEBHOOK_COLUMNS) {
+    const columns = new Set(
+      (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name),
+    );
+    if (columns.size > 0 && !columns.has(column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+    }
+  }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
@@ -2908,6 +2951,8 @@ export interface McpClientTokenRow {
   created_at: number;
   last_seen_at: number | null;
   last_seen_ip: string | null;
+  /** PA-171: the hub credential that minted this token, if a Hub did. */
+  minted_by_hub_id?: string | null;
 }
 
 export interface McpOwnedWorkRow {
@@ -3082,6 +3127,11 @@ export interface WebhookRow {
    * row builders that predate it need not name it (defaults to `'off'`).
    */
   auto_route?: string;
+  /**
+   * PA-171: the Hub host id the top-level `cwd` lives on; NULL = this server.
+   * Optional on insert for the same reason `auto_route` is.
+   */
+  host_id?: string | null;
   max_concurrent: number;
   store_payloads: number;
   created_at: number;
@@ -3153,6 +3203,12 @@ export interface WebhookDeliveryRow {
    * on insert so the many row builders that predate it need not name it.
    */
   retry_of?: string | null;
+  /** PA-171: the host this run was dispatched to; NULL for a run on this server. */
+  remote_host_id?: string | null;
+  /** PA-171: `session:<id>` / `chat:<id>` on `remote_host_id`. */
+  remote_ref?: string | null;
+  /** PA-171: `queued` | `running` | `awaiting_approval`, while open. */
+  remote_state?: string | null;
 }
 
 export interface WebhookIssueSessionRow {
@@ -3176,6 +3232,12 @@ export interface WebhookIssueSessionRow {
    */
   agent: string | null;
   cwd: string;
+  /**
+   * PA-171: the Hub host id this conversation lives on; NULL = this server.
+   * When set, `session_id` / `planner_chat_id` are ids on that host.
+   * Optional on insert so row builders that predate it need not name it.
+   */
+  host_id?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -3266,16 +3328,16 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
        secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent, worktree_mode, model, effort,
        effort_set, skip_permissions, auto_select_agent_model, prompt_template, conversation_mode,
-       overlap_policy, directory_policy, skip_queue_label_enabled, agent_identity, auto_route, max_concurrent, store_payloads,
+       overlap_policy, directory_policy, skip_queue_label_enabled, agent_identity, auto_route, host_id, max_concurrent, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
        @secret_set_at, @filter_json, @project_map_json, @prompt_template_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
        @effort_set, @skip_permissions, @auto_select_agent_model, @prompt_template, @conversation_mode,
-       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @agent_identity, @auto_route, @max_concurrent, @store_payloads,
+       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @agent_identity, @auto_route, @host_id, @max_concurrent, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error
      )`,
-  ).run({ ...row, auto_route: row.auto_route ?? 'off' });
+  ).run({ ...row, auto_route: row.auto_route ?? 'off', host_id: row.host_id ?? null });
 }
 
 /** Columns `updateWebhook` is allowed to write. `id`/`created_at` are immutable. */
@@ -3317,16 +3379,24 @@ export function insertWebhookDelivery(db: Db, row: WebhookDeliveryRow): void {
        signature_state, skip_permissions_enabled, queue_skipped_by_label, payload_json, payload_bytes,
        payload_truncated, rendered_prompt, reason, received_at, started_at,
        finished_at, session_id, agent_session_id, planner_chat_id, cwd, error,
-       queue_key, queued_at, queued_spec_json, retry_of
+       queue_key, queued_at, queued_spec_json, retry_of,
+       remote_host_id, remote_ref, remote_state
      ) VALUES (
        @id, @webhook_id, @webhook_name, @agent, @status, @trigger, @body_hash,
        @delivery_header, @event, @event_type, @issue_key, @project_key, @actor,
        @signature_state, @skip_permissions_enabled, @queue_skipped_by_label, @payload_json, @payload_bytes,
        @payload_truncated, @rendered_prompt, @reason, @received_at, @started_at,
        @finished_at, @session_id, @agent_session_id, @planner_chat_id, @cwd, @error,
-       @queue_key, @queued_at, @queued_spec_json, @retry_of
+       @queue_key, @queued_at, @queued_spec_json, @retry_of,
+       @remote_host_id, @remote_ref, @remote_state
      )`,
-  ).run({ ...row, retry_of: row.retry_of ?? null });
+  ).run({
+    ...row,
+    retry_of: row.retry_of ?? null,
+    remote_host_id: row.remote_host_id ?? null,
+    remote_ref: row.remote_ref ?? null,
+    remote_state: row.remote_state ?? null,
+  });
 }
 
 export function updateWebhookDelivery(
@@ -3391,8 +3461,14 @@ export function readActiveWebhookDeliveries(db: Db, webhookId?: string): Webhook
 
 /** How many deliveries are mid-run right now, across every webhook. */
 export function countActiveWebhookDeliveries(db: Db): number {
+  // PA-171: a remote run holds no session *here*, so it does not spend this
+  // server's session budget — the global cap exists to keep local slots free
+  // for a human. It still counts against its own webhook's `max_concurrent`
+  // (`capReason` reads those rows directly), and the target's caps apply there.
   const row = db
-    .prepare(`SELECT COUNT(*) AS n FROM webhook_deliveries WHERE ${OPEN_DELIVERY}`)
+    .prepare(
+      `SELECT COUNT(*) AS n FROM webhook_deliveries WHERE ${OPEN_DELIVERY} AND remote_host_id IS NULL`,
+    )
     .get() as { n: number };
   return row.n;
 }
@@ -3465,7 +3541,11 @@ export function markStaleWebhookDeliveriesFailed(db: Db, now = Date.now()): numb
          SET status = 'failed',
              finished_at = COALESCE(finished_at, ?),
              error = COALESCE(error, 'The server restarted while this delivery was in progress.')
-       WHERE ${OPEN_DELIVERY}`,
+       WHERE ${OPEN_DELIVERY}
+         -- PA-171: a remote run's work is on another machine and survived this
+         -- restart; the service resumes waiting on it from \`remote_ref\`. One
+         -- still mid-dispatch (no ref yet) did die with this server, so it fails.
+         AND remote_ref IS NULL`,
     )
     .run(now).changes;
 }
@@ -3601,9 +3681,9 @@ export function readWebhookIssueSession(
 export function upsertWebhookIssueSession(db: Db, row: WebhookIssueSessionRow): void {
   db.prepare(
     `INSERT INTO webhook_issue_sessions (
-       webhook_id, issue_key, agent_session_id, session_id, planner_chat_id, agent, cwd, created_at, updated_at
+       webhook_id, issue_key, agent_session_id, session_id, planner_chat_id, agent, cwd, host_id, created_at, updated_at
      ) VALUES (
-       @webhook_id, @issue_key, @agent_session_id, @session_id, @planner_chat_id, @agent, @cwd, @created_at, @updated_at
+       @webhook_id, @issue_key, @agent_session_id, @session_id, @planner_chat_id, @agent, @cwd, @host_id, @created_at, @updated_at
      )
      ON CONFLICT (webhook_id, issue_key) DO UPDATE SET
        agent_session_id = COALESCE(excluded.agent_session_id, agent_session_id),
@@ -3619,8 +3699,12 @@ export function upsertWebhookIssueSession(db: Db, row: WebhookIssueSessionRow): 
        -- handle and a dead session has to stop looking alive.
        planner_chat_id  = COALESCE(excluded.planner_chat_id, planner_chat_id),
        cwd              = excluded.cwd,
+       -- PA-171: never COALESCEd. A row whose host differs from the run's is
+       -- deleted before this upsert (\`ownsConversation\`), so the host written
+       -- here is always the run's own, and NULL (local) must be writable.
+       host_id          = excluded.host_id,
        updated_at       = excluded.updated_at`,
-  ).run(row);
+  ).run({ ...row, host_id: row.host_id ?? null });
 }
 
 /**

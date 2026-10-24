@@ -29,7 +29,15 @@
  *      a coding agent is) lists only mac01, is refused on dev01 naming it,
  *      dispatches to mac01 itself, and the target's approval arrives by push.
  *      Revoking the token on the page stops its very next call.
- *   8. The phone viewport shows the Fleet card and the host sheet's Fleet entry.
+ *   8. PA-171: dev01's webhooks are allowed to dispatch to mac01 on the Hub. One
+ *      Jira webhook on dev01 — PA → dev01's own folder, XY → mac01 — runs PA
+ *      locally and XY on mac01, from one URL. A Pocket Agent webhook routed to
+ *      mac01 parks on mac01's approval (its delivery stays `running`), the
+ *      approval arrives by push deep-linked to mac01, is answered there, and
+ *      the delivery settles `succeeded`; the issue's next delivery continues
+ *      the same chat on mac01. Routing switched off, and the Hub down, each
+ *      fail a delivery with its own reason and never run it on dev01.
+ *   9. The phone viewport shows the Fleet card and the host sheet's Fleet entry.
  *
  * `pnpm build` first. Run with: pnpm demo:fleet
  */
@@ -42,7 +50,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium, devices } from 'playwright';
-import { HUB_FLEET_TOOL_NAMES } from '@pocketagent/protocol';
+import { HUB_FLEET_TOOL_NAMES, JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
 
 let step = 0;
 let failures = 0;
@@ -649,6 +657,137 @@ async function main() {
   check(afterRevoke === 'refused', 'revoked on the page, its very next call is refused', afterRevoke);
   await mcp.close().catch(() => undefined);
 
+  heading('PA-171 — one Jira webhook on dev01, runs routed to mac01 through the Hub');
+  const routed = await hub('/api/hub/webhook-routing/dev01', {
+    method: 'PUT',
+    body: JSON.stringify({ hubUrl: HUB, allowedHosts: ['mac01'] }),
+  });
+  const routedRow = routed.body?.hosts?.find((h) => h.hostId === 'dev01');
+  check(routed.status === 200 && routedRow?.state === 'routed', 'webhook routing on for dev01 → mac01', JSON.stringify(routedRow));
+  const devRouting = (await onBackend(dev01, 'GET', '/api/webhook-routing')).body;
+  check(
+    devRouting.configured === true && JSON.stringify(devRouting.hosts.map((h) => h.id)) === '["mac01"]',
+    'dev01 holds the routing token (prefix only on its API) and may name mac01',
+    `${devRouting.tokenPrefix}…`,
+  );
+  const tokenRow = (await hub('/api/hub/mcp/tokens')).body.tokens.find((t) => t.kind === 'webhook');
+  check(
+    tokenRow?.scopes?.join(',') === 'dispatch' && JSON.stringify(tokenRow.hosts) === '["mac01"]',
+    'the Hub lists it as a webhook token: dispatch only, mac01 only',
+    JSON.stringify(tokenRow),
+  );
+
+  const devWorkspace = path.join(scratch, 'dev01', 'workspace');
+  const macWorkspace = path.join(scratch, 'mac01', 'workspace');
+  const signedDelivery = async (slug, secret, issueKey, extra = {}) => {
+    const sample = structuredClone(JIRA_SAMPLE_PAYLOAD);
+    sample.issue.key = issueKey;
+    sample.issue.fields.project.key = issueKey.split('-')[0];
+    const body = JSON.stringify({ ...sample, timestamp: Date.now(), ...extra });
+    const signature = `sha256=${crypto.createHmac('sha256', secret).update(body).digest('hex')}`;
+    const res = await fetch(`${dev01.baseUrl}/api/hooks/${slug}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-hub-signature': signature },
+      body,
+    });
+    return res.status;
+  };
+  const deliveriesOf = async (id) => (await onBackend(dev01, 'GET', `/api/webhooks/${id}/deliveries?noise=true`)).body.deliveries ?? [];
+  const deliveryOf = (id, issueKey, pred = () => true) =>
+    waitFor(async () => (await deliveriesOf(id)).find((d) => d.issueKey === issueKey && pred(d)), 45_000, 300);
+
+  // Mixed routing: one URL, two machines.
+  const mixed = await onBackend(dev01, 'POST', '/api/webhooks', {
+    name: 'Triage',
+    slug: 'triage',
+    cwd: devWorkspace,
+    agent: 'claude',
+    overlapPolicy: 'allow',
+    skipPermissions: true,
+    config: {
+      type: 'jira',
+      filter: {},
+      projectMap: [
+        { projectKey: 'PA', cwd: devWorkspace },
+        { projectKey: 'XY', cwd: macWorkspace, hostId: 'mac01' },
+      ],
+    },
+  });
+  check(mixed.status === 201, 'a Jira webhook on dev01 with PA → dev01 and XY → mac01', mixed.body?.error?.message ?? '');
+  const mixedId = mixed.body.webhook.id;
+  check((await signedDelivery('triage', mixed.body.secret, 'PA-1')) === 202, 'a signed PA delivery is accepted');
+  check((await signedDelivery('triage', mixed.body.secret, 'XY-1')) === 202, 'a signed XY delivery is accepted, at the same URL');
+  const paDelivery = await deliveryOf(mixedId, 'PA-1', (d) => d.status !== 'starting');
+  check(paDelivery && paDelivery.remoteHostId === null, 'PA ran on dev01 itself', paDelivery?.status);
+  const xyDelivery = await deliveryOf(mixedId, 'XY-1', (d) => d.remoteRef !== null || d.status === 'failed');
+  check(xyDelivery?.remoteHostId === 'mac01', 'XY was dispatched to mac01', xyDelivery?.remoteRef ?? xyDelivery?.error);
+  const macSessions = (await onBackend(mac01, 'GET', '/api/sessions')).body;
+  const macList = Array.isArray(macSessions) ? macSessions : (macSessions.sessions ?? []);
+  const xySessionId = xyDelivery?.remoteRef?.replace(/^session:/, '');
+  check(
+    xyDelivery?.remoteRef ? macList.some((s) => s.id === xySessionId && s.cwd === macWorkspace) : /^mac01: /.test(xyDelivery?.error ?? ''),
+    'mac01’s own API has that session, in its own folder (or mac01 itself refused it, by name)',
+    xySessionId ?? xyDelivery?.error,
+  );
+  check(xyDelivery?.skipPermissionsEnabled === false, 'the webhook’s Skip permissions did not cross: mac01 decides, and its switch is off');
+  const devSessions = (await onBackend(dev01, 'GET', '/api/sessions')).body;
+  const devList = Array.isArray(devSessions) ? devSessions : (devSessions.sessions ?? []);
+  check(!devList.some((s) => s.cwd === macWorkspace), 'nothing for XY ran on dev01');
+
+  // A Pocket Agent on mac01: approval, push, answered there, settled.
+  const pocket = await onBackend(dev01, 'POST', '/api/webhooks', {
+    name: 'Remote builds',
+    slug: 'remote-builds',
+    cwd: '/srv/builds',
+    hostId: 'mac01',
+    agent: `pocket:${xcode.body.id}`,
+    conversationMode: 'per-issue',
+    config: { type: 'jira', filter: {} },
+  });
+  check(pocket.status === 201, 'a webhook whose agent is mac01’s Xcode Pocket Agent', pocket.body?.error?.message ?? '');
+  const pocketId = pocket.body.webhook.id;
+  const pushesBeforeRemote = pushReceived.length;
+  check((await signedDelivery('remote-builds', pocket.body.secret, 'IOS-7')) === 202, 'a signed IOS-7 delivery is accepted');
+  const parked = await deliveryOf(pocketId, 'IOS-7', (d) => d.remoteState === 'awaiting_approval');
+  check(parked?.status === 'running', 'the delivery stays running while mac01 waits on an approval', parked?.remoteState);
+  const remotePush = await waitFor(
+    () => pushReceived.slice(pushesBeforeRemote).find((p) => p.url === `/#/h/mac01/planner/${parked?.plannerChatId}`),
+    30_000,
+  );
+  check(Boolean(remotePush), 'the approval arrived by push, deep-linked to the chat on mac01', remotePush?.url);
+  // dev01 is the Hub's default host, which the bundle addresses with no host prefix.
+  await desktop.goto(`${HUB}/#/hooks/${pocketId}`, { waitUntil: 'domcontentloaded' });
+  const remoteRow = await desktop
+    .waitForSelector('.history-remote-state:has-text("awaiting approval")', { timeout: 20_000 })
+    .then(() => true)
+    .catch(() => false);
+  const hostTag = await desktop.textContent('.history-host-tag').catch(() => null);
+  check(remoteRow && /mac01/.test(hostTag ?? ''), 'the editor’s delivery row says it is awaiting approval, on mac01', hostTag ?? '');
+  await desktop.screenshot({ path: path.join(shots, '7-remote-delivery.png') });
+  if (remotePush) {
+    const tab = await desktopContext.newPage();
+    await tab.goto(`${HUB}${remotePush.url}`, { waitUntil: 'domcontentloaded' });
+    await tab.waitForSelector('.planner-approval-card', { timeout: 20_000 });
+    await tab.click('.planner-approval-card button:has-text("Allow once")');
+    await tab.close();
+  }
+  const settled = await deliveryOf(pocketId, 'IOS-7', (d) => d.status !== 'running' && d.status !== 'starting');
+  check(settled?.status === 'succeeded', 'answered on mac01, the delivery on dev01 settles succeeded', settled?.status);
+
+  check((await signedDelivery('remote-builds', pocket.body.secret, 'IOS-7', { changelog: { items: [{ field: 'status' }] } })) === 202, 'IOS-7’s next delivery is accepted');
+  const again = await waitFor(async () => {
+    const rows = (await deliveriesOf(pocketId)).filter((d) => d.issueKey === 'IOS-7');
+    return rows.length >= 2 && rows[0].remoteRef ? rows[0] : null;
+  }, 30_000, 300);
+  check(again?.remoteRef === settled?.remoteRef, 'per-issue: it continues the same chat on mac01', again?.remoteRef);
+
+  // Failures: each its own reason, never a local run.
+  await hub('/api/hub/webhook-routing/dev01', { method: 'DELETE' });
+  check((await signedDelivery('triage', mixed.body.secret, 'XY-2')) === 202, 'with routing switched off, an XY delivery is still answered 2xx');
+  const offFailed = await deliveryOf(mixedId, 'XY-2', (d) => d.status === 'failed');
+  check(/not set up on this server/.test(offFailed?.error ?? ''), '…and fails naming why, retryable, nothing run on dev01', offFailed?.error);
+  check(offFailed?.retryProblem === null, 'that failed delivery can be retried (PA-125)');
+
   heading('Phone viewport — the Fleet card, and the host sheet’s Fleet entry');
   const phoneContext = await browser.newContext({ ...devices['iPhone 13'] });
   const phone = await phoneContext.newPage();
@@ -659,6 +798,18 @@ async function main() {
   const sheetFleet = await phone.waitForSelector('.sheet-option:has-text("Fleet")', { timeout: 10_000 }).then(() => true).catch(() => false);
   check(sheetFleet, 'the host sheet lists Fleet');
   await phone.screenshot({ path: path.join(shots, '6-phone-sheet.png') });
+
+  heading('PA-171 — with the Hub down, a routed delivery fails with its own reason');
+  await hub('/api/hub/webhook-routing/dev01', {
+    method: 'PUT',
+    body: JSON.stringify({ hubUrl: HUB, allowedHosts: ['mac01'] }),
+  });
+  process.kill(hubProc.child.pid, 'SIGTERM');
+  await sleep(1500);
+  const deadHubStatus = await signedDelivery('triage', mixed.body.secret, 'XY-3');
+  check(deadHubStatus === 202, 'the delivery is still answered 2xx (Jira does not retry a 5xx)', String(deadHubStatus));
+  const downFailed = await deliveryOf(mixedId, 'XY-3', (d) => d.status === 'failed');
+  check(/unreachable/i.test(downFailed?.error ?? ''), 'and fails as "Hub unreachable", with no fallback to dev01', downFailed?.error);
 
   await browser.close();
   llm.close();

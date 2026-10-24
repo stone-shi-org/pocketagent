@@ -260,8 +260,39 @@ export class FleetService {
     }
   }
 
+  /**
+   * PA-171: make sure `host`'s dispatch token is one the backend knows a Hub
+   * minted, so a webhook run's dispatch origin counts there.
+   *
+   * A token minted before PA-171 has no provenance on the backend
+   * (`mintedByHub` false or absent), and the backend ignores the origin from
+   * it — correctly, since it cannot tell it from one an operator minted. So
+   * such a token, and only such a token, is replaced; a current one is kept,
+   * because re-minting resets the per-client session cap and ownership of work
+   * already started on that host. Called when webhook routing is saved.
+   */
+  async ensureDispatchProvenance(host: HubHostRow): Promise<void> {
+    const fresh = this.opts.registry.getRow(host.id) ?? host;
+    if (this.opts.registry.mcpTokenState(fresh) !== 'ok' || fresh.mcp_client_id === null) {
+      await this.ensureDispatchTokenFor(fresh);
+      return;
+    }
+    const credential = this.opts.registry.credentialFor(fresh);
+    if (credential === null) return;
+    const list = await callBackend(this.opts.fetchImpl, fresh.base_url, credential, { method: 'GET', path: '/api/mcp/tokens' });
+    if (!list.ok) return;
+    const clients = (list.body as { clients?: { id?: unknown; mintedByHub?: unknown }[] } | null)?.clients ?? [];
+    const mine = clients.find((c) => c.id === fresh.mcp_client_id);
+    if (mine === undefined || mine.mintedByHub === true) return;
+    const step = await this.ensureDispatchToken(fresh, false);
+    if (!step.ok) throw new Error(step.message);
+    this.opts.log.warn({ hostId: fresh.id }, 'fleet: dispatch token re-minted so a Hub-stated dispatch origin counts on that host');
+  }
+
   private hasClientTokens(): boolean {
-    return this.opts.tokens.list().some((row) => row.kind === 'client');
+    // PA-171: a webhook-routing token dispatches through the same per-host
+    // tokens a client does, so it keeps them alive too.
+    return this.opts.tokens.list().some((row) => row.kind === 'client' || row.kind === 'webhook');
   }
 
   /** A host is about to be removed: revoke its dispatch and admin tokens there, best-effort. */
