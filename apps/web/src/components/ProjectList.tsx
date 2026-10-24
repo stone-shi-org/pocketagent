@@ -3,6 +3,7 @@ import type {
   ChatSummary,
   DeleteRemoteBranchRequest,
   DeleteWorktreeResponse,
+  GitStatus,
   HostInfo,
   ProjectInfo,
   QueuedRunSummary,
@@ -48,11 +49,11 @@ const CHAT_PAGE_SIZE = 5;
 const ADOPTED_CWD_PLACEHOLDER = 'adopt:resolved-server-side';
 
 /**
- * Labels for the two `GitStatus` values that actually render a dot — `clean`
- * shows nothing at all, same as a chat row with no `live-dot` (see the corner
- * dot's own comment in styles.css for why absence is the point).
+ * Human-readable labels for `GitStatus` values — used by the corner attention
+ * dot (`dirty`/`unpushed`) and by the inline git badge on project rows (PA-173).
  */
-const GIT_STATUS_LABEL: Record<'dirty' | 'unpushed', string> = {
+const GIT_STATUS_LABEL: Record<GitStatus, string> = {
+  clean: 'Clean',
   dirty: 'Uncommitted changes',
   unpushed: 'Commits not pushed',
 };
@@ -900,6 +901,26 @@ function ProjectSection({
           >
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
+          {!nested && project.isGitRepo && (
+            <span
+              className={`project-git-badge${project.gitStatus ? ` project-git-badge--${project.gitStatus}` : ''}`}
+              title={
+                project.gitStatus
+                  ? `${project.gitBranch ?? 'HEAD'} · ${GIT_STATUS_LABEL[project.gitStatus]}`
+                  : (project.gitBranch ?? 'HEAD')
+              }
+            >
+              <Icon name="branch" size={12} className="project-git-icon" />
+              <span className="project-git-branch">{project.gitBranch ?? 'HEAD'}</span>
+              {project.gitStatus && (
+                <span
+                  className={`project-git-status project-git-status--${project.gitStatus}`}
+                  role="img"
+                  aria-label={GIT_STATUS_LABEL[project.gitStatus]}
+                />
+              )}
+            </span>
+          )}
           <Icon name="chevron-down" className={`project-caret${isCollapsed ? ' closed' : ''}`} />
           {isCollapsed && (
             <span className="project-count">

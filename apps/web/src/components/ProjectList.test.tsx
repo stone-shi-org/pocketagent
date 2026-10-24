@@ -161,4 +161,63 @@ describe('ProjectList tree status (PA-117)', () => {
     expect(html).toContain('>Results</h2>');
     expect(html).not.toContain('Add a project folder');
   });
+
+  it('renders git icon, current branch, and git status badge for git projects (PA-173)', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    const gitState = {
+      ...dummyState,
+      projects: [
+        {
+          ...dummyProject,
+          name: 'git-repo',
+          cwd: '/data/repo/git-repo',
+          isGitRepo: true,
+          gitBranch: 'feature/pa-173',
+          gitStatus: 'dirty',
+          worktrees: [
+            {
+              ...dummyProject,
+              name: 'wt-1',
+              cwd: '/data/repo/git-repo/.worktrees/wt-1',
+              isGitRepo: true,
+              gitBranch: 'worktree-branch',
+              gitStatus: 'clean',
+              worktrees: [],
+            },
+          ],
+        },
+        {
+          ...dummyProject,
+          name: 'plain-folder',
+          cwd: '/data/repo/plain-folder',
+          isGitRepo: false,
+          gitBranch: null,
+          gitStatus: null,
+        },
+      ],
+    } as unknown as ProjectsState;
+
+    const html = renderToStaticMarkup(
+      <HostProvider endpoint={hostEndpoint('host-1', '/h/host-1')}>
+        <ProjectList
+          state={gitState}
+          search=""
+          emptyHint="Nothing here"
+          onAddProject={() => {}}
+          onCompose={() => {}}
+          onApiError={() => {}}
+        />
+      </HostProvider>,
+    );
+
+    expect(html).toContain('project-git-badge--dirty');
+    expect(html).toContain('project-git-icon');
+    expect(html).toContain('>feature/pa-173</span>');
+    expect(html).toContain('project-git-status--dirty');
+    expect(html).toContain('title="feature/pa-173 · Uncommitted changes"');
+
+    // Non-git project does not render a git badge, and nested worktree uses its own branch row without duplicating the badge
+    const badgeMatches = html.match(/class="project-git-badge/g) ?? [];
+    expect(badgeMatches).toHaveLength(1);
+  });
 });

@@ -3334,6 +3334,55 @@ button.chat-rate-limit-badge {
   unicode-bidi: plaintext;
 }
 
+/* PA-173: inline git badge on top-level git projects showing a small git
+   branch icon, the checked-out branch, and the working-tree status dot. */
+.project-git-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 140px;
+  padding: 1px 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  flex-shrink: 1;
+}
+
+.project-git-icon {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.project-git-branch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-git-status {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.project-git-status--clean {
+  background: var(--ok);
+}
+
+.project-git-status--unpushed {
+  background: var(--idle);
+}
+
+.project-git-status--dirty {
+  background: var(--danger);
+}
+
 /* Rotates to point right when the folder is closed. */
 .project-caret {
   flex: none;
@@ -4178,6 +4227,13 @@ button.chat-rate-limit-badge {
 .sidebar .project-caret {
   width: 13px;
   height: 13px;
+}
+
+.sidebar .project-git-badge {
+  max-width: 110px;
+  padding: 1px 6px;
+  font-size: 11px;
+  background: var(--bg);
 }
 
 /* `.sidebar .project-name` above and `.project--worktree .project-name`
