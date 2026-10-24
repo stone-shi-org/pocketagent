@@ -732,7 +732,6 @@ export function TextRow({
   help,
   placeholder,
   value,
-  busy,
   restart,
   /** Fixed-width font — for a value that is itself syntax, e.g. a cron expression. */
   mono,
@@ -773,7 +772,6 @@ export function TextRow({
             value={value}
             placeholder={placeholder}
             rows={rows ?? 4}
-            disabled={busy}
             onChange={(e) => onChange(e.target.value)}
           />
         ) : (
@@ -782,7 +780,6 @@ export function TextRow({
             className={inputClassName}
             value={value}
             placeholder={placeholder}
-            disabled={busy}
             list={listId}
             spellCheck={mono ? false : undefined}
             onChange={(e) => onChange(e.target.value)}
@@ -803,7 +800,6 @@ export function NumberRow({
   min,
   max,
   step,
-  busy,
   restart,
   onChange,
 }: {
@@ -837,7 +833,6 @@ export function NumberRow({
             min={min}
             max={max}
             step={step ?? 1}
-            disabled={busy}
             onChange={(e) => {
               const n = Number(e.target.value);
               if (Number.isFinite(n)) onChange(Math.min(max, Math.max(min, Math.round(n))));
@@ -938,7 +933,6 @@ export function SelectRow({
 
 function HostTagsRow({
   tags,
-  busy,
   onChange,
 }: {
   tags: string[];
@@ -998,7 +992,6 @@ function HostTagsRow({
           className="settings-input mono"
           value={draft}
           placeholder="ios-signing, gpu, photo-archive"
-          disabled={busy}
           spellCheck={false}
           onChange={(e) => handleInputChange(e.target.value)}
         />
