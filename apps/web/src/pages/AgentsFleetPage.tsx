@@ -3,7 +3,15 @@ import type { SessionInfo } from '@pocketagent/protocol';
 import { isTerminalStatus } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { AgentCard } from '../components/AgentCard.js';
-import { fleetSummary, groupFleet } from '../agent/fleet-groups.js';
+import { ConfirmDialog } from '../components/ConfirmDialog.js';
+import {
+  filterRunningFleetSessions,
+  finishedFleetAgents,
+  fleetSummary,
+  groupFleet,
+  loadFleetRunningOnly,
+  saveFleetRunningOnly,
+} from '../agent/fleet-groups.js';
 import { Icon } from '../components/Icon.js';
 import { useHostApi } from '../hosts/HostContext.js';
 
@@ -43,6 +51,14 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
   const api = useHostApi();
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [runningOnly, setRunningOnlyState] = useState(loadFleetRunningOnly);
+  const [confirmingCloseFinished, setConfirmingCloseFinished] = useState(false);
+  const [closingFinished, setClosingFinished] = useState(false);
+
+  const setRunningOnly = (on: boolean): void => {
+    setRunningOnlyState(on);
+    saveFleetRunningOnly(on);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -57,7 +73,7 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
       setError(err instanceof ApiError ? err.message : 'Could not load agents.');
       setSessions([]);
     }
-  }, [onApiError]);
+  }, [api, onApiError]);
 
   useEffect(() => {
     void load();
@@ -65,15 +81,60 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
     return () => clearInterval(timer);
   }, [load]);
 
-  const groups = sessions ? groupFleet(sessions) : [];
+  const finishedAgents = sessions ? finishedFleetAgents(sessions) : [];
+  const visibleSessions = sessions ? filterRunningFleetSessions(sessions, runningOnly) : null;
+  const groups = visibleSessions ? groupFleet(visibleSessions) : [];
+
+  const closeAllFinished = useCallback(async () => {
+    if (finishedAgents.length === 0) {
+      setConfirmingCloseFinished(false);
+      return;
+    }
+    setClosingFinished(true);
+    try {
+      const results = await Promise.allSettled(
+        finishedAgents.map((s) => api.deleteSession(s.id)),
+      );
+      const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (failed) {
+        onApiError(failed.reason);
+      }
+      await load();
+    } finally {
+      setClosingFinished(false);
+      setConfirmingCloseFinished(false);
+    }
+  }, [api, finishedAgents, load, onApiError]);
 
   const content = (
     <div className="fleet-page">
       <div className="fleet-header">
-        {/* The phone shell's own `.home-bar` already says "Agents" above this;
-            repeating the word right below it would just be noise there. */}
-        {!onBack && <h1>Agents</h1>}
-        <span className="fleet-count">{sessions === null ? 'Loading…' : fleetSummary(sessions)}</span>
+        <div className="fleet-header-title">
+          {/* The phone shell's own `.home-bar` already says "Agents" above this;
+              repeating the word right below it would just be noise there. */}
+          {!onBack && <h1>Agents</h1>}
+          <span className="fleet-count">
+            {visibleSessions === null ? 'Loading…' : fleetSummary(visibleSessions)}
+          </span>
+        </div>
+        <div className="fleet-header-actions">
+          <label className="fleet-running-only-toggle">
+            <input
+              type="checkbox"
+              checked={runningOnly}
+              onChange={(e) => setRunningOnly(e.target.checked)}
+            />
+            <span>Show running only</span>
+          </label>
+          <button
+            type="button"
+            className="fleet-close-finished-btn"
+            disabled={finishedAgents.length === 0 || closingFinished}
+            onClick={() => setConfirmingCloseFinished(true)}
+          >
+            {closingFinished ? 'Closing…' : 'Close all finished agents'}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -86,7 +147,7 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
 
       {/* "Nothing", not "no agents": a terminal session is not an agent, which
           is the whole point of the grouping below. */}
-      {sessions?.length === 0 && <div className="fleet-empty">Nothing running right now.</div>}
+      {visibleSessions?.length === 0 && <div className="fleet-empty">Nothing running right now.</div>}
 
       {groups.map((group) => (
         <section className="fleet-section" key={group.key}>
@@ -116,6 +177,17 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
           </div>
         </section>
       ))}
+
+      {confirmingCloseFinished && (
+        <ConfirmDialog
+          title={`Close ${finishedAgents.length} finished agent${finishedAgents.length === 1 ? '' : 's'}?`}
+          body={`All ${finishedAgents.length} idle agent session${finishedAgents.length === 1 ? '' : 's'} will be stopped. Running agents and terminal sessions will not be affected.`}
+          confirmLabel={closingFinished ? 'Closing…' : 'Close all'}
+          busy={closingFinished}
+          onConfirm={() => void closeAllFinished()}
+          onCancel={() => setConfirmingCloseFinished(false)}
+        />
+      )}
     </div>
   );
 

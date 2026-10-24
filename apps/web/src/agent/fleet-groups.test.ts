@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionInfo } from '@pocketagent/protocol';
-import { fleetSummary, groupFleet, stopAffordance, terminalKindTag } from './fleet-groups.js';
+import {
+  filterRunningFleetSessions,
+  finishedFleetAgents,
+  fleetSummary,
+  groupFleet,
+  isFinishedFleetAgent,
+  loadFleetRunningOnly,
+  saveFleetRunningOnly,
+  stopAffordance,
+  terminalKindTag,
+} from './fleet-groups.js';
 
 const session = (over: Partial<SessionInfo> = {}): SessionInfo =>
   ({
@@ -121,5 +131,65 @@ describe('stopAffordance', () => {
     expect(words.confirmBody).toBe('The terminal client will detach. Your tmux session will remain running.');
     expect(words.confirmLabel).toBe('Detach');
     expect(words.busyLabel).toBe('Detaching…');
+  });
+});
+
+describe('finishedFleetAgents (PA-172)', () => {
+  it('selects idle structured agent sessions and excludes busy, approval-waiting, and terminal sessions', () => {
+    const idleAgent = session({ id: 'a-idle', transport: 'structured', busy: false, pendingApprovalsCount: 0 });
+    const busyAgent = session({ id: 'a-busy', transport: 'structured', busy: true, pendingApprovalsCount: 0 });
+    const approvalAgent = session({ id: 'a-approval', transport: 'structured', busy: false, pendingApprovalsCount: 1 });
+    const idleTerminal = session({ id: 't-idle', transport: 'terminal', busy: false });
+
+    expect(isFinishedFleetAgent(idleAgent)).toBe(true);
+    expect(isFinishedFleetAgent(busyAgent)).toBe(false);
+    expect(isFinishedFleetAgent(approvalAgent)).toBe(false);
+    expect(isFinishedFleetAgent(idleTerminal)).toBe(false);
+
+    expect(
+      finishedFleetAgents([idleAgent, busyAgent, approvalAgent, idleTerminal]).map((s) => s.id),
+    ).toEqual(['a-idle']);
+  });
+});
+
+describe('filterRunningFleetSessions (PA-172)', () => {
+  it('returns all sessions when runningOnly is false, and filters out idle or approval-parked sessions when true', () => {
+    const idleAgent = session({ id: 'a-idle', transport: 'structured', busy: false });
+    const busyAgent = session({ id: 'a-busy', transport: 'structured', busy: true, pendingApprovalsCount: 0 });
+    const approvalAgent = session({ id: 'a-approval', transport: 'structured', busy: true, pendingApprovalsCount: 1 });
+    const busyTerminal = session({ id: 't-busy', transport: 'terminal', busy: true });
+    const idleTerminal = session({ id: 't-idle', transport: 'terminal', busy: false });
+    const all = [idleAgent, busyAgent, approvalAgent, busyTerminal, idleTerminal];
+
+    expect(filterRunningFleetSessions(all, false).map((s) => s.id)).toEqual([
+      'a-idle',
+      'a-busy',
+      'a-approval',
+      't-busy',
+      't-idle',
+    ]);
+    expect(filterRunningFleetSessions(all, true).map((s) => s.id)).toEqual(['a-busy', 't-busy']);
+  });
+
+  it('persists and reads the runningOnly preference when localStorage is available', () => {
+    const store = new Map<string, string>();
+    const orig = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => store.set(k, v),
+        removeItem: (k: string) => store.delete(k),
+      },
+    });
+    try {
+      expect(loadFleetRunningOnly()).toBe(false);
+      saveFleetRunningOnly(true);
+      expect(loadFleetRunningOnly()).toBe(true);
+      saveFleetRunningOnly(false);
+      expect(loadFleetRunningOnly()).toBe(false);
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: orig });
+    }
   });
 });

@@ -4886,9 +4886,16 @@ button.chat-rate-limit-badge {
 
 .fleet-header {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin: 0 0 18px;
+}
+.fleet-header-title {
+  display: flex;
   align-items: baseline;
   gap: 10px;
-  margin: 0 0 18px;
 }
 .fleet-header h1 {
   font-size: 19px;
@@ -4898,6 +4905,38 @@ button.chat-rate-limit-badge {
 .fleet-count {
   font-size: 13px;
   color: var(--text-dim);
+}
+.fleet-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.fleet-running-only-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.fleet-close-finished-btn {
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+}
+.fleet-close-finished-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-elev-2);
+}
+.fleet-close-finished-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .fleet-empty {

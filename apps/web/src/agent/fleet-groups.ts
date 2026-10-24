@@ -65,6 +65,61 @@ export function groupFleet(sessions: readonly SessionInfo[]): FleetGroup[] {
 }
 
 /**
+ * PA-172: whether a live session on the Agents page is a structured coding
+ * agent that has finished its turn and is sitting idle.
+ *
+ * Three guards:
+ * - Structured sessions only: a raw terminal or adopted tmux pane has no
+ *   turn lifecycle and must never be closed by "Close all finished agents".
+ * - Not `busy`: a mid-turn agent is actively working.
+ * - No pending tool approvals: an agent parked on an approval is waiting on a
+ *   human decision to continue its turn, never finished.
+ */
+export function isFinishedFleetAgent(session: SessionInfo): boolean {
+  if (session.transport !== 'structured') return false;
+  if (session.busy) return false;
+  if ((session.pendingApprovalsCount ?? 0) > 0) return false;
+  return true;
+}
+
+/** All idle structured agent sessions eligible for batch close (PA-172). */
+export function finishedFleetAgents(sessions: readonly SessionInfo[]): SessionInfo[] {
+  return sessions.filter(isFinishedFleetAgent);
+}
+
+/**
+ * PA-172: filters the Agents page session list when "Show running only" is
+ * checked, dropping idle sessions (`!session.busy` or parked on approval).
+ */
+export function filterRunningFleetSessions(
+  sessions: readonly SessionInfo[],
+  runningOnly: boolean,
+): SessionInfo[] {
+  if (!runningOnly) return [...sessions];
+  return sessions.filter((s) => s.busy && (s.pendingApprovalsCount ?? 0) === 0);
+}
+
+const FLEET_RUNNING_ONLY_KEY = 'pocketagent:fleet-running-only';
+
+export function loadFleetRunningOnly(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(FLEET_RUNNING_ONLY_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveFleetRunningOnly(on: boolean): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (on) localStorage.setItem(FLEET_RUNNING_ONLY_KEY, '1');
+    else localStorage.removeItem(FLEET_RUNNING_ONLY_KEY);
+  } catch {
+    /* unavailable storage: the filter simply does not persist */
+  }
+}
+
+/**
  * The header's one-line count. Says the split rather than a bare total, so
  * "3 running" cannot hide that all three are terminals — which is precisely
  * the conflation PA-22 asked to undo. Only non-empty kinds are named, so a
