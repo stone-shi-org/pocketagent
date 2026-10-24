@@ -497,13 +497,14 @@ describe('ConversationStore', () => {
 
 describe('parsePaneLine', () => {
   const line = (sessionName: string, windowActive = '1', paneActive = '1') =>
-    `${sessionName}|claude|/home/me/src/app|192|57|1|0|win|${windowActive}|${paneActive}`;
+    `${sessionName}|claude|/home/me/src/app|12345|192|57|1|0|win|${windowActive}|${paneActive}`;
 
   it('parses a pane', () => {
     expect(parsePaneLine(line('work'))).toEqual({
       sessionName: 'work',
       command: 'claude',
       cwd: '/home/me/src/app',
+      pid: 12345,
       cols: 192,
       rows: 57,
       attached: 1,

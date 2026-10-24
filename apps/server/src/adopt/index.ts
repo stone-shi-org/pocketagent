@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -94,6 +95,7 @@ export class AdoptionService {
         '#{session_name}',
         '#{pane_current_command}',
         '#{pane_current_path}',
+        '#{pane_pid}',
         '#{window_width}',
         '#{window_height}',
         '#{session_attached}',
@@ -405,12 +407,13 @@ interface ParsedPane {
   windowActive: boolean;
   /** `#{pane_active}` — whether this specific pane is its window's active one. */
   paneActive: boolean;
+  pid?: number;
 }
 
 export function parsePaneLine(line: string): ParsedPane | null {
   if (!line.trim()) return null;
   const parts = line.split(SEP);
-  if (parts.length < 10) return null;
+  if (parts.length < 11) return null;
 
   // Parse from the right: a user's session name may itself contain the
   // separator, but the trailing fields are ours and fixed in number.
@@ -421,11 +424,28 @@ export function parsePaneLine(line: string): ParsedPane | null {
   const attached = int(parts.pop());
   const rows = int(parts.pop());
   const cols = int(parts.pop());
-  const cwd = parts.pop() ?? '';
+  const pid = int(parts.pop());
+  let cwd = parts.pop() ?? '';
   const command = parts.pop() ?? '';
   const sessionName = parts.join(SEP);
 
   if (!sessionName || !cwd) return null;
+
+  // On Linux, tmux's #{pane_current_path} inspects the foreground process
+  // group (tcgetpgrp), which momentarily reports the cwd of temporary child
+  // subshells (such as prompt theme hooks or oh-my-zsh auto-update checks e.g.
+  // `builtin cd "$ZSH"; git rev-parse HEAD`) rather than the shell's own
+  // directory. Prefer the pane's initial root process cwd from /proc/<pid>/cwd
+  // when accessible.
+  if (pid && pid > 0 && process.platform === 'linux') {
+    try {
+      const realCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+      if (realCwd) cwd = realCwd;
+    } catch {
+      // Process exited or permission denied; keep cwd from tmux format
+    }
+  }
+
   return {
     sessionName,
     command,
@@ -437,6 +457,7 @@ export function parsePaneLine(line: string): ParsedPane | null {
     windowName,
     windowActive,
     paneActive,
+    ...(pid ? { pid } : {}),
   };
 }
 

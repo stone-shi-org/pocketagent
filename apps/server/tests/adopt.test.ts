@@ -634,8 +634,10 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     // PocketAgent — a plain terminal on that socket would see it too.
     expect(await userSessionExists('fresh-one')).toBe(true);
 
-    const listed = (await listTargets()).targets.map((x) => x.sessionName);
-    expect(listed).toContain('fresh-one');
+    await waitFor(async () => {
+      const listed = (await listTargets()).targets.map((x) => x.sessionName);
+      return listed.includes('fresh-one');
+    });
   });
 
   it('refuses to create a session whose name is already taken', async () => {
