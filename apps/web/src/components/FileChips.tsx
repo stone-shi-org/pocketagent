@@ -14,6 +14,14 @@ import { Icon } from './Icon.js';
  */
 export const AttachmentHrefContext = createContext<((path: string) => string | null) | null>(null);
 
+/**
+ * Turns an `artifact:<name>` reference in a reply into the artifact route's URL
+ * (`agent/artifact-refs.ts`). Only a Pocket Agent chat provides one; elsewhere
+ * a reference renders as the file name. Must be a stable function: the
+ * markdown renderer caches one `marked` instance per resolver.
+ */
+export const ArtifactHrefContext = createContext<((name: string) => string | null) | null>(null);
+
 /** The files a sent user turn attached, under its header. */
 export function SentFileChips({ files }: { files: readonly PromptFileChip[] }): JSX.Element {
   const hrefFor = useContext(AttachmentHrefContext);

@@ -46,7 +46,7 @@ import { judgeUtterance } from '../audio/utterance-harness.js';
 import { MIC_CHANGE_EVENT } from '../audio/devices.js';
 import { GeminiLiveController, type GeminiLiveState } from '../audio/gemini-live.js';
 import { getGeminiLivePref, setGeminiLivePref } from '../agent/voice-prefs.js';
-import { AttachmentHrefContext } from '../components/FileChips.js';
+import { ArtifactHrefContext, AttachmentHrefContext } from '../components/FileChips.js';
 import { DocRedlineView } from '../components/DocRedlineView.js';
 import { diffFromToolInput, diffLines, lockWarningFromToolInput, redlineFromToolInput } from '../agent/diff.js';
 
@@ -1015,6 +1015,15 @@ export function PlannerChatPage({
     [api, chatId, attachedDocWorkspaceId],
   );
 
+  /** An `artifact:<name>` reference in a reply: opened inline (not as a
+      download) so an image can be an `<img>` and anything else opens in a tab.
+      The route resolves the name against this chat's artifact folders —
+      including a document workspace's `outputs/` — and re-checks containment. */
+  const artifactHref = useCallback(
+    (name: string): string | null => api.plannerChatArtifactFileUrl(chatId, name, false),
+    [api, chatId],
+  );
+
   // PA-122: resolve the active model so we can warn about image support.
   const effectiveModelRef = chat?.lastModelId ?? agentDefaultModelId;
   const selectedModel =
@@ -1882,14 +1891,16 @@ export function PlannerChatPage({
         <div className="spinner">Loading…</div>
       ) : (
         <AttachmentHrefContext.Provider value={attachmentHref}>
-          <Transcript
-            state={transcript}
-            starterPrompts={starterPrompts}
-            onSelectPrompt={(text) => void handleSend(text)}
-            onUndoTurn={(turnId) => void handleUndoTurn(turnId, false)}
-            undoingTurnId={undoingTurnId}
-            onOpenChangedFileCompare={attachedDocWorkspace ? handleOpenChangedFileCompare : undefined}
-          />
+          <ArtifactHrefContext.Provider value={artifactHref}>
+            <Transcript
+              state={transcript}
+              starterPrompts={starterPrompts}
+              onSelectPrompt={(text) => void handleSend(text)}
+              onUndoTurn={(turnId) => void handleUndoTurn(turnId, false)}
+              undoingTurnId={undoingTurnId}
+              onOpenChangedFileCompare={attachedDocWorkspace ? handleOpenChangedFileCompare : undefined}
+            />
+          </ArtifactHrefContext.Provider>
         </AttachmentHrefContext.Provider>
       )}
 

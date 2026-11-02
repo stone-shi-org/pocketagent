@@ -1507,6 +1507,40 @@ composer can warn first) gets a one-line note per image; only the newest four im
 re-sent; one whose header will not parse or is over 8000 px is left out with a note rather
 than failing the request. Unknown models are assumed to see images, as before.
 
+### Artifacts shown in a reply (PA-177)
+
+A Pocket Agent writes what it makes into its workspace's `artifacts/` folder (PA-128: writes
+there are approval-exempt and listed in the Artifacts panel). It used to have no way to *show*
+one. `[x](artifact:x.svg)` came out as an `<a>` with no `href`, because DOMPurify strips an
+unknown scheme, and `[x](artifacts/x.svg)` resolved against the SPA's own URL. Both were dead
+links. The system prompt now gives the syntax, `![caption](artifact:diagram.svg)` for an image
+and `[text](artifact:report.md)` for anything else. The chat resolves it, using
+`agent/artifact-refs.ts` inside `renderMarkdown`.
+
+- **The reference is a name, never a URL.** The real URL depends on the chat id and, behind a
+  Hub, on `/h/<hostId>/`, and a URL the model composed could point anywhere. `PlannerChatPage`
+  provides `ArtifactHrefContext` (`components/FileChips.tsx`, beside `AttachmentHrefContext`),
+  which maps a name to `plannerChatArtifactFileUrl`. The route resolves it against the chat's
+  artifact folders, a document workspace's `outputs/` included, and re-checks containment. The
+  resolver must be a stable function, because `markdown.ts` caches one `Marked` instance per
+  resolver. `marked`'s global options are shared by every caller, so a per-call renderer could
+  not go there.
+- **An image is shown and linked.** png, jpg, gif, webp and svg become an `<img>` under the page's
+  existing `img-src 'self'`, with the file name as a link under it. Either opens the file
+  full size in a new tab. An SVG in `<img>` runs no script, which is why it qualifies and HTML
+  does not. Any other type is a link, since `ARTIFACT_CSP`'s `frame-ancestors 'none'` keeps an
+  HTML artifact out of an iframe. Both `artifact:` and `artifacts/` are accepted, because
+  models write the second unprompted.
+- **A reference that cannot resolve is text, never a dead link.** That covers one leaving the
+  folder (`..`, a backslash, bad percent-encoding, control characters) and one in a transcript
+  with no artifact route (a coding session, an approval sheet, so `null` resolver). The
+  browser's check only keeps it from asking. The boundary is still the route's containment
+  check, and the HTML still goes through DOMPurify.
+
+Known limitations: a reference to a file that does not exist is a broken image (its link
+404s); a file written by `bash` and never referenced gets no preview (that needs an
+`artifacts/` listing diff at turn end); Telegram shows the markdown as written.
+
 ### Telegram channel (PA-53)
 
 Telegram is a second front end onto `PlannerChatService`, built entirely by reusing patterns

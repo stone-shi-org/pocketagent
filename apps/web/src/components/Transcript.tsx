@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { cleanCompactionErrorMessage, extractSpokenSummary, stripSpokenSummary } from '@pocketagent/protocol';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
@@ -10,7 +10,7 @@ import { ToolCard } from './ToolCard.js';
 import { CopyButton } from './CopyButton.js';
 import { FollowUpChips } from './FollowUpChips.js';
 import { Icon } from './Icon.js';
-import { SentFileChips } from './FileChips.js';
+import { ArtifactHrefContext, SentFileChips } from './FileChips.js';
 
 /**
  * Only the most recent turns' prompts stay pinned at the top as their output
@@ -585,7 +585,8 @@ function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): J
 }
 
 function Markdown({ text, streaming }: { text: string; streaming: boolean }): JSX.Element {
-  const html = useMemo(() => renderMarkdown(text), [text]);
+  const resolveArtifact = useContext(ArtifactHrefContext);
+  const html = useMemo(() => renderMarkdown(text, resolveArtifact), [text, resolveArtifact]);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

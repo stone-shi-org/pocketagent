@@ -286,6 +286,10 @@ export function basePlannerSystemPrompt(
       `assets in the 'artifacts' subfolder inside ${docWorkspace ? `the attached document workspace (${docWorkspace.path})` : 'your workspace directory'} (create it with mkdir if it does not ` +
       "exist). Writing or creating files in the 'artifacts' subfolder does not require user confirmation. If a file " +
       'name already exists from another session, append a suffix to the filename to avoid overwriting it.',
+    '- To show a file from the artifacts folder in your reply, reference it by its path inside that folder ' +
+      'with the artifact: scheme: ![Architecture](artifact:diagram.svg) displays an image (png, jpg, gif, webp, ' +
+      'svg) inline, and [the report](artifact:report.md) links to any other file. Do not write a URL or an ' +
+      'absolute path for it; the chat turns the reference into a link the user can open.',
     '- For Excel workbooks (.xlsx / .xlsm), use sheet_info, sheet_read, sheet_find, sheet_check and sheet_edit ' +
       'instead of bash: they inspect formulas, number formats, tables, charts and pivot tables directly, and ' +
       'sheet_edit patches XML in place (or into a new outputPath) so charts, pivots and macros survive unchanged. ' +
