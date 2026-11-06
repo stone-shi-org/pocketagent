@@ -456,6 +456,7 @@ export class ProjectService {
           isGitRepo: false,
           gitBranch: null,
           gitStatus: null,
+          gitCommit: null,
           hidden: false,
           isWorkspace: true,
           chats: [],
@@ -522,6 +523,7 @@ export class ProjectService {
         // Only spawns `git status` for a directory already known to be a
         // repo — an empty/non-repo folder never pays for the attempt.
         gitStatus: isRepo ? await this.gitStatus.get(cwd) : null,
+        gitCommit: isRepo ? await readGitCommit(cwd) : null,
         hidden,
         isWorkspace: added.has(cwd),
         chats: regularChats,
@@ -792,7 +794,7 @@ const TERMINAL = new Set(['exited', 'killed', 'error', 'interrupted']);
  */
 async function resolveGitDir(
   dir: string,
-): Promise<{ gitDir: string; mainRepoCwd: string | null } | null> {
+): Promise<{ gitDir: string; commonDir: string; mainRepoCwd: string | null } | null> {
   const gitPath = path.join(dir, '.git');
   let stat;
   try {
@@ -800,7 +802,7 @@ async function resolveGitDir(
   } catch {
     return null;
   }
-  if (stat.isDirectory()) return { gitDir: gitPath, mainRepoCwd: null };
+  if (stat.isDirectory()) return { gitDir: gitPath, commonDir: gitPath, mainRepoCwd: null };
 
   let indirection: string;
   try {
@@ -812,13 +814,21 @@ async function resolveGitDir(
   if (!match?.[1]) return null;
   const gitDir = path.isAbsolute(match[1]) ? match[1] : path.resolve(dir, match[1]);
 
+  let commonDir = gitDir;
+  try {
+    const c = (await fs.readFile(path.join(gitDir, 'commondir'), 'utf8')).trim();
+    commonDir = path.isAbsolute(c) ? c : path.resolve(gitDir, c);
+  } catch {
+    commonDir = path.dirname(path.dirname(gitDir));
+  }
+
   const worktreesDir = path.dirname(gitDir);
   const dotGit = path.dirname(worktreesDir);
   const mainRepoCwd =
     path.basename(worktreesDir) === 'worktrees' && path.basename(dotGit) === '.git'
       ? path.dirname(dotGit)
       : null;
-  return { gitDir, mainRepoCwd };
+  return { gitDir, commonDir, mainRepoCwd };
 }
 
 /**
@@ -840,6 +850,59 @@ export async function readGitBranch(dir: string): Promise<string | null> {
   }
   const branchMatch = /^ref:\s*refs\/heads\/(.+)$/m.exec(head.trim());
   return branchMatch?.[1]?.trim() || null;
+}
+
+/**
+ * Current commit hash (first 7 characters), read from `.git/HEAD` and refs
+ * without spawning git.
+ */
+export async function readGitCommit(dir: string): Promise<string | null> {
+  const info = await resolveGitDir(dir);
+  if (!info) return null;
+
+  let head: string;
+  try {
+    head = (await fs.readFile(path.join(info.gitDir, 'HEAD'), 'utf8')).trim();
+  } catch {
+    return null;
+  }
+
+  if (/^[0-9a-fA-F]{40,64}$/.test(head)) {
+    return head.slice(0, 7);
+  }
+
+  const branchMatch = /^ref:\s*(refs\/heads\/.+)$/m.exec(head);
+  if (!branchMatch?.[1]) return null;
+  const refPath = branchMatch[1].trim();
+
+  for (const base of [info.gitDir, info.commonDir]) {
+    try {
+      const loose = (await fs.readFile(path.join(base, refPath), 'utf8')).trim();
+      if (/^[0-9a-fA-F]{40,64}$/.test(loose)) {
+        return loose.slice(0, 7);
+      }
+    } catch {
+      // Loose ref not found in this directory
+    }
+  }
+
+  for (const base of [info.gitDir, info.commonDir]) {
+    try {
+      const packed = await fs.readFile(path.join(base, 'packed-refs'), 'utf8');
+      const lines = packed.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('#') || line.startsWith('^')) continue;
+        const [sha, ref] = line.trim().split(/\s+/);
+        if (ref === refPath && sha && /^[0-9a-fA-F]{40,64}$/.test(sha)) {
+          return sha.slice(0, 7);
+        }
+      }
+    } catch {
+      // packed-refs not found
+    }
+  }
+
+  return null;
 }
 
 

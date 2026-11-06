@@ -879,7 +879,17 @@ function ProjectSection({
           className="project-name"
           onClick={() => toggle(project.cwd)}
           aria-expanded={!isCollapsed}
-          title={nested ? project.gitBranch ?? project.name : project.name}
+          title={
+            nested
+              ? [
+                  project.gitBranch ?? project.name,
+                  project.gitCommit ? project.gitCommit.slice(0, 7) : null,
+                  project.gitStatus ? GIT_STATUS_LABEL[project.gitStatus] : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : project.name
+          }
         >
           <span className="project-icon">
             <Icon
@@ -891,13 +901,30 @@ function ProjectSection({
                 className={`git-status-dot git-status-dot--${project.gitStatus}`}
                 role="img"
                 aria-label={GIT_STATUS_LABEL[project.gitStatus]}
-                title={GIT_STATUS_LABEL[project.gitStatus]}
+                title={
+                  [
+                    project.gitCommit ? project.gitCommit.slice(0, 7) : null,
+                    GIT_STATUS_LABEL[project.gitStatus],
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
+                }
               />
             )}
           </span>
           <span
             className="project-label"
-            title={nested ? project.gitBranch ?? project.name : project.name}
+            title={
+              nested
+                ? [
+                    project.gitBranch ?? project.name,
+                    project.gitCommit ? project.gitCommit.slice(0, 7) : null,
+                    project.gitStatus ? GIT_STATUS_LABEL[project.gitStatus] : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
+                : project.name
+            }
           >
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
@@ -905,9 +932,13 @@ function ProjectSection({
             <span
               className={`project-git-badge${project.gitStatus ? ` project-git-badge--${project.gitStatus}` : ''}`}
               title={
-                project.gitStatus
-                  ? `${project.gitBranch ?? 'HEAD'} · ${GIT_STATUS_LABEL[project.gitStatus]}`
-                  : (project.gitBranch ?? 'HEAD')
+                [
+                  project.gitBranch ?? 'HEAD',
+                  project.gitCommit ? project.gitCommit.slice(0, 7) : null,
+                  project.gitStatus ? GIT_STATUS_LABEL[project.gitStatus] : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
               }
             >
               <Icon name="branch" size={12} className="project-git-icon" />

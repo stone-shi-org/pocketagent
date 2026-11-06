@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { QueuedRunSummary, SessionInfo } from '@pocketagent/protocol';
-import { ProjectService, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
+import { ProjectService, findMainRepoCwd, readGitBranch, readGitCommit } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
 import { PiTranscriptStore } from '../src/conversations/pi.js';
@@ -93,6 +93,64 @@ describe('readGitBranch', () => {
       expect(await readGitBranch(dir)).toBe('feature/wt');
     } finally {
       fs.rmSync(gitDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('readGitCommit', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-commit-'));
+    fs.mkdirSync(path.join(dir, '.git'));
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('reads the commit from detached .git/HEAD without running git', async () => {
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), '9f3c1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f\n');
+    expect(await readGitCommit(dir)).toBe('9f3c1a2');
+  });
+
+  it('reads the commit from loose ref', async () => {
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/feature/thing\n');
+    fs.mkdirSync(path.join(dir, '.git', 'refs', 'heads', 'feature'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'heads', 'feature', 'thing'),
+      '1234567890abcdef1234567890abcdef12345678\n',
+    );
+    expect(await readGitCommit(dir)).toBe('1234567');
+  });
+
+  it('reads the commit from packed-refs', async () => {
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'packed-refs'),
+      '# pack-refs with: peeled-tags fully-peeled sorted \nabcdef1234567890abcdef1234567890abcdef12 refs/heads/main\n',
+    );
+    expect(await readGitCommit(dir)).toBe('abcdef1');
+  });
+
+  it('reports null outside a repository', async () => {
+    expect(await readGitCommit('/tmp')).toBeNull();
+  });
+
+  it('follows a worktree .git file to find the commit in commonDir', async () => {
+    const mainDir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-main-'));
+    fs.mkdirSync(path.join(mainDir, '.git', 'worktrees', 'wt'), { recursive: true });
+    fs.writeFileSync(path.join(mainDir, '.git', 'worktrees', 'wt', 'HEAD'), 'ref: refs/heads/feature/wt\n');
+    fs.writeFileSync(path.join(mainDir, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
+    fs.mkdirSync(path.join(mainDir, '.git', 'refs', 'heads', 'feature'), { recursive: true });
+    fs.writeFileSync(
+      path.join(mainDir, '.git', 'refs', 'heads', 'feature', 'wt'),
+      'fedcba0987654321fedcba0987654321fedcba09\n',
+    );
+
+    fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${path.join(mainDir, '.git', 'worktrees', 'wt')}\n`);
+
+    try {
+      expect(await readGitCommit(dir)).toBe('fedcba0');
+    } finally {
+      fs.rmSync(mainDir, { recursive: true, force: true });
     }
   });
 });
@@ -735,6 +793,13 @@ describe('ProjectService', () => {
     fs.writeFileSync(path.join(ws.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
     const [project] = await service.list([makeSession({ cwd: ws.project })]);
     expect(project).toMatchObject({ isGitRepo: true, gitBranch: 'main' });
+  });
+
+  it('reports the git commit for a project that has one', async () => {
+    fs.mkdirSync(path.join(ws.project, '.git'));
+    fs.writeFileSync(path.join(ws.project, '.git', 'HEAD'), '9f3c1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f\n');
+    const [project] = await service.list([makeSession({ cwd: ws.project })]);
+    expect(project).toMatchObject({ isGitRepo: true, gitCommit: '9f3c1a2' });
   });
 
   it('reports null gitStatus outside a repository, and never spawns git for it', async () => {

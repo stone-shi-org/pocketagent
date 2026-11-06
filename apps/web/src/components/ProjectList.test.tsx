@@ -174,6 +174,7 @@ describe('ProjectList tree status (PA-117)', () => {
           isGitRepo: true,
           gitBranch: 'feature/pa-173',
           gitStatus: 'dirty',
+          gitCommit: '9cea2cf03ea30dbb9a554e77cfed2700acdf1170',
           worktrees: [
             {
               ...dummyProject,
@@ -182,6 +183,7 @@ describe('ProjectList tree status (PA-117)', () => {
               isGitRepo: true,
               gitBranch: 'worktree-branch',
               gitStatus: 'clean',
+              gitCommit: '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f',
               worktrees: [],
             },
           ],
@@ -214,7 +216,8 @@ describe('ProjectList tree status (PA-117)', () => {
     expect(html).toContain('project-git-icon');
     expect(html).toContain('>feature/pa-173</span>');
     expect(html).toContain('project-git-status--dirty');
-    expect(html).toContain('title="feature/pa-173 · Uncommitted changes"');
+    expect(html).toContain('title="feature/pa-173 · 9cea2cf · Uncommitted changes"');
+    expect(html).toContain('title="worktree-branch · 1a2b3c4 · Clean"');
 
     // Non-git project does not render a git badge, and nested worktree uses its own branch row without duplicating the badge
     const badgeMatches = html.match(/class="project-git-badge/g) ?? [];

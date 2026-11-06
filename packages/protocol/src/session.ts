@@ -774,6 +774,8 @@ export interface ProjectInfo {
    * window rather than always being exact.
    */
   gitStatus: GitStatus | null;
+  /** Current commit hash (first 7 characters), or null when outside a repository or unknown. */
+  gitCommit?: string | null;
   /** Excluded from the list unless explicitly asked for. */
   hidden: boolean;
   /**
@@ -832,6 +834,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     isGitRepo: z.boolean(),
     gitBranch: z.string().nullable(),
     gitStatus: GitStatus.nullable(),
+    gitCommit: z.string().nullable().optional(),
     hidden: z.boolean(),
     isWorkspace: z.boolean(),
     chats: z.array(ChatSummary),
