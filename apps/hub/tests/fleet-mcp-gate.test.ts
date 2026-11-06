@@ -69,6 +69,9 @@ describe('the Hub /mcp gate', () => {
       '/api/auth/me',
       '/h/dev01/api/projects',
       '/api/projects',
+      // PA-178: a remote agent's token never reaches a host's live browser view.
+      '/h/dev01/api/browsers',
+      '/api/browsers',
     ];
     for (const path of paths) {
       const res = await fetch(`${hub.baseUrl}${path}`, { headers: bearer(token) });
@@ -92,13 +95,16 @@ describe('the Hub /mcp gate', () => {
   });
 
   it('refuses a WebSocket upgrade carrying the token', async () => {
-    const outcome = await new Promise<string>((resolve) => {
-      const ws = new WebSocket(`${hub.baseUrl.replace('http', 'ws')}/h/dev01/api/ws`, { headers: bearer(token) });
-      ws.on('unexpected-response', (_req, res) => resolve(String(res.statusCode)));
-      ws.on('open', () => resolve('open'));
-      ws.on('error', () => resolve('error'));
-    });
-    expect(outcome).not.toBe('open');
+    // PA-178: the browser viewer's socket included.
+    for (const path of ['/h/dev01/api/ws', '/h/dev01/api/browser/pocket-x/ws']) {
+      const outcome = await new Promise<string>((resolve) => {
+        const ws = new WebSocket(`${hub.baseUrl.replace('http', 'ws')}${path}`, { headers: bearer(token) });
+        ws.on('unexpected-response', (_req, res) => resolve(String(res.statusCode)));
+        ws.on('open', () => resolve('open'));
+        ws.on('error', () => resolve('error'));
+      });
+      expect(outcome, path).not.toBe('open');
+    }
   });
 
   it('a revoked token is refused on its next request and its session is closed', async () => {

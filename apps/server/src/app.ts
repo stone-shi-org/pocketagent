@@ -46,10 +46,10 @@ import { createDefaultRegistry, setAgentInstallPrefixSource } from './agents/reg
 import type { AgentAdapter } from './agents/types.js';
 import { CustomClaudeProviderStore } from './agents/custom-providers-store.js';
 import { createBackend, DirectPtyBackend } from './backends/index.js';
-import { SessionManager } from './sessions/manager.js';
+import { BROWSER_CDP_ENV, SessionManager } from './sessions/manager.js';
 import { buildChildEnv } from './sessions/env.js';
 import { PushService } from './push/index.js';
-import { wirePlannerApprovalPush } from './push/planner-approvals.js';
+import { wireBrowserHelpPush, wirePlannerApprovalPush } from './push/planner-approvals.js';
 import { ConversationStore } from './conversations/index.js';
 import { AgyTranscriptStore } from './conversations/agy.js';
 import { CodexTranscriptStore } from './conversations/codex.js';
@@ -74,6 +74,8 @@ import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
 import { usageRoutes } from './routes/usage.js';
 import { voiceRoutes } from './routes/voice.js';
+import { browserRoutes } from './routes/browser.js';
+import { BrowserService, type BrowserServiceOptions } from './browser/service.js';
 import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
@@ -193,6 +195,8 @@ function isWebhookDelivery(url: string, method: string): boolean {
 
 export interface BuildAppOptions {
   config: Config;
+  /** PA-178: injected in tests — a fake Chromium launcher, or no executable at all. */
+  browserOptions?: Partial<Omit<BrowserServiceOptions, 'workspaces' | 'plannerWorkspaces'>>;
   /** Injected in tests so each run gets an isolated database. */
   db?: Db;
   /** Injected in tests to point at a fixture directory instead of a real `~/.gemini`. */
@@ -416,6 +420,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     options.plannerWorkspacesRoot ?? path.join(config.dataDir, 'planner-workspaces');
   const plannerWorkspaces = new PlannerWorkspaceRegistry(createPlannerWorkspaceStore(db));
   await plannerWorkspaces.ensureDefaultWorkspace(plannerWorkspacesRoot);
+  // PA-178: the shared browsers agents log in with. Built before the planner,
+  // whose `browser_endpoint`/`request_browser_help` tools use it, and before
+  // the session manager, whose children get a running browser's endpoint.
+  const browsers = new BrowserService({
+    dataDir: config.dataDir,
+    workspaces,
+    plannerWorkspaces,
+    logger: app.log,
+    idleMs: (config.browserIdleMinutes ?? 15) * 60_000,
+    ...options.browserOptions,
+  });
   // `plannerChats` itself is constructed further down, once `sessions`,
   // `conversations`, and the transcript stores it needs for read-only tools
   // (PA-6 phase 3) exist.
@@ -614,6 +629,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   const plannerChats = new PlannerChatService({
     db,
+    browsers,
     // PA-56: `read_settings`/`update_settings`/`update_custom_claude_provider`
     // — `config` is mutated in place by `writeSettingsField`, and
     // `customClaudeProviders` is constructed above (line ~275), well before
@@ -834,8 +850,16 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     logger: app.log,
   });
 
+  // PA-178: a coding session started while its project's browser runs gets
+  // that browser's loopback endpoint (and nothing when it does not).
+  sessions.setSessionEnvProvider((cwd): Record<string, string> => {
+    const cdpUrl = browsers.cdpUrlIfRunning(browsers.scopeForCwd(cwd));
+    return cdpUrl ? { [BROWSER_CDP_ENV]: cdpUrl } : {};
+  });
+
   const context: PocketContext = {
     config,
+    browsers,
     auth,
     hubCredentials,
     sessions,
@@ -892,6 +916,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // PA-134: an approval in a chat an MCP client started reaches a human by push.
   const unwirePlannerPush = wirePlannerApprovalPush(db, plannerChats, push);
   app.addHook('onClose', async () => unwirePlannerPush());
+  // PA-178: a browser handoff reaches a human by push, deep-linked to the viewer.
+  const unwireBrowserHelpPush = wireBrowserHelpPush(plannerChats, push);
+  app.addHook('onClose', async () => unwireBrowserHelpPush());
 
   /**
    * An MCP session's principal, re-read by id. A hub credential reaching the
@@ -1123,6 +1150,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(pushRoutes);
   await app.register(usageRoutes);
   await app.register(voiceRoutes);
+  await app.register(browserRoutes);
   await app.register(websocketRoutes);
 
   // ---- Static frontend ------------------------------------------------------
@@ -1190,6 +1218,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     memoryConsolidation.stop();
     telegramPoller.stop();
     telegramBridge.stop();
+    // PA-178: `Browser.close`, not a signal — a SIGTERM loses a login made
+    // in the last ~30 s (see `BrowserService.stop`).
+    await browsers.shutdown();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

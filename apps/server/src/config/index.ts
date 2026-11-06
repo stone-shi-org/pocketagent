@@ -53,6 +53,8 @@ const RawEnv = z.object({
   POCKETAGENT_ALLOWED_ORIGINS: z.string().optional(),
 
   MAX_SESSIONS: intish(10, 1, 200),
+  /** PA-178: minutes before an unused shared browser is stopped; 0 = never. */
+  POCKETAGENT_BROWSER_IDLE_MINUTES: intish(15, 0, 7 * 24 * 60),
   OUTPUT_BUFFER_BYTES: intish(2 * 1024 * 1024, 16 * 1024, 64 * 1024 * 1024),
   /** Seconds of no PTY output AND no attached client before auto-kill. 0 disables. */
   SESSION_IDLE_TIMEOUT: intish(0, 0, 30 * 24 * 3600),
@@ -193,6 +195,12 @@ export interface Config {
    */
   databasePath: string;
   maxSessions: number;
+  /**
+   * PA-178: how long a shared browser may sit unused (no viewer, no agent
+   * activity, no pending handoff) before it is closed; 0 = never. Optional so
+   * hand-built test configs need not name it.
+   */
+  browserIdleMinutes?: number;
   outputBufferBytes: number;
   sessionIdleTimeoutSeconds: number;
   sessionTtlMs: number;
@@ -632,6 +640,7 @@ export function loadConfig(
     dataDir,
     databasePath,
     maxSessions: e.MAX_SESSIONS,
+    browserIdleMinutes: e.POCKETAGENT_BROWSER_IDLE_MINUTES,
     outputBufferBytes: e.OUTPUT_BUFFER_BYTES,
     sessionIdleTimeoutSeconds: e.SESSION_IDLE_TIMEOUT,
     sessionTtlMs: e.POCKETAGENT_SESSION_TTL_HOURS * 3600 * 1000,

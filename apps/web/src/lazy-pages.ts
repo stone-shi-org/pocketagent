@@ -66,3 +66,8 @@ export const HubTemplateEditorPage = lazy(() =>
 
 /** PA-110. The Hub's own home; like the template pages, fetched only behind a Hub. */
 export const HubPage = lazy(() => import('./pages/HubPage.js').then((m) => ({ default: m.HubPage })));
+
+/** PA-178: the live browser view — reached from a chat header or a push, never on first paint. */
+export const BrowserPage = lazy(() =>
+  import('./pages/BrowserPage.js').then((m) => ({ default: m.BrowserPage })),
+);

@@ -22,6 +22,7 @@ import {
   SettingsPage,
   WebhookEditorPage,
   WebhooksPage,
+  BrowserPage,
 } from './lazy-pages.js';
 import { api } from './api/client.js';
 import { useHostDirectory } from './hosts/directory.js';
@@ -458,6 +459,20 @@ function PhoneRoute({
           agentId={route.agentId}
           onBack={() => navigate({ name: 'planner' })}
           onDone={() => navigate({ name: 'planner' })}
+          onApiError={onApiError}
+        />
+      </Suspense>
+    );
+  }
+
+  if (route.name === 'browser') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <BrowserPage
+          key={route.browserId}
+          browserId={route.browserId}
+          onBack={() => (window.history.length > 1 ? window.history.back() : navigate({ name: 'list' }))}
+          onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
           onApiError={onApiError}
         />
       </Suspense>

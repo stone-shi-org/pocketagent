@@ -32,6 +32,12 @@ export type Route =
       new one is still the quick inline form on `PlannerPage` itself. */
   | { name: 'planner-agent'; agentId: string }
   /**
+   * PA-178: the live view of one shared browser — a project's or a Pocket
+   * Agent's. Host-scoped like a session: the browser runs on that machine, and
+   * a pushed handoff arrives as `#/h/<host>/browser/<id>` through a Hub.
+   */
+  | { name: 'browser'; browserId: string }
+  /**
    * The Hub's config templates (PA-70) — see `HubTemplatesPage`.
    *
    * Never carries a host segment, and that is the point: a template lives on
@@ -174,6 +180,9 @@ function parse(hash: string): Route {
 
   if (/^#\/hub$/.exec(hash)) return { name: 'hub' };
 
+  const browser = /^#\/browser\/([^/?]+)/.exec(hash);
+  if (browser?.[1]) return { name: 'browser', browserId: decodeURIComponent(browser[1]) };
+
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
   if (/^#\/providers$/.exec(hash)) return { name: 'providers' };
@@ -211,6 +220,8 @@ function toHash(route: Route): string {
       return `#/planner/${encodeURIComponent(route.chatId)}`;
     case 'planner-agent':
       return `#/planner/agent/${encodeURIComponent(route.agentId)}`;
+    case 'browser':
+      return `#/browser/${encodeURIComponent(route.browserId)}`;
     case 'hub':
       return '#/hub';
     case 'hub-templates':

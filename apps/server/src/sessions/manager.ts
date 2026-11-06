@@ -254,8 +254,23 @@ const SWEEP_INTERVAL_MS = 15_000;
  * only move a reference count. Closing a browser tab, losing signal on a train,
  * or force-quitting Safari has no effect on the running process.
  */
+/** PA-178: the variable a coding session reads the shared browser's endpoint from. */
+export const BROWSER_CDP_ENV = 'PA_BROWSER_CDP_URL';
+
 export class SessionManager {
   private readonly live = new Map<string, ManagedSession>();
+  /**
+   * PA-178: extra variables for a new session's environment, by cwd — the
+   * shared browser's loopback endpoint when that project's browser is running.
+   * Named outside `POCKETAGENT_*`, which `buildChildEnv` strips. Fixed at
+   * spawn, so a session started before its browser does not see it (a
+   * documented limitation; a Pocket Agent's `browser_endpoint` tool has none).
+   */
+  private sessionEnvFor: (cwd: string) => Record<string, string> = () => ({});
+
+  setSessionEnvProvider(provider: (cwd: string) => Record<string, string>): void {
+    this.sessionEnvFor = provider;
+  }
   /**
    * PA-165: when each session's most recent turn completed — what the chat
    * status dot's "unread" state compares a read mark against. In memory only:
@@ -996,7 +1011,7 @@ export class SessionManager {
     }
 
     if (transport === 'structured') {
-      const env = buildChildEnv({ cwd: input.cwd, overrides: built.env });
+      const env = buildChildEnv({ cwd: input.cwd, overrides: { ...this.sessionEnvFor(input.cwd), ...built.env } });
 
       // Only a brand-new conversation gets an auto-applied model/effort
       // default — a resume already carries its own conversation's model in
@@ -1120,7 +1135,7 @@ export class SessionManager {
         command: built.command,
         args: built.args,
         cwd: input.cwd,
-        env: buildChildEnv({ cwd: input.cwd, overrides: built.env }),
+        env: buildChildEnv({ cwd: input.cwd, overrides: { ...this.sessionEnvFor(input.cwd), ...built.env } }),
         envOverrideKeys: Object.keys(built.env ?? {}),
         // An adopted pane keeps the size it already has; resizing it here
         // would shrink whatever terminal is also looking at it.

@@ -129,6 +129,17 @@ for (const era of ['legacy', 'modern'] as Era[]) {
       ).toBe(false);
     });
 
+    it('catalog-grep: no tool watches or drives a host’s shared browser (PA-178)', async () => {
+      // A remote agent must not be able to watch or drive a logged-in browser:
+      // the viewer is a person's, on that host, behind a cookie or a hub credential.
+      const { tools } = await client.listTools();
+      expect(tools.map((t) => t.name).filter((n) => /browser|screencast|frame|cdp/i.test(n))).toEqual([]);
+      const schemas = JSON.stringify(tools.map((t) => t.inputSchema));
+      for (const forbidden of ['browserId', 'helpId', 'cdp', 'screencast', 'insertText']) {
+        expect(schemas, forbidden).not.toContain(forbidden);
+      }
+    });
+
     it('lists both hosts as ready to dispatch to', async () => {
       const res = await callHub(client, 'list_hosts');
       expect(res.data.hosts.map((h: { id: string; dispatch: string }) => [h.id, h.dispatch])).toEqual([

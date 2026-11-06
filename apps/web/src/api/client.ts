@@ -1,4 +1,7 @@
 import type {
+  BrowserInfo,
+  BrowserListResponse,
+  BrowserScopeResponse,
   AdoptableTarget,
   AgentEvent,
   AgentUsageInfo,
@@ -1398,6 +1401,45 @@ export function createApiClient(endpoint: HostEndpoint) {
         if (reconnectTimeout) clearTimeout(reconnectTimeout);
       };
     },
+
+    // ---- PA-178: the shared browsers ------------------------------------
+    listBrowsers: () => request<BrowserListResponse>('/api/browsers'),
+
+    /** Which shared browser a coding session or a Pocket Agent chat uses (null when none can exist). */
+    browserScope: (q: { sessionId: string } | { plannerChatId: string }) =>
+      request<BrowserScopeResponse>(
+        `/api/browsers/scope?${'sessionId' in q ? `sessionId=${encodeURIComponent(q.sessionId)}` : `plannerChatId=${encodeURIComponent(q.plannerChatId)}`}`,
+      ),
+
+    startBrowser: (id: string) =>
+      request<BrowserInfo>(`/api/browsers/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+
+    stopBrowser: (id: string) =>
+      request<BrowserInfo>(`/api/browsers/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
+
+    /** Deletes the profile — every login in it. The caller confirms first. */
+    clearBrowserData: (id: string) =>
+      request<BrowserInfo>(`/api/browsers/${encodeURIComponent(id)}/clear-data`, { method: 'POST' }),
+
+    /** Done / Cancel from the viewer; the server drives the rest of the turn. */
+    answerBrowserHelp: (browserId: string, helpId: string, outcome: 'done' | 'cancel') =>
+      request<{ ok: true; chatId: string }>(
+        `/api/browsers/${encodeURIComponent(browserId)}/help/${encodeURIComponent(helpId)}`,
+        { method: 'POST', body: JSON.stringify({ outcome }) },
+      ),
+
+    /** Done / Cancel from the chat's own card, streamed like an approval. */
+    resolvePlannerBrowserHelp: (
+      id: string,
+      helpId: string,
+      outcome: 'done' | 'cancel',
+      onEvent: (event: AgentEvent) => void,
+    ) =>
+      streamPlannerEvents(
+        `/api/planner/chats/${encodeURIComponent(id)}/browser-help/${encodeURIComponent(helpId)}`,
+        { outcome },
+        onEvent,
+      ),
 
     /** Resolves a turn paused on an unanswered `permission_request`. */
     resolvePlannerApproval: (

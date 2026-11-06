@@ -28,6 +28,7 @@ export * from './hub-templates.js';
 export * from './hub-fleet.js';
 export * from './push.js';
 export * from './admin.js';
+export * from './browser.js';
 export * from './export-import.js';
 export * from './capabilities.js';
 export * from './chat-status.js';

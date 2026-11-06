@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { BrowserService } from '../browser/service.js';
 import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
@@ -148,7 +149,16 @@ import {
  * one.
  */
 
+/** PA-178: the shared-browser tools. */
+export const BROWSER_ENDPOINT_TOOL = 'browser_endpoint';
+export const REQUEST_BROWSER_HELP_TOOL = 'request_browser_help';
+
 export interface PlannerToolDeps {
+  /**
+   * PA-178: the shared browsers. Absent in tests that do not build one, and
+   * the browser tools refuse rather than guess.
+   */
+  browsers?: BrowserService;
   /**
    * PA-121: the turn's abort signal, so interrupting a turn can stop the tool
    * it is running rather than only the round trip after it. Optional: the
@@ -794,6 +804,12 @@ function isWithinAttachedDocWorkspace(deps: PlannerToolDeps, real: string): bool
 
 function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
   if (deps.docWorkspaces?.isInternalStorePath(real)) {
+    return false;
+  }
+  // PA-178: browser profiles hold live cookies and session tokens. They sit
+  // under the data root, but a planner workspace can be pointed at a parent
+  // of it, so the store is refused by name rather than by luck of layout.
+  if (deps.browsers?.isInternalStorePath(real)) {
     return false;
   }
   return (
@@ -1553,6 +1569,64 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         }
       }
       return slice;
+    },
+  },
+  {
+    // PA-178: the agent's way into the shared, logged-in browser. Read-only:
+    // it starts (or finds) this Pocket Agent's browser and names its loopback
+    // endpoint — it changes nothing a human has to approve.
+    name: BROWSER_ENDPOINT_TOOL,
+    description:
+      "Start (if needed) this Pocket Agent's shared Chromium and return its CDP endpoint. This browser keeps " +
+      'its logins between runs, and a person can watch and drive it in PocketAgent. Use it from bash with ' +
+      '`playwright-cli attach --cdp=<endpoint>`, then the usual playwright-cli commands (goto, snapshot, click, ' +
+      'fill, screenshot); `playwright-cli detach` when done. A browser you open yourself with `playwright-cli ' +
+      'open` does not carry these logins.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+    async execute(deps) {
+      const browsers = deps.browsers;
+      const id = browsers?.scopeForPlannerWorkspace(deps.workspaceId) ?? null;
+      if (!browsers || !id) return { content: 'No shared browser is available for this chat.', isError: true };
+      try {
+        const inst = await browsers.ensure(id);
+        return JSON.stringify({
+          endpoint: inst.launched.cdpUrl,
+          attach: `playwright-cli attach --cdp=${inst.launched.cdpUrl}`,
+          viewer: `#/browser/${id}`,
+        });
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+    },
+  },
+  {
+    // PA-178: the handoff. `PlannerChatService.processToolCalls` intercepts
+    // this call and parks the turn — the same map an approval uses, no timeout
+    // — until a person presses Done or Cancel. Read-only on purpose: it asks a
+    // human, it does not act. `execute` runs only where nothing can park (the
+    // Gemini Live bridge), and refuses there.
+    name: REQUEST_BROWSER_HELP_TOOL,
+    description:
+      'Ask the user to operate your shared browser for you — to sign in, pass MFA or a CAPTCHA, or accept a ' +
+      'consent screen — when only a person can. Your turn pauses until they press Done (the result then names ' +
+      'the page they left it on) or Cancel. Optionally open `url` first. After Done, re-attach with ' +
+      'playwright-cli and continue; the login is in the same browser. Do not ask for passwords in chat.',
+    parameters: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'One sentence for the user: what to do in the browser.' },
+        url: { type: 'string', description: 'Optional http(s) page to open first, e.g. the login page.' },
+      },
+      required: ['reason'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute() {
+      return {
+        content: 'request_browser_help is only available in a typed Pocket Agent turn, not in live voice mode.',
+        isError: true,
+      };
     },
   },
   {

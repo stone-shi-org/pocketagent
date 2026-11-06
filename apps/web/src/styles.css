@@ -10455,3 +10455,191 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
 .sidebar-search .live-only-toggle {
   padding-bottom: 0;
 }
+
+/* ---- PA-178: the live browser view ------------------------------------------
+   The frame is the one dark surface on this page (`--console`), so it sets
+   `--console-text` for anything drawn on it. */
+.browser-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  height: 100dvh;
+  min-height: 0;
+}
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px calc(10px + var(--safe-right)) 6px calc(10px + var(--safe-left));
+  border-bottom: 1px solid var(--border);
+}
+.browser-toolbar .round-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.browser-url {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.browser-url input {
+  width: 100%;
+  font-size: 15px;
+}
+.browser-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.browser-tab {
+  display: flex;
+  align-items: center;
+  flex: 0 1 180px;
+  min-width: 80px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.browser-tab.selected {
+  border-color: var(--accent);
+}
+.browser-tab > button:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 0;
+  background: none;
+  padding: 4px 8px;
+  font-size: 13px;
+  text-align: left;
+}
+.browser-tab-close,
+.browser-tab-new,
+.browser-mode {
+  border: 0;
+  background: none;
+  padding: 4px 6px;
+  color: var(--text-dim);
+}
+.browser-mode {
+  margin-left: auto;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.browser-mode.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.browser-surface {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--console);
+  color: var(--console-text);
+  outline: none;
+}
+.browser-surface.captured {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.browser-frame {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.browser-empty {
+  margin: auto;
+  padding: 24px;
+  text-align: center;
+  color: var(--console-text);
+}
+.browser-captured {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+  pointer-events: none;
+}
+/* Off-screen but focusable, so a phone raises its keyboard for it. */
+.browser-keyboard {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  border: 0;
+  padding: 0;
+  resize: none;
+}
+.browser-help-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px calc(12px + var(--safe-right)) 10px calc(12px + var(--safe-left));
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--warn);
+}
+.browser-help-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.browser-help-text span,
+.browser-help-reason {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.browser-help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.browser-notices {
+  display: flex;
+  flex-direction: column;
+}
+.browser-note {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--warn);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+.browser-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px calc(12px + var(--safe-right)) calc(6px + var(--safe-bottom)) calc(12px + var(--safe-left));
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.browser-dialog-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.browser-btn.running {
+  color: var(--ok);
+}

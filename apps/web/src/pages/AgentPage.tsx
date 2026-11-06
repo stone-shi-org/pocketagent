@@ -31,6 +31,7 @@ import { Icon } from '../components/Icon.js';
 import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
+import { BrowserButton, useBrowserScope } from '../components/BrowserButton.js';
 import { useMarkChatRead } from '../agent/chat-read.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
@@ -81,6 +82,9 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
   // is on screen is marked read — see `useMarkChatRead`.
   const [turnsFinished, setTurnsFinished] = useState(0);
   useMarkChatRead('session', sessionId, { active, turnSignal: turnsFinished });
+  // PA-178: the project's shared browser. A coding agent has no handoff tool —
+  // it says in its reply that it needs a person, and this is where they go.
+  const sharedBrowser = useBrowserScope({ sessionId }, turnsFinished);
   const endpoint = useHostEndpoint();
   const connRef = useRef<TerminalConnection | null>(null);
   /**
@@ -961,6 +965,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
           <ConnectionBadge state={connection} />
           <StatusBadge status={status} />
         </div>
+        {sharedBrowser && <BrowserButton browser={sharedBrowser} className="icon-btn" />}
         {alive && (
           <button type="button" className="danger icon-btn" onClick={() => setConfirmingStop(true)}>
             Stop

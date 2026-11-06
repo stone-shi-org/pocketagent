@@ -511,6 +511,36 @@ export const PromptQueueEvent = z.object({
 });
 export type PromptQueueEvent = z.infer<typeof PromptQueueEvent>;
 
+/**
+ * PA-178: a Pocket Agent asked a person to operate its shared browser — a
+ * login, an MFA prompt, a CAPTCHA (`request_browser_help`). The turn is parked
+ * exactly like an approval, with no timeout, until a human presses Done or
+ * Cancel in the viewer or the chat. `browserId` names the viewer
+ * (`#/browser/<browserId>`); `reason` is the model's own sentence and is shown
+ * as text, never rendered as markup.
+ *
+ * Planner-only, like `context_compaction`: no structured session emits it, so
+ * it never reaches a `/api/ws` frame and needs no `PROTOCOL_VERSION` bump, and
+ * an older bundle's reducer ignores the kind.
+ */
+export const BrowserHelpRequestEvent = z.object({
+  kind: z.literal('browser_help_request'),
+  id: z.string(),
+  toolUseId: z.string(),
+  browserId: z.string(),
+  reason: z.string(),
+  url: z.string().nullable(),
+});
+export type BrowserHelpRequestEvent = z.infer<typeof BrowserHelpRequestEvent>;
+
+/** PA-178: the human answered a `browser_help_request`. */
+export const BrowserHelpResolvedEvent = z.object({
+  kind: z.literal('browser_help_resolved'),
+  id: z.string(),
+  outcome: z.enum(['done', 'cancel']),
+});
+export type BrowserHelpResolvedEvent = z.infer<typeof BrowserHelpResolvedEvent>;
+
 export const AgentEvent = z.discriminatedUnion('kind', [
   SessionStartedEvent,
   TextEvent,
@@ -534,6 +564,8 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   TtsAudioEvent,
   ContextCompactionEvent,
   PromptQueueEvent,
+  BrowserHelpRequestEvent,
+  BrowserHelpResolvedEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

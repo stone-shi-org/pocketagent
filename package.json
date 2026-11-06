@@ -46,7 +46,8 @@
     "demo:agent-install-ui": "pnpm -F @pocketagent/server exec node scripts/agent-install-ui-demo.mjs",
     "demo:gemini-live-ui": "pnpm -F @pocketagent/server exec node scripts/gemini-live-ui-demo.mjs",
     "demo:mcp": "pnpm -F @pocketagent/server exec node scripts/mcp-demo.mjs",
-    "demo:attachments-ui": "pnpm -F @pocketagent/server exec node scripts/attachments-ui-demo.mjs"
+    "demo:attachments-ui": "pnpm -F @pocketagent/server exec node scripts/attachments-ui-demo.mjs",
+    "demo:browser-view": "pnpm -F @pocketagent/server exec node scripts/browser-view-ui-demo.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

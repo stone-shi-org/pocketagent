@@ -36,6 +36,7 @@ import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
 import { toPlannerModelInfos } from '../agent/planner-models.js';
 import { applyEvent, applyEvents, emptyTranscript, markTurnUndone, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { BrowserButton, useBrowserScope, useOpenBrowser } from '../components/BrowserButton.js';
 import { useMarkChatRead } from '../agent/chat-read.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
@@ -994,6 +995,10 @@ export function PlannerChatPage({
   }, [shouldStream, load]);
 
   const pending = transcript?.pending[0] ?? null;
+  // PA-178: this chat's shared browser, and any request for a person to use it.
+  const browserHelp = transcript?.browserHelp[0] ?? null;
+  const sharedBrowser = useBrowserScope({ plannerChatId: chatId }, browserHelp?.id ?? null);
+  const openBrowser = useOpenBrowser();
 
   /** PA-136: files are uploaded as soon as they are attached. */
   const uploadFile = useCallback(
@@ -1505,6 +1510,29 @@ export function PlannerChatPage({
     };
   }, [pipelineLiveActive, shouldStream, geminiLive, chatId, api, showLiveListenNotice, micVersion]);
 
+  const answerBrowserHelp = (outcome: 'done' | 'cancel'): void => {
+    const help = transcript?.browserHelp[0];
+    if (!help || sending) return;
+    setSending(true);
+    setError(null);
+    void (async () => {
+      try {
+        await api.resolvePlannerBrowserHelp(chatId, help.id, outcome, onStreamEvent);
+      } catch (err) {
+        // Already answered elsewhere (the viewer, another tab) or lost to a
+        // restart: either way nothing is waiting any more.
+        if (err instanceof ApiError && err.status === 404) {
+          setTranscript((t) => (t ? { ...t, browserHelp: t.browserHelp.filter((h) => h.id !== help.id) } : t));
+        } else {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not record that answer.');
+        }
+      } finally {
+        setSending(false);
+      }
+    })();
+  };
+
   const decide = (decision: PlannerToolApprovalChoice): void => {
     const pending = transcript?.pending[0];
     if (!pending || sending) return;
@@ -1581,6 +1609,7 @@ export function PlannerChatPage({
             <button type="button" className="planner-btn" onClick={startEditingTitle} aria-label="Rename chat">
               <Icon name="edit" size={14} />
             </button>
+            {sharedBrowser && <BrowserButton browser={sharedBrowser} />}
             <div className="doc-workspace-header-control" ref={workspaceMenuRef}>
               {attachedDocWorkspace ? (
                 <button
@@ -1902,6 +1931,25 @@ export function PlannerChatPage({
             />
           </ArtifactHrefContext.Provider>
         </AttachmentHrefContext.Provider>
+      )}
+
+      {browserHelp && (
+        <div className="planner-approval-card browser-help-card" role="alertdialog" aria-label="The agent needs you in its browser">
+          <p className="planner-approval-title">The agent needs you in its browser</p>
+          {/* The model's own sentence, as text. */}
+          <p className="browser-help-reason">{browserHelp.reason}</p>
+          <div className="planner-approval-actions">
+            <button type="button" className="primary" onClick={() => openBrowser(browserHelp.browserId)}>
+              Open browser
+            </button>
+            <button type="button" disabled={sending} onClick={() => answerBrowserHelp('done')}>
+              Done
+            </button>
+            <button type="button" disabled={sending} onClick={() => answerBrowserHelp('cancel')}>
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
 
       {pending && (() => {

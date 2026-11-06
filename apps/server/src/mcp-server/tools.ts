@@ -545,7 +545,17 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
           approvals.push({ sessionId: info.id, sessionTitle: info.title, toolName: p.toolName, title: p.title, filePath: p.filePath });
         }
       }
-      return { approvals };
+      // PA-178: a Pocket Agent waiting for a person to operate its browser.
+      // Listed so a client can see why a turn is not moving; never answerable
+      // here, and nothing in this catalog reaches the browser itself.
+      const browserHelp = deps.pocket.plannerChats.pendingBrowserHelp().map((p) => ({
+        chatId: p.chatId,
+        chatTitle: p.chatTitle,
+        browserId: p.browserId,
+        reason: p.reason,
+        deepLink: `/#/browser/${p.browserId}`,
+      }));
+      return { approvals, browserHelp };
     },
   },
   {
@@ -619,8 +629,22 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
           });
         }
       }
+      const browserHelp = deps.pocket.plannerChats.pendingBrowserHelp();
+      const helpChats = new Set(browserHelp.map((p) => p.chatId));
+      for (const p of browserHelp) {
+        pendingApprovals.push({
+          kind: 'browser_help',
+          chatId: p.chatId,
+          workspaceId: p.workspaceId,
+          title: p.chatTitle,
+          reason: p.reason,
+          deepLink: `/#/browser/${p.browserId}`,
+        });
+      }
       for (const turn of deps.pocket.plannerChats.inFlightTurns()) {
         if (turn.reason !== 'awaiting_approval') continue;
+        // PA-178: listed above as what it really is.
+        if (helpChats.has(turn.chatId)) continue;
         const chat = deps.pocket.plannerChats.get(turn.chatId);
         pendingApprovals.push({
           kind: 'pocket_chat',

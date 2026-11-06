@@ -46,3 +46,33 @@ export function pendingPlannerApprovalPayloads(db: Db, plannerChats: PlannerChat
     .filter((turn) => turn.reason === 'awaiting_approval' && readMcpOwnedWork(db, 'planner_chat', turn.chatId) !== null)
     .map((turn) => plannerApprovalPayload(turn.chatId, turn.title));
 }
+
+/**
+ * PA-178: a Pocket Agent asked a person to operate its shared browser. Pushed
+ * for *every* chat, unlike an approval above: the person is rarely looking at
+ * the browser when the agent hits a login, and the card in the chat is not
+ * where they act — the viewer is, so that is where the link goes. Through a
+ * Hub the PA-73 relay rewrites it to `/#/h/<host>/browser/<id>`. Same payload
+ * discipline: it never carries the agent's reason or the page's address.
+ */
+export function browserHelpPayload(browserId: string, chatTitle: string): PushPayload {
+  return {
+    title: 'PocketAgent — your help is needed in a browser',
+    body: `${chatTitle} is waiting for you to finish something in its browser.`,
+    url: `/#/browser/${encodeURIComponent(browserId)}`,
+    tag: `browser-help-${browserId}`,
+  };
+}
+
+export function wireBrowserHelpPush(plannerChats: PlannerChatService, push: PushService): () => void {
+  return plannerChats.observeAll((chatId, event) => {
+    if (event.kind !== 'browser_help_request') return;
+    const chat = plannerChats.get(chatId);
+    void push.send(browserHelpPayload(event.browserId, chat?.title ?? 'A Pocket Agent chat')).catch(() => undefined);
+  });
+}
+
+/** The same payloads for handoffs still parked, replayed to a Hub on connect. */
+export function pendingBrowserHelpPayloads(plannerChats: PlannerChatService): PushPayload[] {
+  return plannerChats.pendingBrowserHelp().map((p) => browserHelpPayload(p.browserId, p.chatTitle));
+}

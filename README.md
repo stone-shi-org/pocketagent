@@ -151,6 +151,7 @@ running keeps running.
 | `POCKETAGENT_ALLOWED_ORIGINS` | same-origin | Comma-separated Origin allowlist. |
 | `POCKETAGENT_TRUST_PROXY` | `false` | Trust `X-Forwarded-For` (only behind your own proxy). |
 | `MAX_SESSIONS` | `10` | Concurrent live PTYs. |
+| `POCKETAGENT_BROWSER_IDLE_MINUTES` | `15` | Minutes before an unused shared browser (the live browser view, PA-178) is closed. `0` never closes one. Its profile — the logins — stays in `<data root>/browser-profiles/`. |
 | `OUTPUT_BUFFER_BYTES` | `2097152` | Per-session replay buffer. |
 | `SESSION_IDLE_TIMEOUT` | `0` | Seconds idle **and** unattached before auto-kill. `0` disables. |
 | `POCKETAGENT_BACKEND` | `direct` | `direct` or `tmux`. In containers, use `direct`. See [Process backends](#process-backends). |
@@ -2215,6 +2216,16 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
     the deep link in the payload itself — so a notification raised by another host links to the
     right session id on the wrong machine. Notifications raised *in the browser* (approval
     needed, turn complete, session idle) do carry their host.
+28. **The live browser view (PA-178) has edges.** Only the *shared* browser carries logins: one an
+    agent opens itself with `playwright-cli open` does not. A coding session gets the shared
+    browser's endpoint (`PA_BROWSER_CDP_URL`) only if that browser was already running when the
+    session started. An attached Playwright client auto-dismisses a JS dialog it has no handler
+    for, so a dialog can close before you see it. A server crash within ~30 s of a sign-in can lose
+    it (a normal stop closes the browser gracefully and keeps it). Where the host has no
+    unprivileged user namespaces (most containers) the browser runs with `--no-sandbox`, as
+    `playwright-cli` already does, and the viewer says so. There is no locking between you and an
+    agent driving the same page, and browser-native UI with no CDP equivalent (extension popups,
+    OS file pickers, client certificates) cannot be operated from the viewer.
 
 ---
 

@@ -146,6 +146,9 @@ describe('PLANNER_TOOLS catalog', () => {
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
       [
+        // PA-178: they ask a person for help or name an endpoint; they change nothing.
+        'browser_endpoint',
+        'request_browser_help',
         'check_back_in',
         'doc_read',
         'find_files',

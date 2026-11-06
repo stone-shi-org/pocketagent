@@ -542,6 +542,15 @@ export class TelegramBridge {
         await sendMarkdown(client, telegramChatId, event.text, { logger: this.deps.logger });
       } else if (event.kind === 'permission_request') {
         await this.sendApprovalPrompt(telegramChatId, event, client);
+      } else if (event.kind === 'browser_help_request') {
+        // PA-178: the person has to act in the browser itself, which is in
+        // PocketAgent, not here — so this says where, and offers no button.
+        // Plain text: the reason is the model's own sentence.
+        await client.sendMessage(
+          telegramChatId,
+          `The agent needs you in its browser: ${truncate(event.reason, APPROVAL_TITLE_MAX)}\n` +
+            'Open PocketAgent (the notification, or this chat → Browser), finish there, then press Done.',
+        );
       } else if (event.kind === 'notice' && event.level !== 'info') {
         await client.sendMessage(telegramChatId, event.text);
       }

@@ -689,3 +689,32 @@ describe('transcript: replay equivalence', () => {
     expect(replayed.agentSessionId).toBe('s1');
   });
 });
+
+describe('browser handoff events (PA-178)', () => {
+  const request = {
+    kind: 'browser_help_request' as const,
+    id: 'h1',
+    toolUseId: 'call_1',
+    browserId: 'pocket-a',
+    reason: 'Please sign in',
+    url: 'https://example.com/login',
+  };
+
+  it('keeps an open request until it is answered', () => {
+    let s = applyEvents(emptyTranscript(), [request]);
+    expect(s.browserHelp).toEqual([request]);
+    // A replay of the same event does not duplicate the card.
+    s = applyEvents(s, [request]);
+    expect(s.browserHelp).toHaveLength(1);
+    s = applyEvents(s, [{ kind: 'browser_help_resolved', id: 'h1', outcome: 'done' }]);
+    expect(s.browserHelp).toEqual([]);
+  });
+
+  it('drops an open request when the turn ends without an answer (a restart lost it)', () => {
+    const s = applyEvents(emptyTranscript(), [
+      request,
+      { kind: 'turn_complete', stopReason: 'interrupted', isError: false, numTurns: null, durationMs: null, costUsd: null, inputTokens: null, outputTokens: null },
+    ]);
+    expect(s.browserHelp).toEqual([]);
+  });
+});

@@ -6,6 +6,7 @@ import {
 } from '@pocketagent/protocol';
 import type {
   AgentEvent,
+  BrowserHelpRequestEvent,
   DocTurnChangedFile,
   EffortLevel,
   ModelInfo,
@@ -189,6 +190,12 @@ export interface TranscriptState {
   effort: EffortLevel | null;
   /** The latest provider limit refusal for this structured session. */
   rateLimit: RateLimitEvent | null;
+  /**
+   * PA-178: a Pocket Agent's open requests for a person to operate its
+   * browser, oldest first. Cleared by its answer, or by the turn ending (a
+   * restart loses a parked turn, and a turn that ended waits for nobody).
+   */
+  browserHelp: BrowserHelpRequestEvent[];
 }
 
 export function emptyTranscript(): TranscriptState {
@@ -204,6 +211,7 @@ export function emptyTranscript(): TranscriptState {
     commands: [],
     models: [],
     rateLimit: null,
+    browserHelp: [],
   };
 }
 
@@ -396,10 +404,19 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
       return { ...state, pending, items };
     }
 
+    case 'browser_help_request':
+      return state.browserHelp.some((h) => h.id === event.id)
+        ? state
+        : { ...state, browserHelp: [...state.browserHelp, event] };
+
+    case 'browser_help_resolved':
+      return { ...state, browserHelp: state.browserHelp.filter((h) => h.id !== event.id) };
+
     case 'turn_complete':
       return {
         ...state,
         busy: false,
+        browserHelp: [],
         totalCostUsd: state.totalCostUsd + (event.costUsd ?? 0),
         items: [
           // A turn that ends without a completed text block (interrupted, or

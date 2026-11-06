@@ -1,4 +1,5 @@
 import type { Config } from './config/index.js';
+import type { BrowserService } from './browser/service.js';
 import type { AuthService } from './auth/index.js';
 import type { HubCredentialIdentity, HubCredentialStore } from './auth/hub-credentials.js';
 import type { SessionManager } from './sessions/manager.js';
@@ -118,6 +119,8 @@ export interface PocketContext {
   fleetMcp: FleetMcpAttachStore;
   /** PA-171: where this host's webhooks dispatch remote runs, through the Hub. */
   webhookRouting: WebhookRoutingStore;
+  /** PA-178: the shared browsers agents log in with, and the live viewer's source. */
+  browsers: BrowserService;
 }
 
 declare module 'fastify' {

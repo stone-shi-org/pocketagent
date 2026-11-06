@@ -31,7 +31,8 @@ export function useMarkChatRead(
   }, [api, kind, id, onScreen, turnSignal]);
 }
 
-function useDocumentVisible(): boolean {
+/** PA-178: also what decides whether a browser viewer streams frames. */
+export function useDocumentVisible(): boolean {
   const [visible, setVisible] = useState(() =>
     typeof document === 'undefined' ? true : document.visibilityState !== 'hidden',
   );

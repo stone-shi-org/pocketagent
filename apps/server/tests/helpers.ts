@@ -112,6 +112,12 @@ export async function createTestApp(
     plannerAiTitles?: boolean;
     /** PA-171: fast timings for the remote webhook wait loop. */
     remoteRunTimings?: BuildAppOptions['remoteRunTimings'];
+    /**
+     * PA-178: the shared browsers. Off by default (no executable), so a host
+     * that has Chromium installed does not change every planner test's tool
+     * list and system prompt.
+     */
+    browserOptions?: BuildAppOptions['browserOptions'];
   } = {},
 ): Promise<TestApp> {
   const ws = makeWorkspace();
@@ -144,6 +150,7 @@ export async function createTestApp(
     // PA-165: off by default, see `BuildAppOptions.plannerAiTitles`.
     plannerAiTitles: extra.plannerAiTitles ?? false,
     ...(extra.remoteRunTimings ? { remoteRunTimings: extra.remoteRunTimings } : {}),
+    browserOptions: extra.browserOptions ?? { findExecutable: () => null },
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),
     agentInstallFetchScript,

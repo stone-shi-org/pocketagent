@@ -40,6 +40,7 @@ import {
   QueuePlannerPromptRequest,
   type QueuePlannerPromptResponse,
   ResolvePlannerApprovalRequest,
+  ResolveBrowserHelpRequest,
   SetPlannerToolApprovalRequest,
   UpdatePlannerChatRequest,
   UpdatePlannerModelRequest,
@@ -2454,6 +2455,18 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     const generator = app.pocket.plannerChats.resolveApproval(id, approvalId, parsed.data.decision);
+    await streamPlannerEvents(request, reply, generator);
+  });
+
+  // PA-178: Done / Cancel on a browser handoff, from the chat's own card —
+  // streamed like an approval, since it resumes the same parked turn.
+  app.post('/api/planner/chats/:id/browser-help/:helpId', async (request, reply) => {
+    const { id, helpId } = request.params as { id: string; helpId: string };
+    const parsed = ResolveBrowserHelpRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const generator = app.pocket.plannerChats.resolveBrowserHelp(id, helpId, parsed.data.outcome);
     await streamPlannerEvents(request, reply, generator);
   });
 

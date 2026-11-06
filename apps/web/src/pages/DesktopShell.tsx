@@ -61,6 +61,7 @@ import {
   SettingsPage,
   WebhookEditorPage,
   WebhooksPage,
+  BrowserPage,
 } from '../lazy-pages.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
@@ -1197,6 +1198,19 @@ export function DesktopShell({
             <Suspense fallback={<PageFallback />}>
               <AgentsFleetPage
                 onOpen={(sessionId) => nav.openOn(here, { name: 'terminal', sessionId })}
+                onApiError={onApiError}
+              />
+            </Suspense>
+          </HostProvider>
+        ) : route.name === 'browser' ? (
+          /* PA-178: a full pane like the fleet view, on the host the browser runs on. */
+          <HostProvider endpoint={nav.endpointFor(here)}>
+            <Suspense fallback={<PageFallback />}>
+              <BrowserPage
+                key={`${here}:${route.browserId}`}
+                browserId={route.browserId}
+                onBack={() => onNavigate({ name: 'list' })}
+                onOpenPlannerChat={(chatId) => nav.openOn(here, { name: 'planner-chat', chatId })}
                 onApiError={onApiError}
               />
             </Suspense>

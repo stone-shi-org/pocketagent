@@ -21,6 +21,7 @@ pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real C
 pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
 pnpm demo:attachments-ui  # PA-136/137: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports, text read
 pnpm demo:fleet           # PA-134/169/171: Hub /mcp + Fleet agent + client token + webhook routed to another host — real Chrome
+pnpm demo:browser-view    # PA-178: a login handed to a person through the live browser view, phone and desktop — real Chrome + Chromium
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -155,7 +156,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Twenty-three demo scripts do; all but seven run against a *running* server:
+decision. Twenty-four demo scripts do; all but eight run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -181,6 +182,7 @@ PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech �
 pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
 pnpm demo:attachments-ui  # PA-136/137: scratch server + fake LLM; files attached in real Chrome, phone and desktop
 pnpm demo:fleet           # PA-134/169/171: two real backends + a real Hub + fake LLM and push service; real Chrome
+pnpm demo:browser-view    # PA-178: scratch server + fake LLM + a local login site; the viewer in real Chrome, a real shared Chromium
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -289,6 +291,21 @@ is turned on for dev01 → mac01, and dev01 then shows:
 
 Like `demo:attachments-ui`, it needs `PLAYWRIGHT_BROWSERS_PATH` pointing at a directory with the
 revision Playwright wants.
+
+`pnpm demo:browser-view` is the eighth, and where PA-178's acceptance criteria live: a scratch
+backend, a fake OpenAI-compatible endpoint whose model calls `request_browser_help`, and a local
+login site, all on loopback. In real Chrome at phone and desktop viewports: the chat shows the
+handoff card and "Open browser" opens the viewer on the page the agent named; a person signs in by
+tapping the frame and typing (the soft-keyboard textarea on the phone, captured keys on the
+desktop); `playwright-cli attach --cdp=…` + `goto` is then already signed in; the URL bar refuses
+`file://`; a `confirm()` is answered from the viewer; frames stop while the page is hidden; Done
+resumes the turn; the login survives a server restart; and neither the password nor a frame
+reaches the log. It needs a Playwright Chromium for the shared browser and one for its own Chrome;
+`PA_SHARED_BROWSERS_PATH` names the first when the two differ (the image's `/opt/pw-browsers`
+against a dev cache). Three things it found, each now a comment where it bites: a `blob:` frame is
+blocked by the app's `img-src 'self' data:` (taps still landed, mapped from the element's box, so
+only a decode check catches it); `Emulation.setTouchEmulationEnabled` refuses `maxTouchPoints: 0`;
+and `Input.dispatchMouseEvent` does not return while a `confirm()` it opened is showing.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -1540,6 +1557,93 @@ and `[text](artifact:report.md)` for anything else. The chat resolves it, using
 Known limitations: a reference to a file that does not exist is a broken image (its link
 404s); a file written by `bash` and never referenced gets no preview (that needs an
 `artifacts/` listing diff at turn end); Telegram shows the markdown as written.
+
+### The live browser view (PA-178)
+
+The `all` image ships a headless Chromium for `playwright-cli`, and an agent sometimes stops where
+only a person can act: a sign-in, MFA, a CAPTCHA, a consent screen. The live browser view lets that
+person see the browser and drive it from a phone or a desktop, then hand it back with the session
+still signed in. `apps/server/src/browser/` holds the server half, `routes/browser.ts` its routes,
+`packages/protocol/src/browser.ts` the frame protocol, and `pages/BrowserPage.tsx` the viewer.
+
+**The server owns the browser, because a login only helps in the browser the agent uses.**
+`BrowserService` runs one Chromium per *scope* (one per added project folder, one per Pocket Agent)
+with a persistent profile, started on first use (a viewer opening it, `browser_endpoint`, a
+handoff) and stopped once nobody has used it for `POCKETAGENT_BROWSER_IDLE_MINUTES` (15; 0 =
+never), never while a handoff waits. Agents attach with `playwright-cli attach --cdp=<url>`. A
+browser an agent opens itself with `playwright-cli open` does not carry these logins (out of
+scope, and said so in the tool's description). Three things carry the design:
+- **The id is the scope, keyed off the registries that exist.** `project-<sha256(root)[:16]>` for
+  the *added* folder containing a cwd (so worktrees and subdirectories share one login) and
+  `pocket-<workspaceId>`. No table: a list is derived from the two registries plus what is
+  running, and an id that names neither is refused, never treated as a path. Removing a folder or
+  a Pocket Agent leaves its profile until someone clears it.
+- **Chromium is launched directly, not through `playwright-core`.** The image installs the revision
+  `@playwright/cli`'s *bundled* playwright-core expects; a second copy here would want its own, and
+  the two pins drifting would break the feature with no code change. The server finds the binary
+  in a closed list of Playwright layouts under `PLAYWRIGHT_BROWSERS_PATH`, builds the whole argv
+  (`buildChromiumArgs`, pinned by a test), reads the `DevTools listening on ws://127.0.0.1:…` line,
+  and speaks raw CDP over `ws` (`browser/cdp.ts`).
+- **Every launch flag was needed by a measured case** (the Phase 0 spike on the `all` image). With
+  no `--enable-automation`, `navigator.webdriver` is still true under `--remote-debugging-port`, and
+  the UA and `Sec-CH-UA` say `HeadlessChrome`. Google's sign-in refused that at the *email* step
+  ("This browser or app may not be secure") until both `--disable-blink-features=AutomationControlled`
+  and a launch-time `--user-agent` were set; either alone was still refused. The UA is a launch
+  flag rather than a per-session override so the agent's own sessions get it. Xvfb was not needed.
+  The renderer sandbox is probed once: a container without unprivileged user namespaces aborts
+  with "No usable sandbox!", so the browser then runs with `--no-sandbox`, as Playwright (and so
+  every agent's `playwright-cli`) already does, and the viewer says so.
+
+**Stopping is `Browser.close`, never a signal first.** The spike found a SIGTERM loses a login made
+in the last ~30 s (Chromium flushes cookies on its own schedule) while `Browser.close` keeps it, so
+`stop()` closes, waits, and SIGKILLs the process group only as a fallback, and the server's
+`onClose` closes every browser before the session manager. A crash within ~30 s of a sign-in still
+loses it — a known limitation.
+
+**The viewer is its own WebSocket, `/api/browser/:id/ws`, with its own `BROWSER_PROTOCOL_VERSION`.**
+New frames on `/api/ws` would have meant a `PROTOCOL_VERSION` bump for a feature an old bundle
+never shows. Under `/api/`, the one `onRequest` gate covers it and a Hub's `/h/<id>/api/**` splice
+carries it with no Hub code (the PA-73 push relay already rewrites any `/#/…` link). Each viewer
+attaches its *own* flattened CDP session to the selected tab, which is what scopes its
+phone-shaped viewport override (`Emulation.setDeviceMetricsOverride`): when it detaches, Chromium
+drops the override. What the spike and the demo measured, each a comment where it bites:
+- **Frames are latest-wins.** A delayed ack does not cap the rate (Chrome keeps several frames in
+  flight: 30 fps, ~530 KB/s); so every frame is acked at once, only the newest is kept, and it is
+  sent at most every 100 ms and not while the socket is draining. About 18 KB a frame at q60, 0
+  on a static page, and nothing at all unless the viewer says `visible` (page visibility and the
+  desktop tab's `active`).
+- **Input is sent without awaiting its reply.** `Input.dispatchMouseEvent` does not return while a
+  `confirm()` the click opened is showing, so awaiting it in the connection's ordered chain held
+  the person's own "OK" behind it. Commands still go out on one socket in order.
+- **A frame is a `data:` URL.** `img-src 'self' data:` blocks `blob:`, and a blocked image still
+  has a box, so taps mapped from it landed while the person saw nothing.
+- **Dialogs reach the viewer, and only a person answers them.** An attached Playwright client
+  auto-dismisses any dialog it has no handler for, so an agent attached at that moment answers
+  first (a known limitation).
+- **The URL bar opens `http(s)` only**, in the schema and again in the handler; `file://` stays an
+  agent capability. Navigation nobody in the viewer asked for shows "the agent is also controlling
+  this browser". There is no locking.
+
+**The handoff is an approval-shaped pause, with no approval in it.** `request_browser_help(reason,
+url?)` is a planner tool that is `readOnly` (it asks; it acts on nothing) and is intercepted in
+`processToolCalls`: it ensures the browser, opens `url` in a tab the viewer then starts on
+(`openForHandoff`), holds the scope against the idle sweep, and parks the turn as a third
+`pendingTurns` variant (`PendingBrowserHelp`) carrying a planner turn's continuation. Living in
+that map is the point: the drain check, `busy`, the amber status dot, interrupt and chat deletion
+all cover it unchanged, and there is no timeout. `resolveApproval` refuses it; Done/Cancel goes
+through `resolveBrowserHelp`, from the chat's card (SSE) or the viewer
+(`POST /api/browsers/:id/help/:helpId`, which drives the rest of the turn itself), and resumes the
+turn with the page the person left or with a refusal. It is pushed for *every* chat, not only
+MCP-started ones, deep-linked to `#/browser/<id>`, because the person is rarely looking at the
+browser when an agent hits a login; Telegram gets a sentence saying where to go. `list_pending_approvals`
+and `get_attention_snapshot` list it read-only. `browser_endpoint` (read-only) is a Pocket Agent's
+way in, starting the browser if needed. Both tools are offered only where a shared browser can
+exist, and the base prompt names them only then.
+
+**A coding agent has no new channel.** A session started while its project's browser runs gets
+`PA_BROWSER_CDP_URL` in its environment (outside `POCKETAGENT_*`, which is stripped); one started
+before does not (env is fixed at spawn — a known limitation), and its header's "Browser" button is
+how the person gets there. The terminal classifier stays hint-only.
 
 ### Telegram channel (PA-53)
 
@@ -4015,6 +4119,20 @@ These are load-bearing. Several were bugs first.
   right-to-left.
 - **Adopted panes are not resized** unless the user explicitly opts in — tmux sizes a window
   to its most recent client, so a phone would shrink someone's desktop.
+- **The live browser view is a person's, and what it carries is terminal I/O** (PA-178).
+  Screencast frames, input events and typed text are never logged or persisted: the route logs
+  open/close with a browser id and the kind of principal, nothing else. The viewer and its REST
+  routes accept a cookie session or a hub credential only: a `pam_` token is a 401 off `/mcp`, the
+  Hub's `phm_` token is a 401 on `/h/**`, and an MCP tool's in-process call (`mcpPrincipal`) is
+  refused by the routes themselves. No MCP tool, on a backend or the Hub, streams frames, sends
+  input or answers a handoff, because a remote agent must never watch or drive a logged-in browser.
+  The CDP endpoint binds `127.0.0.1`. The browser never supplies a CDP URL, executable or argv, and
+  the URL bar opens `http(s)` only. Profiles live under the data root, outside every workspace root
+  (re-checked on every launch), are created 0700, and are refused to the planner's file tools.
+  `request_browser_help` parks with no timeout, and only a person's Done or Cancel resumes it.
+  Asserted in `apps/server/tests/browser-service.test.ts`, `browser-viewer.test.ts`,
+  `planner-browser-help.test.ts`, `apps/hub/tests/fleet-mcp-gate.test.ts` and
+  `fleet-mcp-tools.test.ts`, and end to end by `pnpm demo:browser-view`.
 - **Terminal I/O is never logged or persisted.** SQLite holds session metadata only; buffers
   are in-memory.
 - **`POCKETAGENT_*` is stripped from every child environment** (`sessions/env.ts`) so the

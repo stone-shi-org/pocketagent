@@ -649,6 +649,41 @@ heading('The -all image renders a page with playwright-cli, $HOME mounted (if th
       'libreoffice-calc (soffice), python3-openpyxl (PA-140) and pdftotext are runnable from a login shell',
       sheetDeps.stdout.split('\n')[0],
     );
+
+    // PA-178: the shared browser the live view shows — started by the
+    // server's own `BrowserService`, as the app user, with its profile on the
+    // mounted home, and one screencast frame captured. The image needs no new
+    // package for this: it is the same Chromium playwright-cli uses.
+    const browserProbe = [
+      "import('/app/apps/server/dist/browser/service.js').then(async ({ BrowserService }) => {",
+      "  const { ViewerSession } = await import('/app/apps/server/dist/browser/viewer-session.js');",
+      "  const fs = await import('node:fs');",
+      "  const dataDir = process.env.HOME + '/.pa-smoke-browser';",
+      "  const svc = new BrowserService({ dataDir, workspaces: { getRoots: () => [], labelFor: (x) => x },",
+      "    plannerWorkspaces: { get: () => ({ name: 'smoke' }), list: () => [] } });",
+      "  const inst = await svc.ensure('pocket-smoke');",
+      "  let bytes = 0;",
+      "  const v = new ViewerSession({ service: svc, instance: inst, bufferedAmount: () => 0, onClosed: () => {},",
+      "    send: (m) => { if (m.type === 'frame') bytes = Math.max(bytes, Buffer.from(m.data, 'base64').length); } });",
+      "  await v.start();",
+      "  await v.handle({ type: 'resize', width: 390, height: 760, deviceScaleFactor: 2, mobile: true });",
+      "  await v.handle({ type: 'visible', visible: true });",
+      "  for (let i = 0; i < 50 && bytes === 0; i++) await new Promise((r) => setTimeout(r, 100));",
+      "  const uid = fs.statSync(dataDir + '/browser-profiles/pocket-smoke').uid;",
+      "  console.log(`cdp=${inst.launched.cdpUrl} frame-bytes=${bytes} profile-uid=${uid} sandbox=${svc.sandboxAvailable()}`);",
+      "  v.dispose(); await svc.shutdown(); fs.rmSync(dataDir, { recursive: true, force: true });",
+      "}).catch((e) => { console.error(e); process.exit(1); });",
+    ].join('\n');
+    const shared = tryRun('docker', ['exec', '--user', `${HOST_UID}:${HOST_GID}`, probe, 'node', '--input-type=module', '-e', browserProbe]);
+    check(
+      shared.status === 0 && /cdp=http:\/\/127\.0\.0\.1:\d+/.test(shared.stdout) && /frame-bytes=[1-9]\d*/.test(shared.stdout),
+      'the shared browser starts as the app user on loopback and streams a frame (PA-178)',
+      (shared.stdout || shared.stderr).split('\n').slice(-2).join(' '),
+    );
+    check(
+      shared.stdout.includes(`profile-uid=${HOST_UID} `),
+      'its profile on the mounted home is owned by the app user, not root',
+    );
     tryRun('docker', ['rm', '-f', probe]);
   }
 }
