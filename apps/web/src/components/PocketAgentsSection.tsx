@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { DocWorkspace, PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
+import type { BrowserTreeEntry, DocWorkspace, PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { plannerChatDotState } from '@pocketagent/protocol';
 import { ChatStatusDot } from './ChatStatusDot.js';
 import { Icon } from './Icon.js';
+import { BrowserTreeRow, pocketBrowserIdFor, useOpenBrowser } from './BrowserButton.js';
 import { codeServerLink } from './ProjectList.js';
 import { PlannerDirectoryPicker } from './PlannerDirectoryPicker.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
@@ -54,6 +55,11 @@ interface Props {
       so each Pocket Agent workspace row can offer the same "Open in code-server"
       button that coding-agent project folders have. */
   codeServerBaseUrl?: string | null;
+  /**
+   * PA-178: running shared browsers on this host (`ProjectsState.browsers`).
+   * Null or absent where the host has none, so no "Open browser" either.
+   */
+  browsers?: BrowserTreeEntry[] | null;
 }
 
 /**
@@ -79,8 +85,10 @@ export function PocketAgentsSection({
   onApiError,
   activeChatId,
   codeServerBaseUrl,
+  browsers = null,
 }: Props): JSX.Element | null {
   const api = useHostApi();
+  const openBrowser = useOpenBrowser();
   const endpoint = useHostEndpoint();
   const hostId = endpoint.id;
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadPocketAgentsTreeState(hostId).collapsed);
@@ -388,6 +396,7 @@ export function PocketAgentsSection({
 
         const codeServerHref =
           codeServerBaseUrl && ws.path ? codeServerLink(codeServerBaseUrl, ws.path) : null;
+        const browserRow = browsers?.find((b) => b.id === pocketBrowserIdFor(ws.id));
 
         return (
           <div key={ws.id}>
@@ -441,6 +450,19 @@ export function PocketAgentsSection({
                 <>
                   <div className="menu-backdrop" onClick={() => setMenuFor(null)} role="presentation" />
                   <div className="menu project-menu" role="menu">
+                    {browsers && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="menu-item-icon"
+                        onClick={() => {
+                          setMenuFor(null);
+                          openBrowser(pocketBrowserIdFor(ws.id));
+                        }}
+                      >
+                        <Icon name="globe" size={16} /> Open browser
+                      </button>
+                    )}
                     <button
                       type="button"
                       role="menuitem"
@@ -455,9 +477,10 @@ export function PocketAgentsSection({
                 </>
               )}
             </div>
-            {!isCollapsed && regularChats.length === 0 && cronChats.length === 0 && (
+            {!isCollapsed && regularChats.length === 0 && cronChats.length === 0 && !browserRow && (
               <div className="project-empty">No chats yet</div>
             )}
+            {!isCollapsed && browserRow && <BrowserTreeRow entry={browserRow} />}
             {!isCollapsed && regularChats.map(renderChatGroup)}
             {!isCollapsed && cronChats.length > 0 && (
               <div className="subagents-group scheduled-jobs-group">

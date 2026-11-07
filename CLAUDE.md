@@ -1593,6 +1593,10 @@ scope, and said so in the tool's description). Three things carry the design:
   The renderer sandbox is probed once: a container without unprivileged user namespaces aborts
   with "No usable sandbox!", so the browser then runs with `--no-sandbox`, as Playwright (and so
   every agent's `playwright-cli`) already does, and the viewer says so.
+  `--force-device-scale-factor=2` (`BROWSER_RENDER_SCALE`) came later, from a blurry phone view:
+  headless screencast frames come at the view's *CSS* size whatever the override's scale says
+  (390×700 at dsf 3, measured), so a phone stretched a 1× image. Forced, frames are 2× and
+  `maxWidth`/`maxHeight` scale them back for a 1× desktop; agents see `devicePixelRatio` 2.
 
 **Stopping is `Browser.close`, never a signal first.** The spike found a SIGTERM loses a login made
 in the last ~30 s (Chromium flushes cookies on its own schedule) while `Browser.close` keeps it, so
@@ -1609,8 +1613,8 @@ phone-shaped viewport override (`Emulation.setDeviceMetricsOverride`): when it d
 drops the override. What the spike and the demo measured, each a comment where it bites:
 - **Frames are latest-wins.** A delayed ack does not cap the rate (Chrome keeps several frames in
   flight: 30 fps, ~530 KB/s); so every frame is acked at once, only the newest is kept, and it is
-  sent at most every 100 ms and not while the socket is draining. About 18 KB a frame at q60, 0
-  on a static page, and nothing at all unless the viewer says `visible` (page visibility and the
+  sent at most every 100 ms and not while the socket is draining. About 18 KB a frame at 1× q60
+  (now 2× q70, a few times that), 0 on a static page, and nothing at all unless the viewer says `visible` (page visibility and the
   desktop tab's `active`).
 - **Input is sent without awaiting its reply.** `Input.dispatchMouseEvent` does not return while a
   `confirm()` the click opened is showing, so awaiting it in the connection's ordered chain held
@@ -1623,6 +1627,26 @@ drops the override. What the spike and the demo measured, each a comment where i
 - **The URL bar opens `http(s)` only**, in the schema and again in the handler; `file://` stays an
   agent capability. Navigation nobody in the viewer asked for shows "the agent is also controlling
   this browser". There is no locking.
+- **The address bar is an omnibox, not a text box.** `resolveOmnibox` (`agent/browser-input.ts`):
+  words become a Google search, `localhost`/an IP/a `.local` name/any `name:port` gets `http://`,
+  a domain gets `https://` (`localhost:3000` used to parse as the scheme `localhost:`). Suggestions
+  are the profile's own Chromium history, agent visits included (`GET /api/browsers/:id/suggest`,
+  `browser/history.ts`): Chromium holds `Default/History` with an exclusive lock (measured: "database
+  is locked"), so the file and its WAL are copied to a private temp dir at most every 5 s and the
+  copy is read; a visit lands within ~5 s. A torn copy means no suggestions, never an error.
+- **On a phone the remote page owns the finger, and the keyboard follows its focus.** Native
+  non-passive `touchstart`/`touchmove`/`touchend` listeners on the frame `preventDefault` (React's
+  are passive): otherwise iOS pans the viewer page while its keyboard is up and the pointer is
+  cancelled, so no scroll reached the page. The surface is focusable only for a mouse, because
+  a focusable surface took focus from the keyboard's textarea on every tap and closed the keyboard
+  under the field being typed into. After a tap the server asks the page whether its focused element
+  takes typing (`Runtime.evaluate`, never `Runtime.enable`, through open shadow roots; a focused
+  iframe counts) and sends `editable`. Within 2 s of a tap, and only if none of the viewer's own
+  fields has focus, the phone raises its keyboard; iOS refuses a focus outside the gesture, so a
+  "Type" button is the fallback. A resize that makes the view *shorter* (a keyboard opening) scrolls
+  the field to the centre; growing back does not, so it never undoes a scroll. While typing the
+  viewer drops its header, tabs and footer, and follows `visualViewport` (iOS shrinks only that).
+  `editable` is a new server frame an older viewer ignores, so `BROWSER_PROTOCOL_VERSION` stays 1.
 
 **The handoff is an approval-shaped pause, with no approval in it.** `request_browser_help(reason,
 url?)` is a planner tool that is `readOnly` (it asks; it acts on nothing) and is intercepted in
@@ -1644,7 +1668,11 @@ exist, and the base prompt names them only then.
 (`BrowsersPage`): every scope's browser with its state, and Open/Stop/Clear data. On the desktop
 the viewer is its **own tab** (`b:<hostId>:<browserId>`, persisted like a chat's), not a pane that
 replaces the workspace, so it keeps its place in the strip; the list shares the admin tab. A hidden
-tab passes `active: false`, which stops the screencast like a hidden page does.
+tab passes `active: false`, which stops the screencast like a hidden page does. A project folder's
+and a Pocket Agent's "…" menu has "Open browser", and a running browser (or one an agent waits on)
+is a **Browser** row in the tree under its folder or agent: the globe with a status dot (green
+running, amber waiting for a person). `GET /api/projects` carries each folder's `browserId` and the
+`browsers` worth a row — for a person only; an MCP principal (`list_projects`) gets neither.
 
 **A coding agent has no new channel.** A session started while its project's browser runs gets
 `PA_BROWSER_CDP_URL` in its environment (outside `POCKETAGENT_*`, which is stripped); one started

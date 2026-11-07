@@ -54,6 +54,10 @@ describe('buildChromiumArgs (PA-178)', () => {
     );
   });
 
+  it('renders at 2x, so screencast frames are sharp on a phone (they ignore the override scale)', () => {
+    expect(args).toContain('--force-device-scale-factor=2');
+  });
+
   it('adds --no-sandbox only when the sandbox probe failed', () => {
     expect(args).not.toContain('--no-sandbox');
     expect(buildChromiumArgs({ profileDir: '/p', sandbox: false, majorVersion: '1' })).toContain('--no-sandbox');

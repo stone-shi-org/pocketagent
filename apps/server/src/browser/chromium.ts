@@ -97,6 +97,9 @@ export interface ChromiumArgsInput {
  * The whole argv, pure so a test can pin it. Each flag below was needed by a
  * measured case in the spike; none is decoration.
  */
+/** The compositor scale every shared browser renders at — see `buildChromiumArgs`. */
+export const BROWSER_RENDER_SCALE = 2;
+
 export function buildChromiumArgs(input: ChromiumArgsInput): string[] {
   return [
     '--headless=new',
@@ -115,6 +118,13 @@ export function buildChromiumArgs(input: ChromiumArgsInput): string[] {
     // user agent below were both set (either alone was still refused).
     '--disable-blink-features=AutomationControlled',
     `--user-agent=${userAgentFor(input.majorVersion, input.platform)}`,
+    // Measured: headless screencast frames come at the view's CSS size
+    // whatever `Emulation.setDeviceMetricsOverride`'s scale says (390×700 at
+    // dsf 3), so a phone stretched a 1× image and the viewer looked blurry.
+    // Forcing the compositor's scale makes frames 2×; the viewer's
+    // `maxWidth`/`maxHeight` scale them back down for a 1× desktop. Agents see
+    // `devicePixelRatio` 2 by default, as on most laptops.
+    `--force-device-scale-factor=${BROWSER_RENDER_SCALE}`,
     ...(input.sandbox ? [] : ['--no-sandbox']),
     'about:blank',
   ];

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PROTOCOL_VERSION,
   negotiateProtocol,
+  type BrowserTreeEntry,
   type DocWorkspace,
   type HostInfo,
   type PlannerChat,
@@ -53,6 +54,8 @@ import { backoffMs, isDue, pollIntervalFor, type PollInputs } from './poll-polic
 export interface HostSlice {
   projects: ProjectInfo[] | null;
   shells: ShellSessionSummary[] | null;
+  /** PA-178: running browsers (and ones an agent waits on), for the tree. Null where the host has none. */
+  browsers: BrowserTreeEntry[] | null;
   host: HostInfo | null;
   hostCompatibility: HostCompatibilityState | null;
   error: string | null;
@@ -64,6 +67,7 @@ export interface HostSlice {
 const EMPTY_SLICE: HostSlice = {
   projects: null,
   shells: null,
+  browsers: null,
   host: null,
   hostCompatibility: null,
   error: null,
@@ -140,6 +144,7 @@ export function useHostFleet({
           [hostId]: {
             projects: list.projects,
             shells: list.shells,
+            browsers: list.browsers ?? null,
             host: list.host,
             hostCompatibility: compatibilityState(
               list.host.name,
@@ -240,6 +245,7 @@ export function useHostFleet({
       out[hostId] = {
         projects: slice.projects,
         shells: slice.shells,
+        browsers: slice.browsers,
         host: slice.host,
         hostCompatibility: slice.hostCompatibility,
         error: slice.error,

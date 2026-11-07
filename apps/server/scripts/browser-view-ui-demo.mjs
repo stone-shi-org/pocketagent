@@ -71,6 +71,17 @@ const site = http.createServer(async (req, res) => {
     res.writeHead(401, { 'content-type': 'text/html' });
     return res.end('<h1 id=state>Wrong password</h1>');
   }
+  if (req.url === '/long') {
+    // A tall page with a field near the bottom of the first screen: finger
+    // scrolling, and the field staying in view when a keyboard shrinks the view.
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end(
+      '<meta name=viewport content="width=device-width"><title>Long</title><body style="margin:0;font-size:20px">' +
+        '<div style="height:calc(100vh - 90px);background:linear-gradient(#cde,#fed)">top</div>' +
+        '<input id=far style="font-size:20px;width:90%;padding:8px">' +
+        '<div style="height:3000px;background:linear-gradient(#fed,#cde)">more</div></body>',
+    );
+  }
   if (req.url === '/dialog') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     return res.end(
@@ -329,6 +340,17 @@ for (const [label, contextOptions] of [
   await page.waitForFunction(() => (document.querySelector('.browser-frame')?.naturalWidth ?? 0) > 0, null, { timeout: 10_000 }).catch(() => undefined);
   const natural = await page.evaluate(() => document.querySelector('.browser-frame')?.naturalWidth ?? 0);
   check(natural > 0, 'the frame renders (decoded, not CSP-blocked)', `${natural}px wide`);
+  await sleep(800);
+  const density = await page.evaluate(() => {
+    const img = document.querySelector('.browser-frame');
+    return { n: img.naturalWidth, css: img.getBoundingClientRect().width, dpr: window.devicePixelRatio };
+  });
+  const wanted = Math.min(2, density.dpr) * density.css;
+  check(
+    density.n >= wanted * 0.95 && density.n <= wanted * 1.05,
+    'the frame is drawn at the screen’s pixel density (2× at most), not stretched',
+    `${density.n}px image in ${Math.round(density.css)} CSS px at dpr ${density.dpr}`,
+  );
   ok('the viewer shows who is waiting', await page.locator('.browser-help-text strong').innerText());
   const info = (await api('GET', '/api/browsers')).json.browsers.find((b) => b.id === browserId);
   check(/^http:\/\/127\.0\.0\.1:\d+$/.test(info?.cdpUrl ?? ''), 'its CDP endpoint is loopback-only', info?.cdpUrl);
@@ -338,16 +360,18 @@ for (const [label, contextOptions] of [
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(SHOTS, `pa178-${tag}-viewer-login.png`) });
 
+  const keyboardFocused = () => page.evaluate(() => document.activeElement?.classList.contains('browser-keyboard') ?? false);
   await tapRemote(page, loginPage, '#user', { touch });
   if (touch) {
-    await page.locator('.browser-toolbar button[aria-label=Keyboard]').click();
+    await page.waitForFunction(() => document.activeElement?.classList.contains('browser-keyboard'), null, { timeout: 5000 }).catch(() => undefined);
+    check(await keyboardFocused(), 'tapping a text field raises the phone keyboard by itself');
     await page.locator('.browser-keyboard').pressSequentially('ada', { delay: 30 });
   } else {
     await page.keyboard.type('ada', { delay: 30 });
   }
   await tapRemote(page, loginPage, '#pass', { touch });
   if (touch) {
-    await page.locator('.browser-keyboard').focus();
+    check(await keyboardFocused(), 'tapping the next field keeps the keyboard up (the tap no longer steals focus)');
     await page.locator('.browser-keyboard').pressSequentially(PASSWORD, { delay: 20 });
     await page.locator('.browser-keyboard').press('Enter');
   } else {
@@ -378,6 +402,97 @@ for (const [label, contextOptions] of [
     check((await fresh.textContent('#state')).includes('LOGGED IN'), 'a new tab over CDP is already logged in (playwright-cli not installed)');
     await fresh.close();
   }
+
+  if (touch) {
+    heading(`${label}: a finger scrolls the page, and a field stays in view when the keyboard opens`);
+    await page.waitForFunction(() => !document.activeElement?.classList.contains('browser-keyboard'), null, { timeout: 5000 }).catch(() => undefined);
+    check(!(await keyboardFocused()), 'the keyboard drops by itself once focus leaves a field');
+    await page.locator('.browser-url input').fill(`${SITE}/long`);
+    await page.locator('.browser-url input').press('Enter');
+    let longPage;
+    for (let i = 0; i < 30 && !longPage; i++) {
+      longPage = remote.contexts().flatMap((c) => c.pages()).find((p) => p.url() === `${SITE}/long`);
+      if (!longPage) await sleep(200);
+    }
+    await sleep(1000);
+    // Before the viewport change below, deliberately: after Playwright's
+    // `setViewportSize` in an emulated-device context the next synthetic touch
+    // on the frame never reached the page at all (no pointerdown; a tap first
+    // made it work). A harness quirk — a real finger has no such step.
+    const y0 = await longPage.evaluate(() => scrollY);
+    const cdp = await context.newCDPSession(page);
+    const box = await page.locator('.browser-frame').boundingBox();
+    const x = box.x + box.width / 2;
+    const startY = box.y + box.height * 0.8;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: startY }] });
+    for (let k = 1; k <= 12; k++) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: startY - k * 30 }] });
+      await sleep(16);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await sleep(800);
+    const y1 = await longPage.evaluate(() => scrollY);
+    check(y1 > y0 + 100, 'a finger drag on the frame scrolls the page', `scrollY ${y0} → ${y1}`);
+    const viewerScroll = await page.evaluate(() => document.scrollingElement.scrollTop);
+    check(viewerScroll === 0, 'and does not scroll the viewer page itself', `viewer scrollTop ${viewerScroll}`);
+    await longPage.evaluate(() => scrollTo(0, 0));
+    await sleep(600);
+    await tapRemote(page, longPage, '#far', { touch });
+    await page.waitForFunction(() => document.activeElement?.classList.contains('browser-keyboard'), null, { timeout: 5000 }).catch(() => undefined);
+    check(await page.locator('.browser-page.typing').count() === 1, 'while typing, the viewer drops its chrome to give the page the rows');
+    // What a phone's keyboard does to the viewer: the visible height shrinks.
+    const fullSize = page.viewportSize();
+    await page.setViewportSize({ width: fullSize.width, height: 360 });
+    let inView = false;
+    for (let i = 0; i < 25 && !inView; i++) {
+      await sleep(200);
+      inView = await longPage.evaluate(() => {
+        const r = document.getElementById('far').getBoundingClientRect();
+        return r.top >= 0 && r.bottom <= innerHeight;
+      });
+    }
+    check(inView, 'the focused field is scrolled back into view when the keyboard shrinks the viewer');
+    await sleep(1000);
+    await page.screenshot({ path: path.join(SHOTS, `pa178-${tag}-keyboard-field-in-view.png`) });
+    await page.setViewportSize(fullSize);
+    await page.locator('.browser-toolbar button[aria-label=Keyboard]').click();
+  }
+
+  heading(`${label}: the address bar suggests from the browser's own history`);
+  const bar = page.locator('.browser-url input');
+  await bar.click();
+  await bar.fill('pocket agent docs');
+  await page.locator('.browser-suggest li').first().waitFor({ timeout: 5000 });
+  check(
+    (await page.locator('.browser-suggest li').first().innerText()).includes('Search Google for'),
+    'words become a search',
+    await page.locator('.browser-suggest li').first().innerText(),
+  );
+  const host = new URL(SITE).host;
+  await bar.fill(host);
+  check(
+    (await page.locator('.browser-suggest li').first().innerText()).includes(`http://${host}`),
+    'an IP:port gets http:// (no certificate on a dev server)',
+    await page.locator('.browser-suggest li').first().innerText(),
+  );
+  let historyRows = [];
+  for (let i = 0; i < 30 && historyRows.length === 0; i++) {
+    // Chromium writes a visit to its History within ~5 s; the route re-reads a copy every 5 s.
+    await sleep(500);
+    await bar.fill(i % 2 ? host : host.slice(0, -1));
+    await sleep(400);
+    historyRows = (await page.locator('.browser-suggest li').allInnerTexts()).filter((t) => t.includes(`${SITE}/`) && !t.includes('Search'));
+  }
+  const rawSuggest = historyRows.length ? null : await api('GET', `/api/browsers/${browserId}/suggest?q=${encodeURIComponent(host)}`);
+  check(
+    historyRows.length > 0,
+    'pages visited in this browser are suggested',
+    historyRows.length
+      ? historyRows.slice(0, 2).join(' | ').replace(/\n/g, ' ')
+      : `api: ${rawSuggest?.status} ${rawSuggest?.text?.slice(0, 300)} | rows: ${(await page.locator('.browser-suggest li').allInnerTexts()).join(' | ')} | history file: ${fs.existsSync(path.join(dataDir, 'browser-profiles', browserId, 'Default', 'History'))}`,
+  );
+  await page.screenshot({ path: path.join(SHOTS, `pa178-${tag}-address-suggestions.png`) });
+  await bar.press('Escape');
 
   heading(`${label}: the URL bar, a dialog, and visibility`);
   await page.locator('.browser-url input').fill('file:///etc/passwd');
@@ -483,6 +598,29 @@ for (const [layout, contextOptions] of [
   ['desktop', { viewport: { width: 1280, height: 900 } }],
 ]) {
   const { context, page } = await loggedIn(contextOptions);
+  await page.locator('.browser-tree-row:visible').first().waitFor({ timeout: 10_000 }).catch(() => undefined);
+  const treeRows = await page.locator('.browser-tree-row:visible').allInnerTexts();
+  check(treeRows.some((t) => t.includes('Browser') && t.includes('running')), `${layout}: a running browser is a row in the tree, with the globe`, treeRows.join(' | ').replace(/\n/g, ' '));
+  await page.screenshot({ path: path.join(SHOTS, `pa178-${layout}-tree-row.png`) });
+  await page.locator('.browser-tree-row:visible').first().click();
+  await page.locator('.browser-frame:visible').waitFor({ state: 'visible', timeout: 20_000 });
+  ok(`${layout}: the tree row opens the live view`, await page.evaluate(() => location.hash));
+  await page.goto(`${BASE}/#/`, { waitUntil: 'networkidle' });
+  await page.locator('section.project .project-head button[aria-label^="Options for"]:visible').first().click();
+  const projectItem = page.locator('[role=menuitem]:visible', { hasText: 'Open browser' });
+  check((await projectItem.count()) === 1, `${layout}: a project's menu offers Open browser`);
+  await projectItem.click();
+  await page.waitForFunction(() => location.hash.includes('/browser/project-'), null, { timeout: 10_000 }).catch(() => undefined);
+  check((await page.evaluate(() => location.hash)).includes('/browser/project-'), `${layout}: and opens that project's browser`, await page.evaluate(() => location.hash));
+  await page.goto(`${BASE}/#/`, { waitUntil: 'networkidle' });
+  const agentMenu = page.locator('button[aria-label^="Options for"]:visible').first();
+  await agentMenu.click();
+  const agentItem = page.locator('[role=menuitem]:visible', { hasText: 'Open browser' });
+  check((await agentItem.count()) === 1, `${layout}: a Pocket Agent's menu offers Open browser`);
+  await agentItem.click();
+  await page.waitForFunction(() => location.hash.includes('/browser/pocket-'), null, { timeout: 10_000 }).catch(() => undefined);
+  check((await page.evaluate(() => location.hash)).includes('/browser/pocket-'), `${layout}: and opens that agent's browser`);
+  await page.goto(`${BASE}/#/`, { waitUntil: 'networkidle' });
   await page.locator('button[aria-label="More"]:visible').first().click();
   await page.locator('[role=menuitem]', { hasText: 'Browsers…' }).click();
   await page.locator('.browsers-page:visible .browsers-row').first().waitFor({ timeout: 10_000 });

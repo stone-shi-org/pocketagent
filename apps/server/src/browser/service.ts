@@ -7,8 +7,11 @@ import {
   type BrowserListResponse,
   type BrowserScopeKind,
   type BrowserState,
+  type BrowserSuggestion,
   type BrowserTab,
+  type BrowserTreeEntry,
 } from '@pocketagent/protocol';
+import { forgetHistoryCopies, suggestFromHistory } from './history.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import { CdpConnection } from './cdp.js';
@@ -436,6 +439,7 @@ export class BrowserService {
       throw new BrowserError('Stop the browser before clearing its data.', 'running');
     }
     const dir = this.profileDirFor(id);
+    forgetHistoryCopies(dir);
     if (!fs.existsSync(dir)) return;
     const real = fs.realpathSync(dir);
     if (!isContained(fs.realpathSync(this.profileRoot), real) || real === fs.realpathSync(this.profileRoot)) {
@@ -529,6 +533,7 @@ export class BrowserService {
     this.stopped = true;
     clearInterval(this.sweepTimer);
     await Promise.all([...this.instances.keys()].map((id) => this.stop(id, 'server shutdown')));
+    forgetHistoryCopies();
   }
 
   // ---- views -------------------------------------------------------------------
@@ -554,6 +559,27 @@ export class BrowserService {
       pendingHelp: this.pendingHelpCount(id),
       hasProfile: this.hasProfile(id),
     };
+  }
+
+  /** Browsers worth a row in the home screen's tree: running, starting, or awaited by an agent. */
+  treeEntries(): BrowserTreeEntry[] {
+    const out: BrowserTreeEntry[] = [];
+    for (const id of this.allScopeIds()) {
+      const pendingHelp = this.pendingHelpCount(id);
+      const inst = this.instances.get(id);
+      const state: BrowserState = inst ? inst.state : this.starting.has(id) ? 'starting' : 'stopped';
+      if (state === 'stopped' && pendingHelp === 0) continue;
+      const scope = this.describe(id);
+      if (!scope) continue;
+      out.push({ id, kind: scope.kind, label: scope.label, state, pendingHelp });
+    }
+    return out;
+  }
+
+  /** The profile's own Chromium history, for the viewer's address bar. */
+  suggest(id: string, query: string, limit?: number): BrowserSuggestion[] {
+    if (!this.describe(id)) throw new BrowserError('No such browser.', 'not_found');
+    return suggestFromHistory(this.profileDirFor(id), query, limit);
   }
 
   list(): BrowserListResponse {

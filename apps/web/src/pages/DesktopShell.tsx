@@ -984,6 +984,7 @@ export function DesktopShell({
                       activeHere && route.name === 'planner-chat' ? route.chatId : null
                     }
                     codeServerBaseUrl={hostState.host?.codeServerBaseUrl}
+                    browsers={hostState.browsers}
                   />
                   {/* Between the other two categories, same order as the phone page
                       (PA-25) — the two layouts must not disagree about where a

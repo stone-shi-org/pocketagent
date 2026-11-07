@@ -16,6 +16,7 @@ import { LIMITS } from './limits.js';
 import { ProtocolRange } from './protocol-negotiation.js';
 import { TranscriptWord, VoiceAudioUpload } from './voice-audio.js';
 import { HostCapabilityTag } from './capabilities.js';
+import { BrowserTreeEntry } from './browser.js';
 
 export const LoginRequest = z.object({
   token: z.string().min(1).max(512),
@@ -313,6 +314,8 @@ export type CreateAdoptableSessionRequest = z.infer<typeof CreateAdoptableSessio
 export const ProjectListResponse = z.object({
   host: HostInfo,
   projects: z.array(ProjectInfo),
+  /** PA-178: running browsers (and ones an agent waits on), for the tree. A person's session only. */
+  browsers: z.array(BrowserTreeEntry).optional(),
 });
 export type ProjectListResponse = z.infer<typeof ProjectListResponse>;
 

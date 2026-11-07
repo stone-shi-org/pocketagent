@@ -100,13 +100,56 @@ export const TAP_SLOP_PX = 8;
 /** Holding this long without moving starts a real mouse drag (selecting text, a slider). */
 export const LONG_PRESS_MS = 500;
 
+/** What the address bar does with what was typed. */
+export interface OmniboxTarget {
+  url: string;
+  /** `search` when the text did not look like an address and became a web search. */
+  kind: 'url' | 'search';
+}
+
+export const SEARCH_URL = 'https://www.google.com/search?q=';
+
+/** Hosts a person reaches over plain HTTP: this machine, a LAN name, a bare IP. */
+function isLocalHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h.startsWith('[') ||
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(h) ||
+    /\.(localhost|local|lan|internal|home\.arpa)$/.test(h)
+  );
+}
+
 /**
- * What the URL bar opens: a bare host gets `https://`, and anything that is
- * not then http(s) is refused here as well as on the server.
+ * The address bar's rules, as an omnibox has them. An explicit scheme is kept
+ * (and must be http(s), here and again on the server). Otherwise:
+ * - text with a space, or one word with no dot, is a search;
+ * - `localhost`, an IP or a `.local`-style name gets `http://` (a dev server or
+ *   a router has no certificate), as does any `name:port`;
+ * - anything else that looks like a domain gets `https://`.
+ * `localhost:3000` is an address, not a URL with the scheme `localhost:`.
  */
+export function resolveOmnibox(raw: string): OmniboxTarget | null {
+  const text = raw.trim();
+  if (text === '') return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || /^(about|javascript|data|file|chrome|view-source|mailto|blob):/i.test(text)) {
+    return isViewerNavigableUrl(text) ? { url: text, kind: 'url' } : null;
+  }
+  const search = (): OmniboxTarget => ({ url: `${SEARCH_URL}${encodeURIComponent(text)}`, kind: 'search' });
+  if (/\s/.test(text)) return search();
+  const hostPort = text.split(/[/?#]/, 1)[0]!.replace(/^[^@]*@/, '');
+  const portMatch = /^(.*?)(?::(\d{1,5}))?$/.exec(hostPort);
+  const host = portMatch?.[1] ?? hostPort;
+  const hasPort = portMatch?.[2] !== undefined;
+  const looksLikeDomain = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.(xn--[a-z0-9-]+|[a-z]{2,63})\.?$/i.test(host);
+  let url: string | null = null;
+  if (isLocalHost(host) || (hasPort && /^[a-z0-9.-]+$/i.test(host))) url = `http://${text}`;
+  else if (looksLikeDomain) url = `https://${text}`;
+  if (url === null || !isViewerNavigableUrl(url)) return search();
+  return { url, kind: 'url' };
+}
+
+/** The URL the address bar opens for what was typed, or null for nothing (or a refused scheme). */
 export function normalizeTypedUrl(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (trimmed === '') return null;
-  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
-  return isViewerNavigableUrl(candidate) ? candidate : null;
+  return resolveOmnibox(raw)?.url ?? null;
 }

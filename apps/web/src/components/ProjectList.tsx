@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  BrowserTreeEntry,
   ChatSummary,
   DeleteRemoteBranchRequest,
   DeleteWorktreeResponse,
@@ -22,6 +23,7 @@ import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { isMissingAdoptTargetError } from './RecreateShellDialog.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
+import { BrowserTreeRow, useOpenBrowser } from './BrowserButton.js';
 import {
   loadProjectTreeState,
   saveCollapsedProjects,
@@ -138,6 +140,13 @@ export interface ProjectsState {
    * consumer can tell "no shells" from "not yet known".
    */
   shells: ShellSessionSummary[] | null;
+  /**
+   * PA-178: running shared browsers (and ones an agent is waiting on), each
+   * drawn as a row under its project folder or Pocket Agent. Null (or absent,
+   * for a test's hand-built state) where the host has no shared browser — so
+   * no "Open browser" either.
+   */
+  browsers?: BrowserTreeEntry[] | null;
   host: HostInfo | null;
   /**
    * Whether this bundle can actually talk to `host` (PA-61), and the sentence
@@ -626,6 +635,18 @@ export function ProjectList({
   }, [projects, search, liveOnly]);
   const searching = search.trim().length > 0;
 
+  // PA-178: one tree row per running browser, under the first top-level
+  // folder that uses it (a project's subdirectories and worktrees share one).
+  const browserRows = useMemo(() => {
+    const out = new Map<string, BrowserTreeEntry>();
+    const running = new Map((state.browsers ?? []).filter((b) => b.kind === 'project').map((b) => [b.id, b]));
+    for (const p of visible) {
+      const entry = p.browserId ? running.get(p.browserId) : undefined;
+      if (entry && ![...out.values()].includes(entry)) out.set(p.cwd, entry);
+    }
+    return out;
+  }, [state.browsers, visible]);
+
   const toggle = (cwd: string): void =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -737,7 +758,13 @@ export function ProjectList({
       )}
 
       {visible.map((project) => (
-        <ProjectSection key={project.cwd} project={project} nested={false} {...sectionProps} />
+        <ProjectSection
+          key={project.cwd}
+          project={project}
+          nested={false}
+          browserRow={browserRows.get(project.cwd)}
+          {...sectionProps}
+        />
       ))}
 
     </>
@@ -748,6 +775,8 @@ interface ProjectSectionProps {
   project: ProjectInfo;
   /** A folded worktree renders smaller and indented under its main checkout. */
   nested: boolean;
+  /** PA-178: this folder's shared browser, when it is running — drawn as a row above the chats. */
+  browserRow?: BrowserTreeEntry;
   state: ProjectsState;
   open: (chat: ChatSummary, opts?: OpenChatOptions) => void;
   searching: boolean;
@@ -784,6 +813,7 @@ interface ProjectSectionProps {
 function ProjectSection({
   project,
   nested,
+  browserRow,
   state,
   open,
   searching,
@@ -810,6 +840,7 @@ function ProjectSection({
   onApiError,
 }: ProjectSectionProps): JSX.Element {
   const api = useHostApi();
+  const openBrowser = useOpenBrowser();
   const [limitMenuFor, setLimitMenuFor] = useState<string | null>(null);
   const [continuationFor, setContinuationFor] = useState<string | null>(null);
   const [continuationError, setContinuationError] = useState<string | null>(null);
@@ -1026,6 +1057,14 @@ function ProjectSection({
                     void state.newTmuxSession(project);
                   }
             }
+            onOpenBrowser={
+              project.browserId && state.browsers && !project.isDeleted
+                ? () => {
+                    setMenuFor(null);
+                    openBrowser(project.browserId!);
+                  }
+                : undefined
+            }
             onDeleteWorktree={
               nested && !project.isDeleted
                 ? () => {
@@ -1053,7 +1092,10 @@ function ProjectSection({
         (project.subagents?.length ?? 0) === 0 &&
         project.cronJobs.length === 0 &&
         project.webhooks.length === 0 &&
-        project.queued.length === 0 && <div className="project-empty">No chats yet</div>}
+        project.queued.length === 0 &&
+        !browserRow && <div className="project-empty">No chats yet</div>}
+
+      {!isCollapsed && browserRow && <BrowserTreeRow entry={browserRow} />}
 
       {/* Scheduled jobs sit above the chats: a job is what is *going* to
           happen, and it is a spec rather than a conversation — there is no
@@ -1826,6 +1868,7 @@ function ProjectMenu({
   onHide,
   onRemove,
   onNewTmuxSession,
+  onOpenBrowser,
   onDeleteWorktree,
 }: {
   project: ProjectInfo;
@@ -1837,6 +1880,8 @@ function ProjectMenu({
   onRemove: () => void;
   /** Undefined for the virtual Shell "project", which has no real folder to root a tmux session in. */
   onNewTmuxSession: (() => void) | undefined;
+  /** PA-178: the folder's shared browser. Undefined where the host has none. */
+  onOpenBrowser?: (() => void) | undefined;
   /** Undefined unless `nested` — a main checkout has no worktree/branch of its own to delete this way. */
   onDeleteWorktree: (() => void) | undefined;
 }): JSX.Element {
@@ -1861,6 +1906,11 @@ function ProjectMenu({
             ? 'Nothing finished to clear'
             : `Clear ${finished} finished chat${finished === 1 ? '' : 's'}`}
         </button>
+        {onOpenBrowser && (
+          <button type="button" role="menuitem" className="menu-item-icon" onClick={onOpenBrowser}>
+            <Icon name="globe" size={16} /> Open browser
+          </button>
+        )}
         {onNewTmuxSession && (
           <button type="button" role="menuitem" onClick={onNewTmuxSession}>
             New tmux session

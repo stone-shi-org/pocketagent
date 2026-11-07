@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { BrowserInfo } from '@pocketagent/protocol';
+import type { BrowserInfo, BrowserTreeEntry } from '@pocketagent/protocol';
+import { Icon } from './Icon.js';
 import { DEFAULT_HOST_ID } from '../api/host.js';
 import { locationToHash, parseLocation } from '../hooks/useHashRoute.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
@@ -74,5 +75,44 @@ export function BrowserButton({ browser, className = 'planner-btn' }: Props): JS
     >
       Browser{running ? ' ●' : ''}
     </button>
+  );
+}
+
+/** A Pocket Agent's browser id — the server's `pocketBrowserId`, which the client can compute. */
+export function pocketBrowserIdFor(workspaceId: string): string {
+  return `pocket-${workspaceId}`;
+}
+
+/**
+ * A running shared browser as a row in the home screen's tree, under the
+ * project folder or Pocket Agent it belongs to: the globe, with a dot on it
+ * for its state (amber while an agent waits for a person in it).
+ */
+export function BrowserTreeRow({ entry }: { entry: BrowserTreeEntry }): JSX.Element {
+  const open = useOpenBrowser();
+  const waiting = entry.pendingHelp > 0;
+  const status = waiting ? 'needs you' : entry.state === 'running' ? 'running' : entry.state === 'starting' ? 'starting…' : 'stopping…';
+  return (
+    <div className="chat-line cron-line browser-line">
+      <button
+        type="button"
+        className="chat-row cron-job-row browser-tree-row"
+        onClick={() => open(entry.id)}
+        title={`${entry.label}'s shared browser — ${status}`}
+      >
+        <span className="chat-title">
+          <span className="cron-icon-wrap">
+            <Icon name="globe" size={15} className="cron-badge-icon" />
+            <span
+              className={`cron-dot browser-dot browser-dot--${waiting ? 'waiting' : entry.state}`}
+              role="img"
+              aria-label={`Browser ${status}`}
+            />
+          </span>
+          Browser
+        </span>
+        <span className={`cron-line-when${waiting ? ' browser-needs-you' : ''}`}>{status}</span>
+      </button>
+    </div>
   );
 }

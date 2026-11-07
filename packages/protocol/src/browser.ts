@@ -81,6 +81,29 @@ export const BrowserListResponse = z.object({
 });
 export type BrowserListResponse = z.infer<typeof BrowserListResponse>;
 
+/**
+ * A browser worth a row in the home screen's tree: one that is running (or
+ * starting), or that an agent is waiting on. Carried by `GET /api/projects`
+ * for a person's session only — never for an MCP principal.
+ */
+export const BrowserTreeEntry = z.object({
+  id: BrowserId,
+  kind: BrowserScopeKind,
+  label: z.string(),
+  state: BrowserState,
+  pendingHelp: z.number().int().nonnegative(),
+});
+export type BrowserTreeEntry = z.infer<typeof BrowserTreeEntry>;
+
+/**
+ * `GET /api/browsers/:id/suggest?q=…` — the address bar's suggestions, read
+ * from the profile's own Chromium history (what the agent visited included).
+ */
+export const BrowserSuggestion = z.object({ url: z.string(), title: z.string() });
+export type BrowserSuggestion = z.infer<typeof BrowserSuggestion>;
+export const BrowserSuggestResponse = z.object({ suggestions: z.array(BrowserSuggestion) });
+export type BrowserSuggestResponse = z.infer<typeof BrowserSuggestResponse>;
+
 /** `GET /api/browsers/scope?sessionId=…|plannerChatId=…` — which browser a chat would use. */
 export const BrowserScopeResponse = z.object({ browser: BrowserInfo.nullable() });
 export type BrowserScopeResponse = z.infer<typeof BrowserScopeResponse>;
@@ -198,6 +221,12 @@ export const BrowserServerMessage = z.discriminatedUnion('type', [
   /** Navigation nobody in this viewer asked for — the agent is driving too. */
   z.object({ type: z.literal('agent-activity'), url: z.string() }),
   z.object({ type: z.literal('help'), pending: z.array(BrowserHelpPending) }),
+  /**
+   * Whether the page's focused element takes typing, re-checked after each tap
+   * and resize. A phone uses it to raise (or drop) its soft keyboard. An older
+   * viewer ignores the frame, so it needed no version bump.
+   */
+  z.object({ type: z.literal('editable'), editable: z.boolean() }),
   z.object({ type: z.literal('error'), message: z.string() }),
   z.object({ type: z.literal('closed'), reason: z.string() }),
 ]);

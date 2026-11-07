@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { framePointToPage, keyFramesFor, modifiersOf, normalizeTypedUrl, wheelDeltaForDrag } from './browser-input.js';
+import {
+  framePointToPage,
+  keyFramesFor,
+  modifiersOf,
+  normalizeTypedUrl,
+  resolveOmnibox,
+  SEARCH_URL,
+  wheelDeltaForDrag,
+} from './browser-input.js';
 
 describe('live browser view input (PA-178)', () => {
   const rect = { left: 10, top: 100, width: 375, height: 730 };
@@ -45,5 +53,24 @@ describe('live browser view input (PA-178)', () => {
     expect(normalizeTypedUrl('file:///etc/passwd')).toBeNull();
     expect(normalizeTypedUrl('javascript:alert(1)')).toBeNull();
     expect(normalizeTypedUrl('chrome://settings')).toBeNull();
+  });
+
+  it('fixes up what was typed the way an omnibox does', () => {
+    expect(resolveOmnibox('github.com')).toEqual({ url: 'https://github.com', kind: 'url' });
+    expect(resolveOmnibox('accounts.google.com/signin?x=1')?.url).toBe('https://accounts.google.com/signin?x=1');
+    // A dev server, a router, a LAN name: plain HTTP.
+    expect(resolveOmnibox('localhost:3000')).toEqual({ url: 'http://localhost:3000', kind: 'url' });
+    expect(resolveOmnibox('192.168.1.1')?.url).toBe('http://192.168.1.1');
+    expect(resolveOmnibox('nas.local/admin')?.url).toBe('http://nas.local/admin');
+    expect(resolveOmnibox('devbox:8080')?.url).toBe('http://devbox:8080');
+    // Words are a search.
+    expect(resolveOmnibox('pocket agent docs')).toEqual({ url: `${SEARCH_URL}pocket%20agent%20docs`, kind: 'search' });
+    expect(resolveOmnibox('weather')?.kind).toBe('search');
+    expect(resolveOmnibox('what is 1.5')?.kind).toBe('search');
+    // Explicit schemes are kept, and only http(s) is allowed.
+    expect(resolveOmnibox('HTTP://Example.com')?.url).toBe('HTTP://Example.com');
+    expect(resolveOmnibox('ftp://example.com')).toBeNull();
+    expect(resolveOmnibox('about:blank')).toBeNull();
+    expect(normalizeTypedUrl('localhost:3000')).toBe('http://localhost:3000');
   });
 });

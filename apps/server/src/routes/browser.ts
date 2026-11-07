@@ -10,6 +10,7 @@ import {
   BrowserClientMessage,
   ResolveBrowserHelpRequest,
   type BrowserScopeResponse,
+  type BrowserSuggestResponse,
   type BrowserServerMessage,
 } from '@pocketagent/protocol';
 import { isOriginAllowed } from '../auth/index.js';
@@ -98,6 +99,18 @@ export const browserRoutes: FastifyPluginAsync = async (app) => {
     }
     if (!browsers.available().available || id === null) return { browser: null };
     return { browser: browsers.info(id) };
+  });
+
+  /** The address bar's suggestions, from this browser's own history. Never logged: a URL can carry a token. */
+  app.get('/api/browsers/:id/suggest', async (request, reply): Promise<BrowserSuggestResponse | FastifyReply> => {
+    if (refuseMcp(request, reply)) return reply;
+    const { id } = request.params as { id: string };
+    const q = (request.query as { q?: unknown }).q;
+    try {
+      return { suggestions: browsers.suggest(id, typeof q === 'string' ? q : '') };
+    } catch (err) {
+      return sendBrowserError(reply, err);
+    }
   });
 
   app.post('/api/browsers/:id/start', async (request, reply) => {

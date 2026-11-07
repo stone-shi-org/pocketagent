@@ -29,6 +29,8 @@ export interface FakeChromium {
   openDialog(type: 'alert' | 'confirm' | 'prompt', message: string): void;
   /** Make the "browser" exit as if it crashed. */
   crash(): void;
+  /** What `Runtime.evaluate` (the focused-field probe) answers. */
+  setEditable(editable: boolean): void;
   close(): Promise<void>;
   /** A data dir outside the test's workspace root. */
   dataDir: string;
@@ -53,6 +55,7 @@ export async function startFakeChromium(): Promise<FakeChromium> {
   const casting = new Map<string, NodeJS.Timeout>();
   let nextSession = 1;
   let nextTarget = 2;
+  let editable = false;
 
   const sendEvent = (method: string, params: Record<string, unknown>, sessionId?: string): void => {
     socket?.send(JSON.stringify({ method, params, ...(sessionId ? { sessionId } : {}) }));
@@ -136,6 +139,9 @@ export async function startFakeChromium(): Promise<FakeChromium> {
           }
           break;
         }
+        case 'Runtime.evaluate':
+          result = { result: { type: 'boolean', value: editable } };
+          break;
         case 'Page.getNavigationHistory':
           result = { currentIndex: 0, entries: [{ id: 1, url: 'about:blank' }] };
           break;
@@ -185,6 +191,9 @@ export async function startFakeChromium(): Promise<FakeChromium> {
       if (sid) sendEvent('Page.javascriptDialogOpening', { type, message, url: 'about:blank' }, sid);
     },
     crash: exit,
+    setEditable: (value: boolean) => {
+      editable = value;
+    },
     async close() {
       exit();
       await new Promise<void>((r) => wss.close(() => r()));

@@ -2,6 +2,8 @@ import type {
   BrowserInfo,
   BrowserListResponse,
   BrowserScopeResponse,
+  BrowserSuggestResponse,
+  BrowserTreeEntry,
   AdoptableTarget,
   AgentEvent,
   AgentUsageInfo,
@@ -388,7 +390,7 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     /** Everything the home screen draws, in one round trip. */
     listProjects: (includeHidden = false) =>
-      request<{ host: HostInfo; projects: ProjectInfo[]; shells: ShellSessionSummary[] }>(
+      request<{ host: HostInfo; projects: ProjectInfo[]; shells: ShellSessionSummary[]; browsers?: BrowserTreeEntry[] }>(
         `/api/projects${includeHidden ? '?includeHidden=1' : ''}`,
       ),
 
@@ -1410,6 +1412,10 @@ export function createApiClient(endpoint: HostEndpoint) {
       request<BrowserScopeResponse>(
         `/api/browsers/scope?${'sessionId' in q ? `sessionId=${encodeURIComponent(q.sessionId)}` : `plannerChatId=${encodeURIComponent(q.plannerChatId)}`}`,
       ),
+
+    /** Address-bar suggestions from the browser's own history. */
+    browserSuggest: (id: string, q: string) =>
+      request<BrowserSuggestResponse>(`/api/browsers/${encodeURIComponent(id)}/suggest?q=${encodeURIComponent(q)}`),
 
     startBrowser: (id: string) =>
       request<BrowserInfo>(`/api/browsers/${encodeURIComponent(id)}/start`, { method: 'POST' }),

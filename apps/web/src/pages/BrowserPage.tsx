@@ -8,6 +8,7 @@ import {
   type BrowserHelpPending,
   type BrowserInfo,
   type BrowserServerMessage,
+  type BrowserSuggestion,
   type BrowserTab,
   type ScreencastMetadata,
 } from '@pocketagent/protocol';
@@ -19,7 +20,7 @@ import {
   framePointToPage,
   keyFramesFor,
   modifiersOf,
-  normalizeTypedUrl,
+  resolveOmnibox,
   wheelDeltaForDrag,
 } from '../agent/browser-input.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
@@ -56,7 +57,34 @@ interface DialogState {
   defaultPrompt: string | null;
 }
 
+/** Matches the server's render scale (`BROWSER_RENDER_SCALE`): frames are never sharper than 2×. */
 const MAX_DEVICE_SCALE = 2;
+const SUGGEST_DEBOUNCE_MS = 150;
+/** The page reporting a focused field this soon after a tap raises the phone keyboard. */
+const AUTO_KEYBOARD_WINDOW_MS = 2_000;
+
+/** A phone's visible area while its keyboard is up — iOS shrinks only the visual viewport. */
+function useVisualViewportBox(enabled: boolean): { top: number; height: number } | null {
+  const [box, setBox] = useState<{ top: number; height: number } | null>(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!enabled || !vv) return;
+    const update = (): void => {
+      // Only when something covers the layout viewport (the keyboard on iOS);
+      // otherwise the page's own CSS height is right and stays untouched.
+      const covered = vv.height < window.innerHeight - 1 || vv.offsetTop > 0;
+      setBox(covered ? { top: Math.round(vv.offsetTop), height: Math.round(vv.height) } : null);
+    };
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }, [enabled]);
+  return box;
+}
 
 export function BrowserPage({
   browserId,
@@ -90,8 +118,22 @@ export function BrowserPage({
   const [dragMode, setDragMode] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
+  // A phone: taps, a soft keyboard, a visual viewport. Decided once — it is a device, not a layout.
+  const [coarse] = useState(() => window.matchMedia('(pointer: coarse)').matches);
+  /** The page's focused element takes typing (the server's `editable` frame). */
+  const [remoteEditable, setRemoteEditable] = useState(false);
+  const [suggestions, setSuggestions] = useState<BrowserSuggestion[]>([]);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  const vvBox = useVisualViewportBox(coarse);
+  const keyboardOpenRef = useRef(false);
+  keyboardOpenRef.current = keyboardOpen;
+  const coarseRef = useRef(coarse);
+  /** The keyboard was raised because a field took focus, so it may be dropped when focus leaves one. */
+  const keyboardAutoRef = useRef(false);
+  const lastTapAtRef = useRef(0);
 
   const socketRef = useRef<WebSocket | null>(null);
+  const urlInputRef = useRef<HTMLInputElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const keyboardRef = useRef<HTMLTextAreaElement | null>(null);
@@ -177,6 +219,23 @@ export function BrowserPage({
           case 'help':
             setHelp(m.pending);
             return;
+          case 'editable':
+            setRemoteEditable(m.editable);
+            if (!coarseRef.current) return;
+            if (m.editable && !keyboardOpenRef.current && Date.now() - lastTapAtRef.current < AUTO_KEYBOARD_WINDOW_MS) {
+              // Only right after a tap on the page, and never away from one of
+              // this page's own fields: a resize re-reports the page's focus
+              // too, and once took focus out of the address bar mid-typing.
+              const mine = document.activeElement;
+              if (mine && mine !== document.body && !surfaceRef.current?.contains(mine)) return;
+              // Android allows this shortly after the tap that focused the
+              // field; iOS does not, and the "Type" button below is the way.
+              keyboardRef.current?.focus({ preventScroll: true });
+              if (document.activeElement === keyboardRef.current) keyboardAutoRef.current = true;
+            } else if (!m.editable && keyboardOpenRef.current && keyboardAutoRef.current) {
+              keyboardRef.current?.blur();
+            }
+            return;
           case 'error':
             setNotice(m.message);
             return;
@@ -226,6 +285,28 @@ export function BrowserPage({
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [sendViewport]);
+
+  // A finger on the frame belongs to the remote page. React's touch handlers
+  // are passive, so only native ones can stop the browser panning this page
+  // (iOS ignores `touch-action` while its keyboard has the document
+  // scrollable, and the pan then cancels the pointer — no scroll reached the
+  // page) and stop a tap moving focus off the hidden textarea, which closed
+  // the keyboard the moment someone tapped the field they meant to type in.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    const stop = (e: TouchEvent): void => {
+      if (e.cancelable) e.preventDefault();
+    };
+    img.addEventListener('touchstart', stop, { passive: false });
+    img.addEventListener('touchmove', stop, { passive: false });
+    img.addEventListener('touchend', stop, { passive: false });
+    return () => {
+      img.removeEventListener('touchstart', stop);
+      img.removeEventListener('touchmove', stop);
+      img.removeEventListener('touchend', stop);
+    };
+  }, []);
 
   useEffect(() => {
     if (!agentActive) return;
@@ -339,7 +420,9 @@ export function BrowserPage({
       send({ type: 'mouse', event: 'mouseMoved', ...p, button: 'none' });
       send({ type: 'mouse', event: 'mousePressed', ...p });
       send({ type: 'mouse', event: 'mouseReleased', ...p });
-      if (keyboardOpen) keyboardRef.current?.focus({ preventScroll: true });
+      lastTapAtRef.current = Date.now();
+      // Still inside the tap's gesture, so a phone keeps (or reopens) its keyboard.
+      if (keyboardOpenRef.current) keyboardRef.current?.focus({ preventScroll: true });
     }
   };
 
@@ -397,22 +480,79 @@ export function BrowserPage({
     send(frames.up);
   };
   const toggleKeyboard = (): void => {
-    const next = !keyboardOpen;
-    setKeyboardOpen(next);
-    if (next) keyboardRef.current?.focus({ preventScroll: true });
-    else keyboardRef.current?.blur();
+    keyboardAutoRef.current = false;
+    if (keyboardOpen) keyboardRef.current?.blur();
+    else keyboardRef.current?.focus({ preventScroll: true });
+  };
+  const openKeyboard = (): void => {
+    keyboardAutoRef.current = true;
+    keyboardRef.current?.focus({ preventScroll: true });
   };
 
   // ---- actions -------------------------------------------------------------------
 
+  const typedTarget = editingUrl ? resolveOmnibox(urlDraft) : null;
+  const navigateTo = (target: string): void => {
+    setEditingUrl(false);
+    setSuggestions([]);
+    urlInputRef.current?.blur();
+    send({ type: 'navigate', url: target });
+  };
   const go = (): void => {
-    const target = normalizeTypedUrl(urlDraft);
+    // Row 0 is what was typed; the rest are the history's suggestions.
+    const picked = suggestIndex > 0 ? suggestions[suggestIndex - 1] : undefined;
+    if (picked) {
+      navigateTo(picked.url);
+      return;
+    }
+    const target = resolveOmnibox(urlDraft);
     if (!target) {
       setNotice('Only http(s) addresses can be opened here.');
       return;
     }
-    setEditingUrl(false);
-    send({ type: 'navigate', url: target });
+    navigateTo(target.url);
+  };
+
+  // The address bar's suggestions, from this browser's own history.
+  useEffect(() => {
+    if (!editingUrl) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      api
+        .browserSuggest(browserId, urlDraft === url ? '' : urlDraft)
+        .then((res) => {
+          if (!cancelled) {
+            setSuggestions(res.suggestions);
+            setSuggestIndex(0);
+          }
+        })
+        .catch(() => {
+          // An older host has no such route; the bar still works without it.
+          if (!cancelled) setSuggestions([]);
+        });
+    }, SUGGEST_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [api, browserId, editingUrl, urlDraft, url]);
+
+  const onUrlKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    const rows = suggestions.length + 1;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSuggestIndex((i) => (i + 1) % rows);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSuggestIndex((i) => (i - 1 + rows) % rows);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setUrlDraft(url);
+      urlInputRef.current?.blur();
+    }
   };
 
   const answerHelp = async (item: BrowserHelpPending, outcome: 'done' | 'cancel'): Promise<void> => {
@@ -464,7 +604,10 @@ export function BrowserPage({
   }, [info?.label, onLabel]);
 
   return (
-    <div className="browser-page">
+    <div
+      className={`browser-page${coarse && keyboardOpen ? ' typing' : ''}`}
+      style={vvBox ? { position: 'fixed', left: 0, right: 0, top: vvBox.top, height: vvBox.height } : undefined}
+    >
       <header className="topbar">
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
           <Icon name="chevron-left" size={20} />
@@ -525,23 +668,75 @@ export function BrowserPage({
         </button>
         <form
           className="browser-url"
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
             go();
           }}
         >
           <input
-            type="url"
+            ref={urlInputRef}
+            type="text"
             inputMode="url"
+            enterKeyHint="go"
             autoCapitalize="off"
             autoCorrect="off"
+            autoComplete="off"
             spellCheck={false}
-            aria-label="Address"
+            aria-label="Address or search"
+            placeholder="Search or type a URL"
+            role="combobox"
+            aria-expanded={editingUrl}
+            aria-controls="browser-suggest"
+            aria-autocomplete="list"
             value={urlDraft}
-            onFocus={() => setEditingUrl(true)}
+            onFocus={(e) => {
+              setEditingUrl(true);
+              e.currentTarget.select();
+            }}
             onBlur={() => setEditingUrl(false)}
             onChange={(e) => setUrlDraft(e.target.value)}
+            onKeyDown={onUrlKeyDown}
           />
+          {editingUrl && (typedTarget || suggestions.length > 0) && (
+            <ul id="browser-suggest" className="browser-suggest" role="listbox">
+              {typedTarget && urlDraft.trim() !== '' && urlDraft !== url && (
+                <li
+                  role="option"
+                  aria-selected={suggestIndex === 0}
+                  className={suggestIndex === 0 ? 'selected' : undefined}
+                  // mousedown, not click: the input's blur would close the list first.
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    navigateTo(typedTarget.url);
+                  }}
+                >
+                  <Icon name={typedTarget.kind === 'search' ? 'search' : 'globe'} size={14} />
+                  <span className="browser-suggest-text">
+                    <strong>{typedTarget.kind === 'search' ? `Search Google for “${urlDraft.trim()}”` : typedTarget.url}</strong>
+                  </span>
+                </li>
+              )}
+              {suggestions.map((sug, i) => (
+                <li
+                  key={sug.url}
+                  role="option"
+                  aria-selected={suggestIndex === i + 1}
+                  className={suggestIndex === i + 1 ? 'selected' : undefined}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    navigateTo(sug.url);
+                  }}
+                >
+                  <Icon name="clock" size={14} />
+                  <span className="browser-suggest-text">
+                    <strong>{sug.title || sug.url}</strong>
+                    {sug.title && <span>{sug.url}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </form>
         <button
           type="button"
@@ -609,7 +804,10 @@ export function BrowserPage({
       <div
         ref={surfaceRef}
         className={captured ? 'browser-surface captured' : 'browser-surface'}
-        tabIndex={0}
+        // Focusable only for a mouse (keys are captured on click). On a phone
+        // a focusable surface took focus from the keyboard's textarea on every
+        // tap — the keyboard closed under the field being typed into.
+        tabIndex={coarse ? undefined : 0}
         onKeyDown={onSurfaceKeyDown}
         onPaste={onPaste}
         onBlur={() => setCaptured(false)}
@@ -633,6 +831,11 @@ export function BrowserPage({
           onContextMenu={(e) => e.preventDefault()}
         />
         {captured && <div className="browser-captured">Keyboard captured — Esc to release</div>}
+        {coarse && remoteEditable && !keyboardOpen && !editingUrl && hasFrame && (
+          <button type="button" className="browser-type-btn" onClick={openKeyboard}>
+            <Icon name="key" size={16} /> Type
+          </button>
+        )}
         <textarea
           ref={keyboardRef}
           className="browser-keyboard"
@@ -644,7 +847,11 @@ export function BrowserPage({
           onInput={onKeyboardInput}
           onKeyDown={onKeyboardKeyDown}
           onPaste={onPaste}
-          onBlur={() => setKeyboardOpen(false)}
+          onFocus={() => setKeyboardOpen(true)}
+          onBlur={() => {
+            setKeyboardOpen(false);
+            keyboardAutoRef.current = false;
+          }}
         />
       </div>
 

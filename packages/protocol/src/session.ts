@@ -823,6 +823,12 @@ export interface ProjectInfo {
   worktrees: ProjectInfo[];
   /** True when this worktree or directory no longer exists on disk. */
   isDeleted?: boolean;
+  /**
+   * PA-178: the shared browser this directory's sessions use (its added
+   * folder's), for the project menu's "Open browser". Absent for an MCP
+   * principal, for a virtual project, and from an older host.
+   */
+  browserId?: string | null;
 }
 // `z.lazy` plus the explicit interface above is zod's documented pattern for a
 // self-referencing schema — inference alone cannot see through the recursion.
@@ -844,6 +850,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     subagents: z.array(ChatSummary),
     worktrees: z.array(ProjectInfo),
     isDeleted: z.boolean().optional(),
+    browserId: z.string().nullable().optional(),
   }),
 );
 

@@ -25,7 +25,35 @@ export const FRAME_INTERVAL_MS = 100;
 export const MAX_BUFFERED_BYTES = 512 * 1024;
 /** Navigation within this long of the viewer's own input is the viewer's, not the agent's. */
 const OWN_ACTION_WINDOW_MS = 3_000;
-const SCREENCAST_QUALITY = 60;
+/** Frames are 2× now (see `buildChromiumArgs`); q70 keeps text edges clean at ~2–3× the bytes of the old 1× q60. */
+const SCREENCAST_QUALITY = 70;
+/** After a tap, wait this long for the page's own focus handling before asking what has focus. */
+const EDITABLE_PROBE_DELAY_MS = 150;
+
+/**
+ * Does the page's focused element take typing? Run in the page with
+ * `Runtime.evaluate` (no `Runtime.enable`, which sites can detect), through
+ * open shadow roots. A focused iframe counts: its document is another origin
+ * this cannot look into, and a payment or sign-in frame is exactly where
+ * someone types. With `scroll`, the field is scrolled to the middle of the
+ * view — the phone's keyboard just shrank the viewport over it.
+ */
+function editableProbe(scroll: boolean): string {
+  return `(() => {
+  let a = document.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  if (!a || a === document.body || a === document.documentElement) return false;
+  let ok = false;
+  if (a.tagName === 'IFRAME' || a.isContentEditable) ok = true;
+  else if (a.tagName === 'TEXTAREA' || a.tagName === 'SELECT') ok = a.tagName === 'TEXTAREA' && !a.readOnly && !a.disabled;
+  else if (a.tagName === 'INPUT') {
+    const t = String(a.type || 'text').toLowerCase();
+    ok = !['button','submit','reset','checkbox','radio','file','image','range','color','hidden'].includes(t) && !a.readOnly && !a.disabled;
+  }
+  if (ok && ${scroll ? 'true' : 'false'} && a.scrollIntoView) a.scrollIntoView({ block: 'center', inline: 'nearest' });
+  return ok;
+})()`;
+}
 
 export interface ViewerSessionOptions {
   service: BrowserService;
@@ -54,6 +82,8 @@ export class ViewerSession {
   private flushTimer: NodeJS.Timeout | null = null;
   private lastSentAt = 0;
   private lastOwnActionAt = 0;
+  private probeTimer: NodeJS.Timeout | null = null;
+  private lastEditable: boolean | null = null;
   private disposed = false;
   private readonly unsubscribers: (() => void)[] = [];
   private readonly releaseHold: () => void;
@@ -84,6 +114,7 @@ export class ViewerSession {
     if (this.disposed) return;
     this.disposed = true;
     if (this.flushTimer) clearTimeout(this.flushTimer);
+    if (this.probeTimer) clearTimeout(this.probeTimer);
     for (const u of this.unsubscribers) u();
     this.releaseHold();
     const sessionId = this.sessionId;
@@ -102,7 +133,11 @@ export class ViewerSession {
         if (this.visible) await this.startCast();
         else await this.stopCast();
         return;
-      case 'resize':
+      case 'resize': {
+        // Only a view that got *shorter* (a phone keyboard opening) re-centres
+        // the focused field; growing back, or any other resize, must not undo
+        // where the person scrolled.
+        const shrank = this.viewport !== null && message.height < this.viewport.height;
         this.viewport = {
           width: message.width,
           height: message.height,
@@ -114,7 +149,10 @@ export class ViewerSession {
           await this.stopCast();
           await this.startCast();
         }
+        // A phone's keyboard opening is a resize: keep the field in view.
+        if (shrank) this.scheduleEditableProbe(true);
         return;
+      }
       case 'tab-select':
         if (!this.opts.instance.targets.has(message.tabId)) throw new Error('No such tab.');
         await this.selectTab(message.tabId);
@@ -147,6 +185,7 @@ export class ViewerSession {
           },
           sid,
         );
+        if (message.event === 'mouseReleased') this.scheduleEditableProbe(false);
         return;
       }
       case 'key':
@@ -164,6 +203,10 @@ export class ViewerSession {
           },
           sid,
         );
+        // Tab and Enter move focus; so can a page's own key handler.
+        if (message.event === 'keyUp' && (message.key === 'Tab' || message.key === 'Enter' || message.key === 'Escape')) {
+          this.scheduleEditableProbe(false);
+        }
         return;
       case 'insertText':
         this.sendInput('Input.insertText', { text: message.text }, sid);
@@ -215,6 +258,33 @@ export class ViewerSession {
     });
   }
 
+  private scheduleEditableProbe(scroll: boolean): void {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      void this.probeEditable(scroll);
+    }, EDITABLE_PROBE_DELAY_MS);
+  }
+
+  /** Not awaited by anyone: a page held by an open `confirm()` answers nothing until it closes. */
+  private async probeEditable(scroll: boolean): Promise<void> {
+    const sid = this.sessionId;
+    if (!sid || this.disposed) return;
+    try {
+      const res = await this.cdp.send<{ result?: { value?: unknown } }>(
+        'Runtime.evaluate',
+        { expression: editableProbe(scroll), returnByValue: true, silent: true },
+        sid,
+      );
+      if (this.disposed || sid !== this.sessionId) return;
+      const editable = res.result?.value === true;
+      this.lastEditable = editable;
+      this.opts.send({ type: 'editable', editable });
+    } catch {
+      // The tab navigated or closed under the probe; the next tap asks again.
+    }
+  }
+
   private ownAction(): void {
     this.lastOwnActionAt = this.now();
     this.opts.service.touch(this.opts.instance.id);
@@ -246,6 +316,7 @@ export class ViewerSession {
     const t = this.opts.instance.targets.get(targetId);
     if (t) this.opts.send({ type: 'url', url: t.url, title: t.title });
     if (this.visible) await this.startCast();
+    if (this.lastEditable) this.scheduleEditableProbe(false);
   }
 
   private async applyViewport(): Promise<void> {

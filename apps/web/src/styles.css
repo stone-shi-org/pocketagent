@@ -6756,6 +6756,17 @@ button.chat-rate-limit-badge {
 .cron-dot--starting { background: var(--accent); }
 .cron-dot--queued { background: var(--accent); opacity: 0.55; }
 .cron-dot--throttled { background: var(--danger); opacity: 0.55; }
+/* PA-178: a shared browser's tree row — green running, amber while an agent waits on a person. */
+.browser-dot--running { background: var(--ok); }
+.browser-dot--starting,
+.browser-dot--stopping { background: var(--text-dim); }
+.browser-dot--waiting { background: var(--warn); }
+.browser-needs-you { color: var(--warn); }
+.menu .menu-item-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* Inline in the title, beside `.live-dot`: a chat row has no icon of its own
    to pin a corner badge to. */
@@ -10478,8 +10489,56 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
   color: var(--accent);
 }
 .browser-url {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
+}
+/* The address bar's suggestions: what was typed (go / search), then history. */
+.browser-suggest {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.browser-suggest li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.browser-suggest li.selected,
+.browser-suggest li:hover {
+  background: var(--bg-elev);
+}
+.browser-suggest-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.browser-suggest-text strong,
+.browser-suggest-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-suggest-text strong {
+  font-weight: 500;
+  color: var(--text);
+}
+.browser-suggest-text span {
+  font-size: 12px;
 }
 .browser-url input {
   width: 100%;
@@ -10578,6 +10637,35 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
   color: var(--on-accent);
   font-size: 12px;
   pointer-events: none;
+}
+/* A field took focus on a phone whose keyboard cannot be raised without a tap (iOS). */
+.browser-type-btn {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+/* Phone keyboard up: give the page every row it has (landscape leaves little). */
+.browser-page.typing > .topbar,
+.browser-page.typing > .browser-tabs,
+.browser-page.typing > .browser-help-bar,
+.browser-page.typing > .browser-note,
+.browser-page.typing > .browser-notices,
+.browser-page.typing > .browser-footer {
+  display: none;
+}
+.browser-page {
+  overscroll-behavior: none;
 }
 /* Off-screen but focusable, so a phone raises its keyboard for it. */
 .browser-keyboard {

@@ -263,6 +263,7 @@ export function ProjectsPage({
                   onOpenChat={(chatId) => onOpenPlannerChat(hostId, chatId)}
                   onApiError={onApiError}
                   codeServerBaseUrl={state.host?.codeServerBaseUrl}
+                  browsers={state.browsers}
                 />
                 {/* "Shell" sits between the other two categories (PA-25): a terminal is
                     more likely to be what you came back for than a project folder, but

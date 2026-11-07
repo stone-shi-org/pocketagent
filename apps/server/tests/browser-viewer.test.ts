@@ -1,4 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Writable } from 'node:stream';
+import Database from 'better-sqlite3';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
@@ -168,6 +171,84 @@ describe('live browser view (PA-178)', () => {
     expect(press.params).toMatchObject({ type: 'mousePressed', x: 10, y: 20, button: 'left', clickCount: 1 });
     expect(fake.commands.find((c) => c.method === 'Input.insertText')!.params).toEqual({ text: TYPED_SECRET });
     expect(fake.commands.find((c) => c.method === 'Input.dispatchKeyEvent')!.params).toMatchObject({ type: 'keyDown', text: '\r' });
+    v.ws.close();
+  });
+
+  it('tells a phone when the tapped element takes typing, and keeps that field in view on a resize', async () => {
+    const v = await open();
+    await waitFor(() => v.messages.some((m) => m.type === 'tabs'));
+    fake.setEditable(true);
+    v.send({ type: 'mouse', event: 'mousePressed', x: 10, y: 20 });
+    v.send({ type: 'mouse', event: 'mouseReleased', x: 10, y: 20 });
+    await waitFor(() => v.messages.some((m) => m.type === 'editable' && m.editable));
+    const probes = (): string[] =>
+      fake.commands.filter((c) => c.method === 'Runtime.evaluate').map((c) => String(c.params.expression));
+    // A tap only asks; it never scrolls the page under the person's finger.
+    expect(probes().at(-1)).toContain('ok && false');
+    expect(fake.commands.some((c) => c.method === 'Runtime.enable')).toBe(false);
+
+    // The keyboard opening shrinks the viewer: the field is scrolled back into view.
+    v.send({ type: 'resize', width: 390, height: 760, deviceScaleFactor: 2, mobile: true });
+    v.send({ type: 'resize', width: 390, height: 400, deviceScaleFactor: 2, mobile: true });
+    await waitFor(() => probes().some((p) => p.includes('ok && true')));
+    // Growing back (the keyboard closing) leaves the person's scroll alone.
+    const centred = probes().filter((p) => p.includes('ok && true')).length;
+    v.send({ type: 'resize', width: 390, height: 760, deviceScaleFactor: 2, mobile: true });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(probes().filter((p) => p.includes('ok && true')).length).toBe(centred);
+
+    fake.setEditable(false);
+    v.send({ type: 'mouse', event: 'mouseReleased', x: 10, y: 300 });
+    await waitFor(() => v.messages.at(-1)?.type === 'editable' && !(v.messages.at(-1) as { editable: boolean }).editable);
+    v.ws.close();
+  });
+
+  it("suggests addresses from the browser's own history, for a person only", async () => {
+    const dir = path.join(fake.dataDir, 'browser-profiles', browserId, 'Default');
+    fs.mkdirSync(dir, { recursive: true });
+    const db = new Database(path.join(dir, 'History'));
+    db.exec(`CREATE TABLE urls (id INTEGER PRIMARY KEY, url LONGVARCHAR, title LONGVARCHAR,
+      visit_count INTEGER DEFAULT 0 NOT NULL, typed_count INTEGER DEFAULT 0 NOT NULL,
+      last_visit_time INTEGER NOT NULL, hidden INTEGER DEFAULT 0 NOT NULL)`);
+    const insert = db.prepare('INSERT INTO urls (url, title, visit_count, typed_count, last_visit_time, hidden) VALUES (?, ?, ?, ?, ?, ?)');
+    const now = 13_400_000_000_000_000;
+    insert.run('https://docs.example.com/guide', 'Example docs', 2, 0, now, 0);
+    insert.run('https://example.com/', 'Example Domain', 5, 3, now - 1000, 0);
+    insert.run('https://login.example.com/hidden', 'Hidden', 9, 9, now, 1);
+    insert.run('file:///etc/passwd', 'example local file', 9, 9, now, 0);
+    insert.run('https://other.org/', 'Other', 1, 0, now, 0);
+    db.close();
+
+    const res = await t.app.inject({ method: 'GET', url: `/api/browsers/${browserId}/suggest?q=exa`, headers: authHeaders(t.cookie) });
+    expect(res.statusCode).toBe(200);
+    const urls = (res.json() as { suggestions: { url: string }[] }).suggestions.map((s) => s.url);
+    // A host that starts with what was typed first; hidden rows and non-http(s) never.
+    expect(urls).toEqual(['https://example.com/', 'https://docs.example.com/guide']);
+
+    const token = await mintMcpToken();
+    const refused = await t.app.inject({
+      method: 'GET',
+      url: `/api/browsers/${browserId}/suggest?q=exa`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(refused.statusCode).toBe(401);
+    expect((await t.app.inject({ method: 'GET', url: '/api/browsers/pocket-nope/suggest?q=x', headers: authHeaders(t.cookie) })).statusCode).toBe(404);
+  });
+
+  it('puts each folder\'s browser id and the running browsers on the home screen', async () => {
+    const before = (await t.app.inject({ method: 'GET', url: '/api/projects', headers: authHeaders(t.cookie) })).json() as {
+      projects: { browserId?: string | null }[];
+      browsers?: { id: string; state: string }[];
+    };
+    expect(before.browsers).toEqual([]);
+    for (const p of before.projects) expect(p.browserId).toMatch(/^project-[0-9a-f]{16}$/);
+
+    const v = await open();
+    await waitFor(() => v.messages.some((m) => m.type === 'tabs'));
+    const after = (await t.app.inject({ method: 'GET', url: '/api/projects', headers: authHeaders(t.cookie) })).json() as {
+      browsers: { id: string; kind: string; state: string; pendingHelp: number }[];
+    };
+    expect(after.browsers).toEqual([expect.objectContaining({ id: browserId, kind: 'pocket', state: 'running', pendingHelp: 0 })]);
     v.ws.close();
   });
 

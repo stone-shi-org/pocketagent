@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { ProjectInfo } from '@pocketagent/protocol';
 import {
   CreateAdoptableSessionRequest,
   CreateSessionRequest,
@@ -22,7 +23,7 @@ import { refreshHardwareProbe } from '../capabilities/hardware.js';
 import { auditConfigChange, resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db, cron, webhooks } =
+  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db, cron, webhooks, browsers } =
     app.pocket;
 
   // Merges in the per-agent "last observed live" cache (see `agent_defaults`
@@ -135,10 +136,23 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
    */
   app.get<{ Querystring: { includeHidden?: string } }>('/api/projects', async (request) => {
     const live = sessions.list();
+    const list = await projects.list(live, request.query.includeHidden === '1');
+    // PA-178: which browser each folder uses, and the browsers worth a tree
+    // row. For a person only — an MCP principal (`list_projects`) learns
+    // nothing about the shared browsers, which no MCP tool may reach.
+    const forPerson = request.mcpPrincipal === undefined && browsers.available().available;
+    if (forPerson) {
+      const label = (p: ProjectInfo): void => {
+        if (!p.cwd.startsWith('virtual:')) p.browserId = browsers.scopeForCwd(p.cwd);
+        for (const w of p.worktrees) label(w);
+      };
+      for (const p of list) label(p);
+    }
     return {
       host: projects.host(),
-      projects: await projects.list(live, request.query.includeHidden === '1'),
+      projects: list,
       shells: projects.shells(live),
+      ...(forPerson ? { browsers: browsers.treeEntries() } : {}),
     };
   });
 

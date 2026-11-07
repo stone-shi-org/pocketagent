@@ -66,7 +66,8 @@ export type IconName =
   | 'brain'
   | 'file'
   | 'info'
-  | 'grip';
+  | 'grip'
+  | 'globe';
 
 interface Props {
   name: IconName;
@@ -560,6 +561,15 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
 
+  // PA-178: the shared browser — in a project's or Pocket Agent's menu, its
+  // tree row, and the address bar's "go to" suggestion.
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z" />
+    </>
+  ),
   // PA-158: 6-dot vertical drag grip for reordering providers and models.
   grip: (
     <>
