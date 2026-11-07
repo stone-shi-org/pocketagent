@@ -273,6 +273,9 @@ importers:
       web-push:
         specifier: ^3.6.7
         version: 3.6.7(supports-color@8.1.1)
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.3
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -298,9 +301,6 @@ importers:
       vitest:
         specifier: ^3.0.5
         version: 3.2.7(@types/node@22.20.1)(supports-color@8.1.1)(tsx@4.23.12)
-      ws:
-        specifier: ^8.18.0
-        version: 8.21.3
 
   apps/web:
     dependencies:
