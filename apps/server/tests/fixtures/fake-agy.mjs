@@ -234,6 +234,32 @@ function runTurn(prompt, { exitWhenDone, emitInit: wantInit = false }) {
     return;
   }
 
+  // agy's own backend retries (`run.go`: "Run: attempt N failed (INTERNAL
+  // (code 500)…), retrying"), captured on session Q5NDdfjcLPiU: the run
+  // recovered and answered, yet `result` still said ERROR with the last stale
+  // retry message. `_RECOVERED` ends on the answer; `_EXHAUSTED` ends on the
+  // error step, which is what a run that really failed looks like in agy's
+  // own conversation store.
+  const apiRetryErrors = {
+    API_ERRORS_RECOVERED: 'API error (attempt 4): INTERNAL (code 500): Internal error encountered.',
+    API_503_RECOVERED: 'API error (attempt 2): UNAVAILABLE (code 503): The service is currently unavailable.',
+    API_ERRORS_EXHAUSTED: 'API error (attempt 5): INTERNAL (code 500): Internal error encountered.',
+  };
+  if (apiRetryErrors[prompt]) {
+    if (wantInit) emitInit(['run_command']);
+    const answer = `echo: ${prompt}`;
+    emitText(answer);
+    if (prompt === 'API_ERRORS_EXHAUSTED') {
+      emit({
+        event: 'step_update',
+        step_update: { conversation_id: conversationId, step_index: 4, state: 'DONE', step_type: 'error_message' },
+      });
+    }
+    emitErrorResult(apiRetryErrors[prompt], { response: answer, duration_seconds: 42, num_turns: 3 });
+    done();
+    return;
+  }
+
   // `/help` resolves locally in real agy — no `init` line, no tool step, zero
   // tokens/duration — captured live against v1.1.12. `fetchInitialCommands()`
   // sends exactly this and expects exactly this shape.

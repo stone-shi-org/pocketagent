@@ -74,6 +74,13 @@ interface ActiveTurn {
   pendingRetryText: string | null;
   /** Distinguishes "resend to the same conversation" from "drop it and start fresh". */
   pendingWedgedReset: boolean;
+  /**
+   * The most recent `step_update` this turn received, in arrival order, and
+   * whether that step carried any answer text. Read only by
+   * `AgySession.recoveredFromApiErrors` — see there for why the *last* step is
+   * the evidence.
+   */
+  lastStep: { key: string; type: string | null; hasText: boolean } | null;
   resolve: () => void;
 }
 
@@ -259,6 +266,42 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    */
   private static readonly TRANSIENT_ERROR_PATTERN =
     /\btimed?\s*out\b|deadline exceeded|context canceled|context cancelled|econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up|network error|connection reset|\bunavailable\b|stream (?:was )?interrupted/i;
+
+  /** agy's own wrapper around a backend failure it is retrying itself (`run.go`'s 5-attempt loop). */
+  private static readonly AGY_API_RETRY_ERROR_PATTERN = /^API error \(attempt \d+\):/;
+
+  /**
+   * Whether a non-SUCCESS `result` describes a run agy *recovered* from.
+   *
+   * agy retries a failed backend request itself (`Run: attempt N failed
+   * (INTERNAL (code 500): …), retrying in …` in its log), and each failure is
+   * recorded as an error step in the conversation. When a later attempt
+   * succeeds, the run carries on to its answer — and agy still ends it with
+   * `status` non-SUCCESS and `error` set to the last of those stale retry
+   * messages. Seen on session Q5NDdfjcLPiU (2026-11-07): three bursts of four
+   * 500s, each recovered, and the final reply was followed by
+   * `API error (attempt 4): INTERNAL (code 500)`, so a finished turn read as
+   * failed.
+   *
+   * The evidence that separates the two is the trajectory's *last step*,
+   * measured across every conversation in `~/.gemini/antigravity-cli`: a run
+   * that really failed ends on its error step, a recovered one ends on a model
+   * response after it. A response that calls tools is followed by tool steps,
+   * so a non-empty `agent_response` arriving last is the final answer. This
+   * holds whether or not agy streams its error steps (if it does, one arriving
+   * last fails the check). The error must also be agy's retry wrapper, which
+   * keeps it off the wedged-conversation path: that failure also carries a
+   * `response`, under `context canceled`, and is not recovered.
+   */
+  private static recoveredFromApiErrors(turn: ActiveTurn, result: Record<string, unknown>): boolean {
+    const status = typeof result.status === 'string' ? result.status : undefined;
+    if (status === undefined || status === 'SUCCESS') return false;
+    const errorText = typeof result.error === 'string' ? result.error.trim() : '';
+    if (!AgySession.AGY_API_RETRY_ERROR_PATTERN.test(errorText)) return false;
+    const response = typeof result.response === 'string' ? result.response.trim() : '';
+    if (!response) return false;
+    return turn.lastStep?.type === 'agent_response' && turn.lastStep.hasText;
+  }
 
   constructor(spec: AgySessionSpec, epoch?: string) {
     super();
@@ -698,6 +741,15 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     const record = isRecord(parsed) ? parsed : null;
     const isResult = record !== null && record.event === 'result';
 
+    if (turn && record !== null && record.event === 'step_update' && isRecord(record.step_update)) {
+      const update = record.step_update;
+      const key = `${String(update.conversation_id ?? '')}:${String(update.step_index ?? '')}`;
+      const type = typeof update.step_type === 'string' ? update.step_type : null;
+      const text = typeof update.text_delta === 'string' && update.text_delta.trim().length > 0;
+      const sameStep = turn.lastStep?.key === key;
+      turn.lastStep = { key, type, hasText: text || (sameStep && (turn.lastStep?.hasText ?? false)) };
+    }
+
     // Finalize any streamed text *before* the `turn_complete` that the
     // `result` line below normalizes to. The client drops a still-
     // "streaming" text block wholesale when a turn ends (it has no way to
@@ -710,8 +762,25 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     // they didn't.
     if (isResult && record) {
       const result = isRecord(record.result) ? record.result : {};
-      const status = typeof result.status === 'string' ? result.status : undefined;
-      const errorText = typeof result.error === 'string' ? result.error.trim() : '';
+      if (turn && AgySession.recoveredFromApiErrors(turn, result)) {
+        // agy reported the run as failed, but it recovered: see
+        // `recoveredFromApiErrors`. Say what happened as a warning, then
+        // rewrite the line so everything below treats it as the success it
+        // was. Above the retry decision deliberately: a recovered 503
+        // ("UNAVAILABLE") matches `TRANSIENT_ERROR_PATTERN`, and retrying
+        // would re-run a turn that already finished, tools included.
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `agy hit backend errors during this turn and recovered (last: ${String(result.error).trim()})`,
+        });
+        const { error: _dropped, ...rest } = result;
+        void _dropped;
+        record.result = { ...rest, status: 'SUCCESS' };
+      }
+      const effective = isRecord(record.result) ? record.result : {};
+      const status = typeof effective.status === 'string' ? effective.status : undefined;
+      const errorText = typeof effective.error === 'string' ? effective.error.trim() : '';
       const looksTransient =
         status !== undefined &&
         status !== 'SUCCESS' &&
@@ -985,6 +1054,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         resultErrorShown: false,
         pendingRetryText: null,
         pendingWedgedReset: false,
+        lastStep: null,
         resolve,
       };
       this.activeTurn = turn;

@@ -688,6 +688,58 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   }, 20_000);
 
+  describe("agy's own backend retries (session Q5NDdfjcLPiU)", () => {
+    it('reports a run agy recovered from as a success, with a warning rather than an error', async () => {
+      session = new AgySession(makeSpec());
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('API_ERRORS_RECOVERED');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+      const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ text: expect.stringContaining('recovered') });
+      expect(warnings[0]).toMatchObject({ text: expect.stringContaining('INTERNAL (code 500)') });
+      expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: false, stopReason: 'SUCCESS' });
+      expect(events.some((e) => e.kind === 'text' && e.text === 'echo: API_ERRORS_RECOVERED')).toBe(true);
+      await waitFor(() => session?.busy === false);
+    });
+
+    it('never re-runs a recovered turn, even when the stale error looks transient', async () => {
+      // `UNAVAILABLE` matches TRANSIENT_ERROR_PATTERN: before the recovery
+      // check, this finished turn would have been sent to agy a second time.
+      session = new AgySession(makeSpec());
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('API_503_RECOVERED');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(1);
+      expect(events.some((e) => e.kind === 'notice' && /retrying/.test(e.text))).toBe(false);
+      expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: false });
+      await waitFor(() => session?.busy === false);
+    });
+
+    it('still reports a run that ended on its error step as failed', async () => {
+      session = new AgySession(makeSpec());
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('API_ERRORS_EXHAUSTED');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      const errors = events.filter((e) => e.kind === 'notice' && e.level === 'error');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ text: expect.stringContaining('API error (attempt 5)') });
+      expect(events.some((e) => e.kind === 'notice' && /recovered/.test(e.text))).toBe(false);
+      expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: true });
+      await waitFor(() => session?.busy === false);
+    });
+  });
+
   it('gives up after exhausting retry budget on a persistent transient-looking error', async () => {
     session = new AgySession(makeSpec());
     await session.start();
