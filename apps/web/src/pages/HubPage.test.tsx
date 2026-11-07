@@ -371,5 +371,110 @@ describe('HubPage capability cards (PA-133)', () => {
     expect(outcomes.dev02?.progress.status).toBe('succeeded');
     expect(outcomes.dev02?.progress.lines.join('\n')).toContain('Updating on dev02...');
   });
+
+  it('shows Host vs Docker header badge, collapses long capability lists with +N more, and unifies Hub section cards (PA-179)', () => {
+    const dockerHost = makeHostRecord({
+      id: 'docker01',
+      label: 'docker-worker',
+      capabilities: {
+        status: 'ok',
+        fetchedAt: Date.now(),
+        card: {
+          capabilitiesVersion: 1,
+          platform: 'linux',
+          arch: 'x64',
+          osVersion: '6.8.0',
+          description: '',
+          tags: [],
+          agents: [
+            { id: 'claude', displayName: 'Claude Code', available: true, setupState: 'ready', setupDetail: null, transports: ['terminal', 'structured'], structured: true },
+            { id: 'codex', displayName: 'Codex', available: true, setupState: 'ready', setupDetail: null, transports: ['terminal', 'structured'], structured: true },
+            { id: 'agy', displayName: 'Antigravity', available: true, setupState: 'ready', setupDetail: null, transports: ['terminal', 'structured'], structured: true },
+            { id: 'opencode', displayName: 'Opencode', available: true, setupState: 'ready', setupDetail: null, transports: ['terminal', 'structured'], structured: true },
+            { id: 'pi', displayName: 'Pi', available: true, setupState: 'ready', setupDetail: null, transports: ['terminal', 'structured'], structured: true },
+          ],
+          executables: ['docker', 'git', 'node', 'python3', 'cargo', 'go', 'playwright-cli'],
+          projects: [
+            { path: '/work/p1', name: 'p1', label: 'proj-alpha', gitRemoteUrl: null },
+            { path: '/work/p2', name: 'p2', label: 'proj-beta', gitRemoteUrl: null },
+            { path: '/work/p3', name: 'p3', label: 'proj-gamma', gitRemoteUrl: null },
+            { path: '/work/p4', name: 'p4', label: 'proj-delta', gitRemoteUrl: null },
+            { path: '/work/p5', name: 'p5', label: 'proj-epsilon', gitRemoteUrl: null },
+          ],
+          pocketAgents: [
+            { id: 'pa-1', name: 'Agent One', defaultModelId: null, identityPrompt: null, enabledTools: [], skills: [] },
+            { id: 'pa-2', name: 'Agent Two', defaultModelId: null, identityPrompt: null, enabledTools: [], skills: [] },
+            { id: 'pa-3', name: 'Agent Three', defaultModelId: null, identityPrompt: null, enabledTools: [], skills: [] },
+            { id: 'pa-4', name: 'Agent Four', defaultModelId: null, identityPrompt: null, enabledTools: [], skills: [] },
+          ],
+          hardware: {
+            cpu: { model: 'AMD EPYC', threads: 16, limitThreads: 4 },
+            memory: { totalBytes: 64 * 1024 ** 3, limitBytes: 16 * 1024 ** 3 },
+            gpus: [],
+            containerized: true,
+          },
+        },
+      },
+    });
+    const bareMetalHost = makeHostRecord({
+      id: 'bare01',
+      label: 'bare-host',
+      capabilities: {
+        status: 'ok',
+        fetchedAt: Date.now(),
+        card: {
+          capabilitiesVersion: 1,
+          platform: 'linux',
+          arch: 'x64',
+          osVersion: '6.8.0',
+          description: '',
+          tags: [],
+          agents: [],
+          executables: [],
+          projects: [],
+          pocketAgents: [],
+          hardware: {
+            cpu: { model: 'AMD Ryzen', threads: 16, limitThreads: null },
+            memory: { totalBytes: 64 * 1024 ** 3, limitBytes: null },
+            gpus: [],
+            containerized: false,
+          },
+        },
+      },
+    });
+
+    const html = renderToStaticMarkup(
+      <HubPage
+        directory={makeDirectory([dockerHost, bareMetalHost])}
+        onOpenHost={vi.fn()}
+        onOpenTemplates={vi.fn()}
+        onOpenTemplate={vi.fn()}
+        onOpenFleetChat={vi.fn()}
+        onApiError={vi.fn()}
+      />,
+    );
+
+    // Host vs. Docker header pills
+    expect(html).toContain('hub-env-pill docker');
+    expect(html).toContain('>Docker<');
+    expect(html).toContain('hub-env-pill host');
+    expect(html).toContain('>Host<');
+
+    // Long lists are truncated to their initial chip limit with "+N more" disclosure buttons
+    expect(html).toContain('proj-alpha');
+    expect(html).toContain('proj-beta');
+    expect(html).toContain('proj-gamma');
+    expect(html).not.toContain('proj-delta');
+    expect(html).not.toContain('proj-epsilon');
+    expect(html).toContain('Show 2 more agents');
+    expect(html).toContain('Show 2 more tools');
+    expect(html).toContain('Show 2 more projects');
+    expect(html).toContain('Show 1 more Pocket Agents');
+
+    // Unified card wrappers and typed URL inputs across MCP clients, Webhook routing, and Discovery
+    expect(html).toContain('id="hub-mcp-url" type="url" class="settings-input"');
+    expect(html).toContain('id="hub-webhook-routing-url" type="url" class="settings-input"');
+    expect(html).toContain('hub-checkbox-inline');
+  });
 });
 

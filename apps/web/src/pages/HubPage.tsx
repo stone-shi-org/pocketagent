@@ -439,6 +439,36 @@ export function formatHardwareSummary(hw: HostCapabilityHardware): string {
   return parts.join(' · ');
 }
 
+function CollapsibleChips({
+  items,
+  limit,
+  label,
+}: {
+  items: readonly JSX.Element[];
+  limit: number;
+  label: string;
+}): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const hiddenCount = items.length - limit;
+  const visible = expanded || hiddenCount <= 0 ? items : items.slice(0, limit);
+  return (
+    <>
+      {visible}
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          className="hub-cap-chip hub-cap-more"
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-expanded={expanded}
+          aria-label={expanded ? `Show fewer ${label}` : `Show ${hiddenCount} more ${label}`}
+        >
+          {expanded ? 'Show less' : `+${hiddenCount} more`}
+        </button>
+      )}
+    </>
+  );
+}
+
 function HostCard({
   host,
   push,
@@ -459,6 +489,7 @@ function HostCard({
   const drift = hostDriftMessage(host);
   const caps = host.capabilities ?? null;
   const card = caps?.status === 'ok' ? caps.card : null;
+  const availableAgents = card !== null ? card.agents.filter((a) => a.available) : [];
   return (
     <article className="hub-host-card">
       <header className="hub-host-card-head">
@@ -471,6 +502,18 @@ function HostCard({
             title={`${card.platform} ${card.arch} · ${card.osVersion}`}
           >
             {formatPlatformBadge(card.platform, card.arch)}
+          </span>
+        )}
+        {card?.hardware !== undefined && (
+          <span
+            className={`hub-pill hub-env-pill ${card.hardware.containerized ? 'docker' : 'host'}`}
+            title={
+              card.hardware.containerized
+                ? 'Containerized environment (Docker / container runtime detected)'
+                : 'Host environment (running directly on the host machine)'
+            }
+          >
+            {card.hardware.containerized ? 'Docker' : 'Host'}
           </span>
         )}
         {host.isDefault && (
@@ -534,12 +577,13 @@ function HostCard({
             )}
             <dt>Agents</dt>
             <dd className="hub-cap-list">
-              {card.agents.filter((a) => a.available).length === 0 ? (
+              {availableAgents.length === 0 ? (
                 <span className="hub-muted">None installed</span>
               ) : (
-                card.agents
-                  .filter((a) => a.available)
-                  .map((a) => (
+                <CollapsibleChips
+                  label="agents"
+                  limit={3}
+                  items={availableAgents.map((a) => (
                     <span
                       key={a.id}
                       className={`hub-cap-chip${
@@ -553,7 +597,8 @@ function HostCard({
                     >
                       {a.displayName} ({formatAgentSetupLabel(a.setupState)})
                     </span>
-                  ))
+                  ))}
+                />
               )}
             </dd>
             <dt>Tools</dt>
@@ -561,23 +606,47 @@ function HostCard({
               {card.executables.length === 0 ? (
                 <span className="hub-muted">None detected</span>
               ) : (
-                card.executables.map((exe) => (
-                  <code key={exe} className="hub-cap-chip hub-mono">
-                    {exe}
-                  </code>
-                ))
+                <CollapsibleChips
+                  label="tools"
+                  limit={5}
+                  items={card.executables.map((exe) => (
+                    <code key={exe} className="hub-cap-chip hub-mono">
+                      {exe}
+                    </code>
+                  ))}
+                />
               )}
             </dd>
             {card.projects.length > 0 && (
               <>
                 <dt>Projects</dt>
-                <dd>{card.projects.map((p) => p.label).join(', ')}</dd>
+                <dd className="hub-cap-list">
+                  <CollapsibleChips
+                    label="projects"
+                    limit={3}
+                    items={card.projects.map((p) => (
+                      <span key={p.path} className="hub-cap-chip" title={p.path}>
+                        {p.label}
+                      </span>
+                    ))}
+                  />
+                </dd>
               </>
             )}
             {card.pocketAgents.length > 0 && (
               <>
                 <dt>Pocket Agents</dt>
-                <dd>{card.pocketAgents.map((pa) => pa.name).join(', ')}</dd>
+                <dd className="hub-cap-list">
+                  <CollapsibleChips
+                    label="Pocket Agents"
+                    limit={3}
+                    items={card.pocketAgents.map((pa) => (
+                      <span key={pa.id} className="hub-cap-chip" title={pa.identityPrompt ?? pa.name}>
+                        {pa.name}
+                      </span>
+                    ))}
+                  />
+                </dd>
               </>
             )}
             {card.hasWorkspaceIndex !== undefined && (
@@ -642,18 +711,35 @@ function DiscoverySection({
         )}
       </div>
       {discovery === null ? (
-        <p className="hub-muted">Looking…</p>
+        <div className="hub-row-card">
+          <Icon name="broadcast" size={20} className="hub-row-icon" />
+          <div className="hub-row-main">
+            <strong>Local network discovery</strong>
+            <span>Looking…</span>
+          </div>
+        </div>
       ) : discovery.state !== 'listening' && discovery.state !== 'starting' ? (
         // `disabled` and `failed` both explain themselves; the Hub works either way.
-        <p className="hub-muted">{discovery.message}</p>
+        <div className="hub-row-card">
+          <Icon name="broadcast" size={20} className="hub-row-icon" />
+          <div className="hub-row-main">
+            <strong>Local network discovery</strong>
+            <span>{discovery.message}</span>
+          </div>
+        </div>
       ) : discovery.hosts.length === 0 ? (
-        <p className="hub-muted">
-          No backend is advertising here. A backend announces itself when started with{' '}
-          <code>POCKETAGENT_MDNS_ADVERTISE=true</code> and a non-loopback <code>HOST</code>, and it
-          has to share a LAN or a Docker network with this Hub, since mDNS does not cross routers.
-          Under Docker Compose the variable belongs in the service’s <code>environment:</code> —
-          a project’s <code>.env</code> is not passed into the container.
-        </p>
+        <div className="hub-row-card">
+          <Icon name="broadcast" size={20} className="hub-row-icon" />
+          <div className="hub-row-main">
+            <strong>No backend advertising</strong>
+            <span>
+              A backend announces itself when started with <code>POCKETAGENT_MDNS_ADVERTISE=true</code> and a
+              non-loopback <code>HOST</code>, and it has to share a LAN or a Docker network with this Hub,
+              since mDNS does not cross routers. Under Docker Compose the variable belongs in the service’s{' '}
+              <code>environment:</code> — a project’s <code>.env</code> is not passed into the container.
+            </span>
+          </div>
+        </div>
       ) : (
         <ul className="hub-discovered">
           {discovery.hosts.map((found) => {

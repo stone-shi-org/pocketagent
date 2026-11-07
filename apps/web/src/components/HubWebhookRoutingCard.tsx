@@ -3,6 +3,7 @@ import type { HubWebhookRoutingHost } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { disableHubWebhookRouting, getHubWebhookRouting, setHubWebhookRouting } from '../api/hub.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { Icon } from './Icon.js';
 
 /**
  * PA-171: which backends' webhooks may send runs to which other hosts.
@@ -84,100 +85,120 @@ export function HubWebhookRoutingCard({ onApiError }: Props): JSX.Element {
     }
   }
 
+  const routedCount = hosts?.filter((h) => h.state === 'routed').length ?? 0;
+
   return (
     <section className="hub-section" aria-labelledby="hub-webhook-routing-heading">
       <h2 id="hub-webhook-routing-heading">Webhook routing</h2>
-      <p className="transport-hint" style={{ marginBottom: 10 }}>
-        Lets a host&rsquo;s webhooks map a Jira project or Bamboo plan to a folder on another host, and run it there
-        through this Hub. Each run&rsquo;s approvals are answered on the host it runs on, and that host&rsquo;s own
-        setting decides whether they are skipped.
-      </p>
-      <label className="settings-row-label" htmlFor="hub-webhook-routing-url">
-        Hub address the hosts will use
-      </label>
-      <input
-        id="hub-webhook-routing-url"
-        className="settings-input"
-        value={hubUrl}
-        onChange={(e) => setHubUrl(e.target.value)}
-        aria-describedby="hub-webhook-routing-url-hint"
-      />
-      <p id="hub-webhook-routing-url-hint" className="transport-hint">
-        Prefilled with this browser&rsquo;s address. Change it if the hosts reach the Hub by another name.
-      </p>
+      <div className="hub-row-card fleet-card">
+        <Icon name="webhook" size={20} className="hub-row-icon" />
+        <div className="hub-row-main">
+          <strong>
+            {hosts === null
+              ? 'Cross-host webhook dispatch'
+              : routedCount === 0
+                ? 'Off on all hosts'
+                : `${routedCount} host${routedCount === 1 ? '' : 's'} routing runs`}
+          </strong>
+          <span>
+            Lets a host&rsquo;s webhooks map a Jira project or Bamboo plan to a folder on another host, and run it
+            there through this Hub. Each run&rsquo;s approvals are answered on the host it runs on, and that
+            host&rsquo;s own setting decides whether they are skipped.
+          </span>
+          <label className="fleet-field" htmlFor="hub-webhook-routing-url">
+            <span>Hub address the hosts will use</span>
+            <input
+              id="hub-webhook-routing-url"
+              type="url"
+              className="settings-input"
+              value={hubUrl}
+              onChange={(e) => setHubUrl(e.target.value)}
+              spellCheck={false}
+              aria-describedby="hub-webhook-routing-url-hint"
+            />
+          </label>
+          <span id="hub-webhook-routing-url-hint" className="hub-muted">
+            Prefilled with this browser&rsquo;s address. Change it if the hosts reach the Hub by another name.
+          </span>
 
-      {error && (
-        <div className="error-box" role="alert">
-          {error}
-        </div>
-      )}
-
-      {hosts === null ? (
-        <div className="spinner">Loading…</div>
-      ) : hosts.length === 0 ? (
-        <p className="planner-row-meta">No bound hosts.</p>
-      ) : (
-        hosts.map((host) => {
-          const others = hosts.filter((h) => h.hostId !== host.hostId);
-          const draft = drafts[host.hostId] ?? [];
-          const changed = !sameSet(draft, host.allowedHosts);
-          return (
-            <div key={host.hostId} className="settings-row settings-row-stacked">
-              <div className="settings-row-info">
-                <label className="settings-row-label">{host.label}</label>
-                <p className="planner-row-meta">
-                  {host.state === 'routed'
-                    ? `Routing on (${host.tokenPrefix ?? ''}…) · may send runs to ${
-                        host.allowedHosts.length === 0 ? 'no host' : host.allowedHosts.map(labelOf).join(', ')
-                      }`
-                    : host.state === 'failed'
-                      ? 'The last attempt did not land.'
-                      : 'Routing off · its webhooks run only on this host.'}
-                </p>
-                {host.message && <p className="transport-hint">{host.message}</p>}
-              </div>
-              <div className="settings-row-control">
-                {others.length === 0 ? (
-                  <p className="planner-row-meta">No other host to send runs to.</p>
-                ) : (
-                  others.map((target) => (
-                    <label key={target.hostId} className="planner-checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={draft.includes(target.hostId)}
-                        disabled={busy}
-                        onChange={() => toggle(host.hostId, target.hostId)}
-                      />{' '}
-                      {target.label}
-                    </label>
-                  ))
-                )}
-                <span style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                  <button
-                    type="button"
-                    className="planner-btn"
-                    disabled={busy || draft.length === 0 || hubUrl.trim() === '' || (!changed && host.state === 'routed')}
-                    title={draft.length === 0 ? 'Tick at least one host, or switch routing off.' : undefined}
-                    onClick={() => setPending({ kind: 'save', host, targets: draft })}
-                  >
-                    {host.state === 'routed' ? 'Save' : 'Switch on'}
-                  </button>
-                  {host.state !== 'none' && (
-                    <button
-                      type="button"
-                      className="planner-btn"
-                      disabled={busy}
-                      onClick={() => setPending({ kind: 'off', host })}
-                    >
-                      Switch off
-                    </button>
-                  )}
-                </span>
-              </div>
+          {error && (
+            <div className="error-box" role="alert">
+              {error}
             </div>
-          );
-        })
-      )}
+          )}
+
+          {hosts === null ? (
+            <div className="spinner">Loading…</div>
+          ) : hosts.length === 0 ? (
+            <p className="planner-row-meta" style={{ margin: '6px 0 0' }}>No bound hosts.</p>
+          ) : (
+            hosts.map((host) => {
+              const others = hosts.filter((h) => h.hostId !== host.hostId);
+              const draft = drafts[host.hostId] ?? [];
+              const changed = !sameSet(draft, host.allowedHosts);
+              return (
+                <div key={host.hostId} className="hub-routing-row">
+                  <div className="hub-routing-row-head">
+                    <strong>{host.label}</strong>
+                    <span className="planner-row-meta">
+                      {host.state === 'routed'
+                        ? `Routing on (${host.tokenPrefix ?? ''}…) · may send runs to ${
+                            host.allowedHosts.length === 0 ? 'no host' : host.allowedHosts.map(labelOf).join(', ')
+                          }`
+                        : host.state === 'failed'
+                          ? 'The last attempt did not land.'
+                          : 'Routing off · its webhooks run only on this host.'}
+                    </span>
+                  </div>
+                  {host.message && <p className="transport-hint" style={{ margin: 0 }}>{host.message}</p>}
+                  <div className="hub-routing-controls">
+                    {others.length === 0 ? (
+                      <span className="planner-row-meta">No other host to send runs to.</span>
+                    ) : (
+                      <div className="hub-checkbox-inline" role="group" aria-label={`Target hosts for ${host.label}`}>
+                        {others.map((target) => (
+                          <label key={target.hostId} className="planner-checkbox-row">
+                            <input
+                              type="checkbox"
+                              checked={draft.includes(target.hostId)}
+                              disabled={busy}
+                              onChange={() => toggle(host.hostId, target.hostId)}
+                            />{' '}
+                            {target.label}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                    <div className="hub-routing-actions">
+                      <button
+                        type="button"
+                        className="planner-btn"
+                        disabled={
+                          busy || draft.length === 0 || hubUrl.trim() === '' || (!changed && host.state === 'routed')
+                        }
+                        title={draft.length === 0 ? 'Tick at least one host, or switch routing off.' : undefined}
+                        onClick={() => setPending({ kind: 'save', host, targets: draft })}
+                      >
+                        {host.state === 'routed' ? 'Save' : 'Switch on'}
+                      </button>
+                      {host.state !== 'none' && (
+                        <button
+                          type="button"
+                          className="planner-btn"
+                          disabled={busy}
+                          onClick={() => setPending({ kind: 'off', host })}
+                        >
+                          Switch off
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
 
       {pending && (
         <ConfirmDialog

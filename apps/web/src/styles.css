@@ -156,11 +156,14 @@ button.danger {
   color: var(--danger);
 }
 
+input:not([type]),
 input[type='password'],
 input[type='text'],
 input[type='number'],
 input[type='url'],
 input[type='email'],
+input[type='search'],
+.settings-input,
 select,
 textarea {
   box-sizing: border-box;
@@ -176,11 +179,14 @@ textarea {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+input:not([type]):hover:not(:disabled),
 input[type='password']:hover:not(:disabled),
 input[type='text']:hover:not(:disabled),
 input[type='number']:hover:not(:disabled),
 input[type='url']:hover:not(:disabled),
 input[type='email']:hover:not(:disabled),
+input[type='search']:hover:not(:disabled),
+.settings-input:hover:not(:disabled),
 select:hover:not(:disabled),
 textarea:hover:not(:disabled) {
   border-color: var(--border-strong);
@@ -9143,15 +9149,15 @@ button.chat-rate-limit-badge {
 
 .hub-host-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
 }
 
 .hub-host-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px;
+  gap: 8px;
+  padding: 13px 15px;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -9161,11 +9167,12 @@ button.chat-rate-limit-badge {
 .hub-host-card-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   min-width: 0;
 }
 .hub-host-card-name {
-  flex: 1;
+  flex: 1 1 120px;
   min-width: 0;
   font-size: 15px;
   overflow: hidden;
@@ -9185,13 +9192,21 @@ button.chat-rate-limit-badge {
   color: var(--text-dim);
 }
 .hub-pill.ok { color: var(--ok); }
+.hub-env-pill.docker {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev));
+}
+.hub-env-pill.host {
+  color: var(--text);
+}
 
 .hub-host-facts {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 4px 12px;
+  gap: 2px 10px;
   margin: 0;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 .hub-host-facts dt { color: var(--text-dim); }
 .hub-host-facts dd {
@@ -9222,44 +9237,44 @@ button.chat-rate-limit-badge {
 .hub-host-capabilities {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding-top: 8px;
+  gap: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--border);
 }
 .hub-host-cap-desc {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 12.5px;
+  line-height: 1.4;
   color: var(--text);
   overflow-wrap: anywhere;
 }
 .hub-host-cap-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 4px;
 }
 .hub-tag-pill {
   color: var(--accent);
   border-color: var(--border-strong);
 }
 .hub-host-cap-facts {
-  font-size: 12.5px;
+  font-size: 12px;
 }
 .hub-cap-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 6px;
+  gap: 3px 5px;
   align-items: center;
 }
 .hub-cap-chip {
   display: inline-flex;
   align-items: center;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--bg-elev);
-  font-size: 11.5px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.35;
   color: var(--text);
 }
 .hub-cap-chip.ok {
@@ -9267,6 +9282,16 @@ button.chat-rate-limit-badge {
 }
 .hub-cap-chip.warn {
   color: var(--warn);
+}
+button.hub-cap-chip.hub-cap-more {
+  cursor: pointer;
+  color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--bg-elev-2);
+  font-weight: 600;
+}
+button.hub-cap-chip.hub-cap-more:hover {
+  border-color: var(--accent);
 }
 .hub-host-cap-unavailable {
   margin: 0;
@@ -9281,7 +9306,7 @@ button.chat-rate-limit-badge {
   align-items: center;
   gap: 6px;
   margin-top: auto;
-  padding-top: 4px;
+  padding-top: 2px;
 }
 .hub-host-actions > button:not(.round-btn) {
   display: inline-flex;
@@ -9303,6 +9328,7 @@ button.chat-rate-limit-badge {
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
   border-radius: 14px;
+  box-shadow: var(--shadow-sm);
 }
 .hub-row-icon {
   color: var(--text-dim);
@@ -9316,7 +9342,7 @@ button.chat-rate-limit-badge {
   gap: 2px;
 }
 .hub-row-main strong { font-size: 14px; }
-.hub-row-main span {
+.hub-row-main > span {
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--text-dim);
@@ -9331,6 +9357,78 @@ button.chat-rate-limit-badge {
 .hub-row-actions button {
   padding: 6px 12px;
   font-size: 13px;
+}
+
+/* PA-179: unified Hub section cards and inline single-line checkbox rows */
+.hub-card-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.hub-card-subsection-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.hub-checkbox-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.hub-checkbox-inline .planner-checkbox-row,
+.hub-checkbox-inline .fleet-host-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.hub-checkbox-inline .planner-checkbox-row input[type='checkbox'],
+.hub-checkbox-inline .fleet-host-checkbox input[type='checkbox'] {
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+.hub-routing-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.hub-routing-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.hub-routing-row-head strong {
+  font-size: 13.5px;
+}
+.hub-routing-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+.hub-routing-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.hub-routing-actions .planner-btn {
+  padding: 5px 10px;
+  font-size: 12.5px;
 }
 
 .hub-discovered {

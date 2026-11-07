@@ -190,6 +190,7 @@ export function McpClientsSection({ onApiError }: Props): JSX.Element {
         <div className="settings-row-control">
           <input
             id="mcp-client-label"
+            type="text"
             className="settings-input"
             placeholder="Name, e.g. laptop claude"
             value={label}

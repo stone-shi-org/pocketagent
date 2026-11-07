@@ -318,12 +318,12 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
           {bound.length === 0 ? (
             <span className="hub-muted">Bind at least one host above to run maintenance actions.</span>
           ) : (
-            <div className="fleet-host-Checkboxes" role="group" aria-label="Target hosts">
+            <div className="fleet-host-Checkboxes hub-checkbox-inline" role="group" aria-label="Target hosts">
               {bound.map((host) => {
                 const id = manageId(host);
                 const checked = selectedIds.includes(id);
                 return (
-                  <label key={id} className="fleet-host-checkbox" style={{ marginRight: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <label key={id} className="fleet-host-checkbox">
                     <input
                       type="checkbox"
                       checked={checked}
