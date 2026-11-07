@@ -443,6 +443,19 @@ for (const [label, contextOptions] of [
     document.dispatchEvent(new Event('visibilitychange'));
   });
 
+  if (!touch) {
+    heading(`${label}: the viewer is its own tab`);
+    const browserTab = page.locator(`.tab-bar .tab[data-tab-id="b:local:${browserId}"]`);
+    check((await browserTab.count()) === 1, 'the browser opened as a tab in the strip', (await browserTab.getAttribute('title').catch(() => '')) ?? '');
+    check(/^Browser · /.test((await browserTab.getAttribute('title').catch(() => '')) ?? ''), 'titled with what it belongs to');
+    // Switch to the chat's tab and back: the browser tab keeps its place.
+    await page.locator(`.tab-bar .tab[data-tab-id="p:local:${chat.id}"]`).click();
+    await page.waitForFunction(() => !location.hash.includes('/browser/'));
+    await browserTab.click();
+    await page.locator('.tab-panel:not(.inactive) .browser-frame').waitFor({ state: 'visible', timeout: 10_000 });
+    ok('switching tabs and back returns to the live view');
+  }
+
   heading(`${label}: Done hands the browser back`);
   await page.locator('.browser-help-actions button', { hasText: 'Done' }).click();
   let finished = false;
@@ -461,6 +474,28 @@ for (const [label, contextOptions] of [
   check((await page.locator('.browser-help-bar').count()) === 0, 'the viewer no longer asks');
   check(errors.length === 0, 'no page errors', errors.join('; '));
   await remote.close();
+  await context.close();
+}
+
+heading('the Browsers list, from the menu, on both layouts');
+for (const [layout, contextOptions] of [
+  ['phone', { ...devices['iPhone 13'] }],
+  ['desktop', { viewport: { width: 1280, height: 900 } }],
+]) {
+  const { context, page } = await loggedIn(contextOptions);
+  await page.locator('button[aria-label="More"]:visible').first().click();
+  await page.locator('[role=menuitem]', { hasText: 'Browsers…' }).click();
+  await page.locator('.browsers-page:visible .browsers-row').first().waitFor({ timeout: 10_000 });
+  const rows = await page.locator('.browsers-page:visible .browsers-row').allInnerTexts();
+  check(
+    rows.some((r) => r.includes('Pocket Agent')) && rows.some((r) => r.includes('Project')),
+    `${layout}: the list shows Pocket Agent and project browsers`,
+    `${rows.length} rows`,
+  );
+  await page.screenshot({ path: path.join(SHOTS, `pa178-${layout}-browsers-list.png`) });
+  await page.locator('.browsers-page:visible .browsers-row', { hasText: 'Pocket Agent' }).first().locator('button', { hasText: 'Open' }).click();
+  await page.locator('.browser-frame:visible').waitFor({ state: 'visible', timeout: 20_000 });
+  ok(`${layout}: Open goes to the live view`, await page.evaluate(() => location.hash));
   await context.close();
 }
 

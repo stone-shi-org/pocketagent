@@ -37,6 +37,8 @@ export type Route =
    * a pushed handoff arrives as `#/h/<host>/browser/<id>` through a Hub.
    */
   | { name: 'browser'; browserId: string }
+  /** PA-178: every shared browser on the host — see `BrowsersPage`. */
+  | { name: 'browsers' }
   /**
    * The Hub's config templates (PA-70) — see `HubTemplatesPage`.
    *
@@ -180,6 +182,8 @@ function parse(hash: string): Route {
 
   if (/^#\/hub$/.exec(hash)) return { name: 'hub' };
 
+  if (/^#\/browsers$/.exec(hash)) return { name: 'browsers' };
+
   const browser = /^#\/browser\/([^/?]+)/.exec(hash);
   if (browser?.[1]) return { name: 'browser', browserId: decodeURIComponent(browser[1]) };
 
@@ -222,6 +226,8 @@ function toHash(route: Route): string {
       return `#/planner/agent/${encodeURIComponent(route.agentId)}`;
     case 'browser':
       return `#/browser/${encodeURIComponent(route.browserId)}`;
+    case 'browsers':
+      return '#/browsers';
     case 'hub':
       return '#/hub';
     case 'hub-templates':

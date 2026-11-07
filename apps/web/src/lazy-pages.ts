@@ -68,6 +68,10 @@ export const HubTemplateEditorPage = lazy(() =>
 export const HubPage = lazy(() => import('./pages/HubPage.js').then((m) => ({ default: m.HubPage })));
 
 /** PA-178: the live browser view — reached from a chat header or a push, never on first paint. */
+export const BrowsersPage = lazy(() =>
+  import('./pages/BrowsersPage.js').then((m) => ({ default: m.BrowsersPage })),
+);
+
 export const BrowserPage = lazy(() =>
   import('./pages/BrowserPage.js').then((m) => ({ default: m.BrowserPage })),
 );

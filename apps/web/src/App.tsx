@@ -23,6 +23,7 @@ import {
   WebhookEditorPage,
   WebhooksPage,
   BrowserPage,
+  BrowsersPage,
 } from './lazy-pages.js';
 import { api } from './api/client.js';
 import { useHostDirectory } from './hosts/directory.js';
@@ -259,6 +260,7 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
         onOpenCron={() => navigate({ name: 'cron' })}
         onOpenCronJob={(hostId, jobId) => nav.openOn(hostId, { name: 'cron-job', jobId })}
         onOpenWebhooks={() => navigate({ name: 'webhooks' })}
+        onOpenBrowsers={() => navigate({ name: 'browsers' })}
         onOpenWebhook={(hostId, webhookId) => nav.openOn(hostId, { name: 'webhook', webhookId })}
         onOpenPlanner={() => navigate({ name: 'planner' })}
         onOpenProviders={() => navigate({ name: 'providers' })}
@@ -459,6 +461,18 @@ function PhoneRoute({
           agentId={route.agentId}
           onBack={() => navigate({ name: 'planner' })}
           onDone={() => navigate({ name: 'planner' })}
+          onApiError={onApiError}
+        />
+      </Suspense>
+    );
+  }
+
+  if (route.name === 'browsers') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <BrowsersPage
+          onBack={() => navigate({ name: 'list' })}
+          onOpen={(browserId) => navigate({ name: 'browser', browserId })}
           onApiError={onApiError}
         />
       </Suspense>

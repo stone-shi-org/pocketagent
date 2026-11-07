@@ -10643,3 +10643,44 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
 .browser-btn.running {
   color: var(--ok);
 }
+
+/* PA-178: the list of shared browsers. */
+.browsers-body {
+  padding: 12px calc(16px + var(--safe-right)) calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
+  overflow-y: auto;
+}
+.browsers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.browsers-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.browsers-row.needs-you {
+  border-color: var(--warn);
+}
+.browsers-row-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.browsers-row-main strong {
+  overflow-wrap: anywhere;
+}
+.browsers-row-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

@@ -45,6 +45,8 @@ interface Props {
   /** Opens one job's editor, from its row in the project tree. */
   onOpenCronJob: (hostId: string, jobId: string) => void;
   onOpenWebhooks: () => void;
+  /** PA-178: the list of shared browsers. Optional so a caller without one simply has no menu item. */
+  onOpenBrowsers?: () => void;
   /** Opens one webhook's editor, from its row in the project tree. */
   onOpenWebhook: (hostId: string, webhookId: string) => void;
   /** PA-6: opens the Pocket Agent settings page (agents, skills, tools). */
@@ -87,6 +89,7 @@ export function ProjectsPage({
   onOpenCron,
   onOpenCronJob,
   onOpenWebhooks,
+  onOpenBrowsers,
   onOpenWebhook,
   onOpenPlanner,
   onOpenProviders,
@@ -207,6 +210,7 @@ export function ProjectsPage({
               agents: onOpenAgents,
               cron: onOpenCron,
               webhooks: onOpenWebhooks,
+              ...(onOpenBrowsers ? { browsers: onOpenBrowsers } : {}),
               planner: onOpenPlanner,
               providers: onOpenProviders,
               advanced: () => setShowAdvanced(here),

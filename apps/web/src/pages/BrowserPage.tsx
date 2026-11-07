@@ -44,6 +44,8 @@ interface Props {
   onApiError: (error: unknown) => void;
   /** False while sitting in a hidden desktop tab: no frames then. */
   active?: boolean;
+  /** The browser's name (a project folder or a Pocket Agent), for a desktop tab's title. */
+  onLabel?: (label: string) => void;
 }
 
 type Connection = 'connecting' | 'open' | 'reconnecting' | 'closed';
@@ -56,7 +58,14 @@ interface DialogState {
 
 const MAX_DEVICE_SCALE = 2;
 
-export function BrowserPage({ browserId, onBack, onOpenPlannerChat, onApiError, active = true }: Props): JSX.Element {
+export function BrowserPage({
+  browserId,
+  onBack,
+  onOpenPlannerChat,
+  onApiError,
+  active = true,
+  onLabel,
+}: Props): JSX.Element {
   const api = useHostApi();
   const endpoint = useHostEndpoint();
   const documentVisible = useDocumentVisible();
@@ -450,6 +459,9 @@ export function BrowserPage({ browserId, onBack, onOpenPlannerChat, onApiError, 
   };
 
   const label = info?.label ?? browserId;
+  useEffect(() => {
+    if (info?.label) onLabel?.(info.label);
+  }, [info?.label, onLabel]);
 
   return (
     <div className="browser-page">

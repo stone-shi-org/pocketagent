@@ -9,6 +9,7 @@ const SERVER_ONLY: MenuItemId[] = [
   'agents',
   'cron',
   'webhooks',
+  'browsers',
   'planner',
   'providers',
   'advanced',

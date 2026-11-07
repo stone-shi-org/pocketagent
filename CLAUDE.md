@@ -1640,6 +1640,12 @@ and `get_attention_snapshot` list it read-only. `browser_endpoint` (read-only) i
 way in, starting the browser if needed. Both tools are offered only where a shared browser can
 exist, and the base prompt names them only then.
 
+**Two ways in besides a chat's header button.** "Browsers…" in the host menu opens `#/browsers`
+(`BrowsersPage`): every scope's browser with its state, and Open/Stop/Clear data. On the desktop
+the viewer is its **own tab** (`b:<hostId>:<browserId>`, persisted like a chat's), not a pane that
+replaces the workspace, so it keeps its place in the strip; the list shares the admin tab. A hidden
+tab passes `active: false`, which stops the screencast like a hidden page does.
+
 **A coding agent has no new channel.** A session started while its project's browser runs gets
 `PA_BROWSER_CDP_URL` in its environment (outside `POCKETAGENT_*`, which is stripped); one started
 before does not (env is fixed at spawn — a known limitation), and its header's "Browser" button is

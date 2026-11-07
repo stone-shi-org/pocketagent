@@ -42,6 +42,7 @@ export type MenuItemId =
   | 'agents'
   | 'cron'
   | 'webhooks'
+  | 'browsers'
   | 'planner'
   | 'providers'
   | 'advanced'
@@ -106,6 +107,8 @@ export function overflowMenuItems(context: MenuContext): MenuItem[] {
     ...(context.layout === 'phone' ? [{ id: 'agents', label: 'Agents…' } as const] : []),
     { id: 'cron', label: 'Cron jobs…' },
     { id: 'webhooks', label: 'Webhooks…' },
+    // PA-178: every shared browser on this host, and the way into one.
+    { id: 'browsers', label: 'Browsers…' },
     { id: 'planner', label: 'Pocket Agent settings…' },
     { id: 'providers', label: 'Providers and Models…' },
     { id: 'advanced', label: 'More session options…' },

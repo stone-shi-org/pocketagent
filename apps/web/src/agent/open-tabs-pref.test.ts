@@ -28,6 +28,9 @@ describe('open tabs preference', () => {
       { name: 'chat', conversationId: 'c-1', hostId: 'local' },
       { name: 'planner-chat', chatId: 'p-1', hostId: 'dev02' },
       { name: 'settings', hostId: 'local' },
+      // PA-178
+      { name: 'browser', browserId: 'pocket-a1', hostId: 'local' },
+      { name: 'browsers', hostId: 'local' },
       { name: 'providers', hostId: 'local' },
       { name: 'cron', hostId: 'dev02' },
       { name: 'cron-job', jobId: 'j-1', hostId: 'local' },

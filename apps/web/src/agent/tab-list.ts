@@ -23,6 +23,9 @@ export type TabRoute = Extract<
   | { name: 'webhook' }
   | { name: 'planner' }
   | { name: 'planner-agent' }
+  // PA-178: one tab per shared browser, and the list in the admin tab.
+  | { name: 'browser' }
+  | { name: 'browsers' }
 >;
 
 export interface OpenTab {
@@ -58,7 +61,9 @@ export function isTabRoute(route: Route): route is TabRoute {
     route.name === 'webhooks' ||
     route.name === 'webhook' ||
     route.name === 'planner' ||
-    route.name === 'planner-agent'
+    route.name === 'planner-agent' ||
+    route.name === 'browser' ||
+    route.name === 'browsers'
   );
 }
 
@@ -90,6 +95,8 @@ export function tabIdFor(route: TabRoute, hostId: string): string {
       return `c:${hostId}:${route.conversationId}`;
     case 'planner-chat':
       return `p:${hostId}:${route.chatId}`;
+    case 'browser':
+      return `b:${hostId}:${route.browserId}`;
     case 'settings':
     case 'providers':
     case 'cron':
@@ -98,6 +105,7 @@ export function tabIdFor(route: TabRoute, hostId: string): string {
     case 'webhook':
     case 'planner':
     case 'planner-agent':
+    case 'browsers':
       return `s:settings:${hostId}`;
   }
 }

@@ -32,7 +32,9 @@ export type StoredRouteShape =
   | { name: 'webhooks' }
   | { name: 'webhook'; webhookId: string }
   | { name: 'planner' }
-  | { name: 'planner-agent'; agentId: string };
+  | { name: 'planner-agent'; agentId: string }
+  | { name: 'browser'; browserId: string }
+  | { name: 'browsers' };
 
 /**
  * A stored tab: its route, plus which host it was open on (PA-67).
@@ -62,6 +64,8 @@ function isStoredRouteShape(value: unknown): value is StoredRouteShape {
   if (entry.name === 'webhook') return typeof entry.webhookId === 'string' && entry.webhookId.length > 0;
   if (entry.name === 'planner') return true;
   if (entry.name === 'planner-agent') return typeof entry.agentId === 'string' && entry.agentId.length > 0;
+  if (entry.name === 'browser') return typeof entry.browserId === 'string' && entry.browserId.length > 0;
+  if (entry.name === 'browsers') return true;
   return false;
 }
 

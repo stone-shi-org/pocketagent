@@ -62,6 +62,7 @@ import {
   WebhookEditorPage,
   WebhooksPage,
   BrowserPage,
+  BrowsersPage,
 } from '../lazy-pages.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
@@ -123,6 +124,10 @@ function storedToRoute(stored: StoredTabRoute): TabRoute {
       return { name: 'planner' };
     case 'planner-agent':
       return { name: 'planner-agent', agentId: stored.agentId };
+    case 'browser':
+      return { name: 'browser', browserId: stored.browserId };
+    case 'browsers':
+      return { name: 'browsers' };
   }
 }
 
@@ -150,10 +155,17 @@ function routeToStored(route: TabRoute): StoredRouteShape {
       return { name: 'planner' };
     case 'planner-agent':
       return { name: 'planner-agent', agentId: route.agentId };
+    case 'browser':
+      return { name: 'browser', browserId: route.browserId };
+    case 'browsers':
+      return { name: 'browsers' };
   }
 }
 
-type UtilityTabRoute = Exclude<TabRoute, { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' }>;
+type UtilityTabRoute = Exclude<
+  TabRoute,
+  { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' } | { name: 'browser' }
+>;
 
 /** A type predicate, not a plain boolean check, so narrowing `tab.route` on
     this survives into the `tabsForBar` branch that handles everything else —
@@ -169,7 +181,8 @@ function isUtilityTabRoute(route: TabRoute): route is UtilityTabRoute {
     route.name === 'webhooks' ||
     route.name === 'webhook' ||
     route.name === 'planner' ||
-    route.name === 'planner-agent'
+    route.name === 'planner-agent' ||
+    route.name === 'browsers'
   );
 }
 
@@ -203,6 +216,8 @@ function utilityTabTitle(route: UtilityTabRoute): string {
     case 'planner':
     case 'planner-agent':
       return 'Pocket Agents';
+    case 'browsers':
+      return 'Browsers';
   }
 }
 
@@ -563,6 +578,12 @@ export function DesktopShell({
   // (already scheduled by the `state.projects` change that fed `chatById`)
   // more informed.
   const knownTitles = useRef(new Map<string, { title: string; status: ChatDotState | null }>());
+  // PA-178: a browser tab is titled with what it belongs to (a project folder
+  // or a Pocket Agent), which only its own page learns from the server.
+  const [browserLabels, setBrowserLabels] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const setBrowserLabel = useCallback((tabId: string, label: string) => {
+    setBrowserLabels((prev) => (prev.get(tabId) === label ? prev : new Map(prev).set(tabId, label)));
+  }, []);
   useEffect(() => {
     for (const [id, entry] of chatById) knownTitles.current.set(id, entry);
   }, [chatById]);
@@ -585,6 +606,15 @@ export function DesktopShell({
       return {
         id: tab.id,
         title: utilityTabTitle(tab.route),
+        status: null,
+        preview: tab.preview ?? false,
+        hostLabel: hostLabelFor(tab.hostId),
+      };
+    }
+    if (tab.route.name === 'browser') {
+      return {
+        id: tab.id,
+        title: `Browser · ${browserLabels.get(tab.id) ?? tab.route.browserId}`,
         status: null,
         preview: tab.preview ?? false,
         hostLabel: hostLabelFor(tab.hostId),
@@ -842,6 +872,7 @@ export function DesktopShell({
                       settings: () => openPermanentTab(here, { name: 'settings' }),
                       cron: () => onNavigate({ name: 'cron' }),
                       webhooks: () => onNavigate({ name: 'webhooks' }),
+                      browsers: () => onNavigate({ name: 'browsers' }),
                       planner: () => onNavigate({ name: 'planner' }),
                       providers: () => onNavigate({ name: 'providers' }),
                       advanced: () => setShowAdvanced(here),
@@ -1143,6 +1174,27 @@ export function DesktopShell({
                       onApiError={onApiError}
                     />
                   </Suspense>
+                ) : tab.route.name === 'browser' ? (
+                  // PA-178: its own tab, like a chat, so it keeps its place in
+                  // the strip; `active` stops the screencast while hidden.
+                  <Suspense fallback={<PageFallback />}>
+                    <BrowserPage
+                      browserId={tab.route.browserId}
+                      active={tab.id === activeTabId}
+                      onBack={() => closeTab(tab.id)}
+                      onLabel={(label) => setBrowserLabel(tab.id, label)}
+                      onOpenPlannerChat={(chatId) => nav.openOn(tab.hostId, { name: 'planner-chat', chatId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : tab.route.name === 'browsers' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <BrowsersPage
+                      onBack={() => closeTab(tab.id)}
+                      onOpen={(browserId) => nav.openOn(tab.hostId, { name: 'browser', browserId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
                 ) : (
                   <Suspense fallback={<PageFallback />}>
                     <PlannerAgentEditorPage
@@ -1198,19 +1250,6 @@ export function DesktopShell({
             <Suspense fallback={<PageFallback />}>
               <AgentsFleetPage
                 onOpen={(sessionId) => nav.openOn(here, { name: 'terminal', sessionId })}
-                onApiError={onApiError}
-              />
-            </Suspense>
-          </HostProvider>
-        ) : route.name === 'browser' ? (
-          /* PA-178: a full pane like the fleet view, on the host the browser runs on. */
-          <HostProvider endpoint={nav.endpointFor(here)}>
-            <Suspense fallback={<PageFallback />}>
-              <BrowserPage
-                key={`${here}:${route.browserId}`}
-                browserId={route.browserId}
-                onBack={() => onNavigate({ name: 'list' })}
-                onOpenPlannerChat={(chatId) => nav.openOn(here, { name: 'planner-chat', chatId })}
                 onApiError={onApiError}
               />
             </Suspense>

@@ -24,6 +24,9 @@ describe('tabIdFor', () => {
     expect(tabIdFor({ name: 'terminal', sessionId: 'x' }, H)).toBe('t:local:x');
     expect(tabIdFor({ name: 'chat', conversationId: 'x' }, H)).toBe('c:local:x');
     expect(tabIdFor({ name: 'planner-chat', chatId: 'x' }, H)).toBe('p:local:x');
+    // PA-178: a shared browser is its own tab, one per browser per host.
+    expect(tabIdFor({ name: 'browser', browserId: 'pocket-a1' }, H)).toBe('b:local:pocket-a1');
+    expect(tabIdFor({ name: 'browser', browserId: 'pocket-a1' }, 'dev02')).toBe('b:dev02:pocket-a1');
   });
 
   it('maps every admin-page route to the same fixed sentinel id (PA-36 round 2)', () => {
@@ -38,6 +41,16 @@ describe('tabIdFor', () => {
     expect(tabIdFor({ name: 'webhook', webhookId: 'w1' }, H)).toBe('s:settings:local');
     expect(tabIdFor({ name: 'planner' }, H)).toBe('s:settings:local');
     expect(tabIdFor({ name: 'planner-agent', agentId: 'a1' }, H)).toBe('s:settings:local');
+    // PA-178: the Browsers list is an admin page; each browser is not.
+    expect(tabIdFor({ name: 'browsers' }, H)).toBe('s:settings:local');
+  });
+
+  it('opens a browser in its own tab beside a chat, and reopening it switches to it (PA-178)', () => {
+    const browser = { name: 'browser', browserId: 'pocket-a1' } as const;
+    let tabs = tabListReducer([tabP], { type: 'sync', route: browser, hostId: H });
+    expect(tabs.map((t) => t.id)).toEqual(['p:local:p1', 'b:local:pocket-a1']);
+    tabs = tabListReducer(tabs, { type: 'sync', route: { name: 'browser', browserId: 'pocket-a1' }, hostId: H });
+    expect(tabs).toHaveLength(2);
   });
 });
 
