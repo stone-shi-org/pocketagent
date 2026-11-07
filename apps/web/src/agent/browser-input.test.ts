@@ -21,6 +21,18 @@ describe('live browser view input (PA-178)', () => {
     expect(framePointToPage(50, 50, { ...rect, width: 0 }, meta)).toEqual({ x: 0, y: 0 });
   });
 
+  it("maps into the page's CSS px when the page is zoomed out (Google's desktop page on a phone)", () => {
+    // Measured: 390-wide phone viewport, Google laid out at 980 and zoomed to 0.398. The search
+    // box's centre showed at (166, 160) on the frame and is at (417.7, 402) in the page.
+    const zoomed = { deviceWidth: 390, deviceHeight: 620, pageScaleFactor: 0.3979591727256775 };
+    const frame = { left: 0, top: 0, width: 390, height: 620 };
+    const p = framePointToPage(166.22, 159.98, frame, zoomed);
+    expect(p.x).toBeCloseTo(417.7, 0);
+    expect(p.y).toBeCloseTo(402, 0);
+    // A bad or missing factor never divides by zero.
+    expect(framePointToPage(195, 310, frame, { ...zoomed, pageScaleFactor: 0 })).toEqual({ x: 195, y: 310 });
+  });
+
   it('builds the CDP modifier mask', () => {
     expect(modifiersOf({ altKey: false, ctrlKey: false, metaKey: false, shiftKey: false })).toBe(0);
     expect(modifiersOf({ altKey: true, ctrlKey: true, metaKey: true, shiftKey: true })).toBe(15);

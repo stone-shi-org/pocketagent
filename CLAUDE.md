@@ -1621,6 +1621,14 @@ drops the override. What the spike and the demo measured, each a comment where i
   the person's own "OK" behind it. Commands still go out on one socket in order.
 - **A frame is a `data:` URL.** `img-src 'self' data:` blocks `blob:`, and a blocked image still
   has a box, so taps mapped from it landed while the person saw nothing.
+- **A tap is mapped through the page's zoom.** The frame is the viewport in device-independent
+  px, but `Input.dispatchMouseEvent` hit-tests in *layout* CSS px, and they differ by
+  `pageScaleFactor`. Found on a real phone: Google serves its desktop page to this browser's
+  desktop user agent, a portrait viewer lays it out at 980 px zoomed to ~0.4, and every tap
+  landed at 40% of where the finger was (the search box could not be tapped; the demo's own
+  `width=device-width` pages have a factor of 1). `framePointToPage` divides by it. Wheel deltas
+  are already in screen px (measured: 100 scrolled 100 on screen at 0.4), so drag-scroll is not
+  scaled. `pnpm demo:browser-view` taps a field on a zoomed-out page to keep it so.
 - **A security-key prompt must not freeze the page.** While `navigator.credentials.get()` waits,
   Chromium shows its own tab-modal WebAuthn dialog — invisible headless — and drops every input
   event to the tab: on a real Google sign-in "Try another way" could not be clicked

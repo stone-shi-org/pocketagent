@@ -15,20 +15,33 @@ export interface Rect {
 }
 
 /**
- * Where on the page a point on the frame image is, in the page's CSS px. The
- * frame is the page's viewport scaled to the image, so this is a plain
- * proportion — clamped, because a pointer can leave the image mid-drag.
+ * Where on the page a point on the frame image is, in the coordinates
+ * `Input.dispatchMouseEvent` takes: the page's CSS px, clamped, because a
+ * pointer can leave the image mid-drag.
+ *
+ * The frame is the viewport in device-independent px (`deviceWidth`), but
+ * Chromium hit-tests input in *layout* CSS px, and the two differ by the
+ * page's zoom (`pageScaleFactor`). Found on a real phone: Google serves its
+ * desktop page to this browser's desktop user agent, a portrait phone viewer
+ * lays it out at 980 px zoomed to ~0.4, and every tap landed at 40% of where
+ * the finger was — the search box in the middle could not be tapped. A page
+ * laid out for the phone's width has a factor of 1, which is why the demo's
+ * own login page never showed it.
  */
 export function framePointToPage(
   clientX: number,
   clientY: number,
   rect: Rect,
-  meta: Pick<ScreencastMetadata, 'deviceWidth' | 'deviceHeight'>,
+  meta: Pick<ScreencastMetadata, 'deviceWidth' | 'deviceHeight'> & Partial<Pick<ScreencastMetadata, 'pageScaleFactor'>>,
 ): { x: number; y: number } {
   if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
+  const scale = meta.pageScaleFactor && meta.pageScaleFactor > 0 ? meta.pageScaleFactor : 1;
   const fx = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
   const fy = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
-  return { x: Math.round(fx * meta.deviceWidth * 10) / 10, y: Math.round(fy * meta.deviceHeight * 10) / 10 };
+  return {
+    x: Math.round(((fx * meta.deviceWidth) / scale) * 10) / 10,
+    y: Math.round(((fy * meta.deviceHeight) / scale) * 10) / 10,
+  };
 }
 
 /** CDP's modifier bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8. */

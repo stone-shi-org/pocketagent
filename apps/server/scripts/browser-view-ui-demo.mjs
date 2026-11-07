@@ -71,6 +71,16 @@ const site = http.createServer(async (req, res) => {
     res.writeHead(401, { 'content-type': 'text/html' });
     return res.end('<h1 id=state>Wrong password</h1>');
   }
+  if (req.url === '/wide') {
+    // No viewport meta: laid out at 980 px and zoomed out on a phone, like Google's desktop page
+    // (which is what this browser's desktop user agent gets). Taps must be mapped through the zoom.
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end(
+      '<title>Wide</title><body style="margin:0;width:980px">' +
+        '<input id=mid style="position:absolute;left:390px;top:300px;width:200px;font-size:30px">' +
+        '<div style="height:1400px"></div></body>',
+    );
+  }
   if (req.url === '/long') {
     // A tall page with a field near the bottom of the first screen: finger
     // scrolling, and the field staying in view when a keyboard shrinks the view.
@@ -435,6 +445,7 @@ for (const [label, contextOptions] of [
     check(y1 > y0 + 100, 'a finger drag on the frame scrolls the page', `scrollY ${y0} → ${y1}`);
     const viewerScroll = await page.evaluate(() => document.scrollingElement.scrollTop);
     check(viewerScroll === 0, 'and does not scroll the viewer page itself', `viewer scrollTop ${viewerScroll}`);
+
     await longPage.evaluate(() => scrollTo(0, 0));
     await sleep(600);
     await tapRemote(page, longPage, '#far', { touch });
@@ -456,6 +467,25 @@ for (const [label, contextOptions] of [
     await page.screenshot({ path: path.join(SHOTS, `pa178-${tag}-keyboard-field-in-view.png`) });
     await page.setViewportSize(fullSize);
     await page.locator('.browser-toolbar button[aria-label=Keyboard]').click();
+    await page.locator('.browser-url input').fill(`${SITE}/wide`);
+    await page.locator('.browser-url input').press('Enter');
+    let widePage;
+    for (let i = 0; i < 30 && !widePage; i++) {
+      widePage = remote.contexts().flatMap((c) => c.pages()).find((p) => p.url() === `${SITE}/wide`);
+      if (!widePage) await sleep(200);
+    }
+    await sleep(1200);
+    // Tap where the field *shows* on the frame, from its box scaled by the page's own zoom.
+    const shown = await widePage.evaluate(() => {
+      const r = document.getElementById('mid').getBoundingClientRect();
+      const k = visualViewport.scale;
+      return { x: (r.x + r.width / 2) * k, y: (r.y + r.height / 2) * k, w: visualViewport.width * k, h: visualViewport.height * k, k };
+    });
+    const frameBox = await page.locator('.browser-frame').boundingBox();
+    await page.touchscreen.tap(frameBox.x + (shown.x / shown.w) * frameBox.width, frameBox.y + (shown.y / shown.h) * frameBox.height);
+    await sleep(600);
+    const focused = await widePage.evaluate(() => document.activeElement?.id ?? '');
+    check(focused === 'mid', 'a tap lands where the finger is on a zoomed-out page (Google\'s desktop layout)', `zoom ${shown.k.toFixed(2)}, focused "${focused}"`);
   }
 
   heading(`${label}: the address bar suggests from the browser's own history`);
