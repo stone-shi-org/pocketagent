@@ -101,6 +101,8 @@ export interface BrowserInstance {
   focusTargetId: string | null;
   readonly listeners: Set<(event: BrowserInstanceEvent) => void>;
   exited: Promise<void>;
+  /** Page targets already holding a WebAuthn guard session — see `guardWebAuthn`. */
+  readonly guarded: Set<string>;
 }
 
 export const DEFAULT_BROWSER_IDLE_MS = 15 * 60_000;
@@ -336,6 +338,7 @@ export class BrowserService {
       focusTargetId: null,
       listeners: new Set(),
       exited,
+      guarded: new Set(),
     };
     const emit = (event: BrowserInstanceEvent): void => {
       for (const l of inst.listeners) {
@@ -351,6 +354,7 @@ export class BrowserService {
       const info = event.params.targetInfo as { targetId?: string; type?: string; url?: string; title?: string } | undefined;
       if (event.method === 'Target.targetCreated' || event.method === 'Target.targetInfoChanged') {
         if (!info?.targetId || info.type !== 'page') return;
+        if (event.method === 'Target.targetCreated') void this.guardWebAuthn(inst, info.targetId);
         const before = inst.targets.get(info.targetId);
         inst.targets.set(info.targetId, { url: info.url ?? '', title: info.title ?? '' });
         inst.lastActivityAt = this.now();
@@ -358,6 +362,7 @@ export class BrowserService {
         emit({ type: 'targets' });
       } else if (event.method === 'Target.targetDestroyed') {
         const targetId = event.params.targetId as string | undefined;
+        if (targetId) inst.guarded.delete(targetId);
         if (targetId && inst.targets.delete(targetId)) {
           inst.lastActivityAt = this.now();
           emit({ type: 'targets' });
@@ -387,13 +392,45 @@ export class BrowserService {
       const { targetInfos } = await cdp.send<{ targetInfos: { targetId: string; type: string; url: string; title: string }[] }>(
         'Target.getTargets',
       );
-      for (const t of targetInfos) if (t.type === 'page') inst.targets.set(t.targetId, { url: t.url, title: t.title });
+      for (const t of targetInfos) {
+        if (t.type !== 'page') continue;
+        inst.targets.set(t.targetId, { url: t.url, title: t.title });
+        void this.guardWebAuthn(inst, t.targetId);
+      }
     } catch (err) {
       await this.stop(id, 'startup failed');
       throw new BrowserError(`The browser started but did not answer: ${(err as Error).message}`, 'failed');
     }
     this.opts.logger?.info({ id, pid: launched.pid, sandbox: this.sandbox }, 'shared browser started');
     return inst;
+  }
+
+  /**
+   * Keep a security-key prompt from freezing the page.
+   *
+   * Found on a real Google sign-in ("Complete sign-in using your security
+   * key"): while `navigator.credentials.get()` waits, Chromium shows its own
+   * tab-modal WebAuthn dialog — invisible in headless — and drops every input
+   * event to the tab, so "Try another way" could not be clicked from the viewer
+   * or by an agent (`Input.dispatchMouseEvent` answered, the page saw no
+   * mousedown). With the CDP WebAuthn domain enabled there is no dialog: the
+   * request simply waits (no virtual authenticator is added, so nothing is
+   * ever signed) and the page keeps taking input. Measured against the real
+   * browser, two things shape this: enabling it does not free a request that
+   * is already pending, and it lasts only as long as the session that enabled
+   * it — so it is a dedicated session per page, attached the moment the page
+   * appears, rather than the viewer's (which comes and goes).
+   */
+  private async guardWebAuthn(inst: BrowserInstance, targetId: string): Promise<void> {
+    if (inst.guarded.has(targetId)) return;
+    inst.guarded.add(targetId);
+    try {
+      const { sessionId } = await inst.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true });
+      await inst.cdp.send('WebAuthn.enable', { enableUI: false }, sessionId);
+    } catch {
+      // The tab closed first, or the browser is going away.
+      inst.guarded.delete(targetId);
+    }
   }
 
   /**

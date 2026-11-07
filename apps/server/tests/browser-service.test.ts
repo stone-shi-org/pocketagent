@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,6 +10,7 @@ import { BrowserService, projectBrowserId } from '../src/browser/service.js';
 import { PlannerWorkspaceRegistry, type PlannerWorkspaceStore, type PlannerWorkspaceRow } from '../src/planner/workspaces.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
 import { startFakeChromium, type FakeChromium } from './helpers-browser.js';
+import { waitFor } from './helpers.js';
 
 /**
  * PA-178: the shared-browser service — argv, scopes, profile placement,
@@ -163,6 +166,33 @@ describe('BrowserService (PA-178)', () => {
     expect(service!.info('pocket-agent-1')).toMatchObject({ state: 'running', kind: 'pocket', hasProfile: true });
   });
 
+  it('guards every page against the invisible security-key dialog, existing tabs and new ones', async () => {
+    await setup();
+    const inst = await service!.ensure('pocket-agent-1');
+    // A request already pending is not freed by enabling it later, so each page
+    // gets its own session the moment it appears (measured against Chromium).
+    const guardedTargets = async (): Promise<string[]> => {
+      await waitFor(() => fake.commands.some((c) => c.method === 'WebAuthn.enable'));
+      const attaches = new Map<number, string>();
+      const targets: string[] = [];
+      for (const [i, c] of fake.commands.entries()) {
+        if (c.method === 'Target.attachToTarget') attaches.set(i, String(c.params.targetId));
+        if (c.method === 'WebAuthn.enable') {
+          expect(c.params).toEqual({ enableUI: false });
+          expect(c.sessionId).toBeTruthy();
+          targets.push([...attaches.values()].at(-1)!);
+        }
+      }
+      return targets;
+    };
+    expect(await guardedTargets()).toEqual(['T1']);
+    await inst.cdp.send('Target.createTarget', { url: 'about:blank' });
+    await waitFor(() => fake.commands.filter((c) => c.method === 'WebAuthn.enable').length === 2);
+    expect(await guardedTargets()).toEqual(['T1', 'T2']);
+    // No virtual authenticator is ever added: nothing is signed on anyone's behalf.
+    expect(fake.commands.some((c) => c.method === 'WebAuthn.addVirtualAuthenticator')).toBe(false);
+  });
+
   it('refuses to put profiles inside a workspace root', async () => {
     await setup();
     service = new BrowserService({
@@ -262,6 +292,51 @@ describe.skipIf(realChromium === null)('BrowserService against a real Chromium (
       expect(service.info('pocket-real')!.state).toBe('stopped');
     } finally {
       await service.shutdown();
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('keeps a page usable while it waits for a security key (Google "Try another way")', async () => {
+    // Found on a real Google sign-in: without the guard, a pending
+    // navigator.credentials.get() puts up Chromium's invisible tab-modal
+    // dialog and the page receives no input at all.
+    const site = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<button id=b style="width:300px;height:100px" onclick="window.clicks++">Try another way</button><script>
+        window.clicks = 0;
+        window.ask = () => { window.res = 'pending'; navigator.credentials.get({ publicKey: { challenge: new Uint8Array(32),
+          rpId: 'localhost', allowCredentials: [{ type: 'public-key', id: new Uint8Array(16) }], timeout: 120000 } })
+          .then(() => (window.res = 'signed'), (e) => (window.res = e.name)); };</script>`);
+    });
+    await new Promise<void>((r) => site.listen(0, '127.0.0.1', () => r()));
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pa178-real-'));
+    const rows: PlannerWorkspaceRow[] = [{ id: 'real', name: 'Real', path: '/tmp', isDefault: false, createdAt: 0 } as PlannerWorkspaceRow];
+    const service = new BrowserService({
+      dataDir,
+      workspaces: new WorkspaceRegistry([]),
+      plannerWorkspaces: new PlannerWorkspaceRegistry(memoryPlannerStore(rows)),
+    });
+    try {
+      const inst = await service.ensure('pocket-real');
+      const url = `http://localhost:${(site.address() as AddressInfo).port}/`;
+      const { targetId } = await inst.cdp.send<{ targetId: string }>('Target.createTarget', { url });
+      await new Promise((r) => setTimeout(r, 1500)); // the page loads; the guard attaches
+      const { sessionId } = await inst.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true });
+      const evaluate = async (expression: string): Promise<unknown> =>
+        (await inst.cdp.send<{ result: { value?: unknown } }>('Runtime.evaluate', { expression, returnByValue: true }, sessionId)).result
+          .value;
+      await evaluate('ask()');
+      await new Promise((r) => setTimeout(r, 800));
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await inst.cdp.send('Input.dispatchMouseEvent', { type, x: 100, y: 50, button: 'left', clickCount: 1 }, sessionId);
+      }
+      await new Promise((r) => setTimeout(r, 800));
+      expect(await evaluate('window.clicks')).toBe(1);
+      // It waits rather than signing: no virtual authenticator holds a credential.
+      expect(await evaluate('window.res')).toBe('pending');
+    } finally {
+      await service.shutdown();
+      site.close();
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
   }, 60_000);

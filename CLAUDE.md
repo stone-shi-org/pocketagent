@@ -1621,6 +1621,16 @@ drops the override. What the spike and the demo measured, each a comment where i
   the person's own "OK" behind it. Commands still go out on one socket in order.
 - **A frame is a `data:` URL.** `img-src 'self' data:` blocks `blob:`, and a blocked image still
   has a box, so taps mapped from it landed while the person saw nothing.
+- **A security-key prompt must not freeze the page.** While `navigator.credentials.get()` waits,
+  Chromium shows its own tab-modal WebAuthn dialog — invisible headless — and drops every input
+  event to the tab: on a real Google sign-in "Try another way" could not be clicked
+  (`Input.dispatchMouseEvent` answered, the page saw no mousedown). `guardWebAuthn` attaches a
+  dedicated session to every page as it appears and sends `WebAuthn.enable({ enableUI: false })`,
+  so there is no dialog and the request just waits (no virtual authenticator, so nothing is ever
+  signed). Measured: enabling does not free a request already pending, and the effect lasts only
+  as long as the session that enabled it — hence per page and at creation, not the viewer's. A
+  person still cannot use a real security key or passkey through the viewer (it is bound to the
+  site's origin); they pick another method.
 - **Dialogs reach the viewer, and only a person answers them.** An attached Playwright client
   auto-dismisses any dialog it has no handler for, so an agent attached at that moment answers
   first (a known limitation).
