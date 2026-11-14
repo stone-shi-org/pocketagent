@@ -723,6 +723,24 @@ describe('AgySession', () => {
       await waitFor(() => session?.busy === false);
     });
 
+    it('never re-runs a turn agy continued past a stream interruption (session MUXt_8g_lMFy)', async () => {
+      session = new AgySession(makeSpec());
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('STREAM_INTERRUPTED_RECOVERED');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(1);
+      expect(events.some((e) => e.kind === 'notice' && /retrying/.test(e.text))).toBe(false);
+      expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+      const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ text: expect.stringContaining('stream was interrupted') });
+      expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: false, stopReason: 'SUCCESS' });
+      await waitFor(() => session?.busy === false);
+    });
+
     it('still reports a run that ended on its error step as failed', async () => {
       session = new AgySession(makeSpec());
       await session.start();

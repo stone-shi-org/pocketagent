@@ -244,6 +244,9 @@ function runTurn(prompt, { exitWhenDone, emitInit: wantInit = false }) {
     API_ERRORS_RECOVERED: 'API error (attempt 4): INTERNAL (code 500): Internal error encountered.',
     API_503_RECOVERED: 'API error (attempt 2): UNAVAILABLE (code 503): The service is currently unavailable.',
     API_ERRORS_EXHAUSTED: 'API error (attempt 5): INTERNAL (code 500): Internal error encountered.',
+    // Session MUXt_8g_lMFy: agy continued an interrupted stream itself, then
+    // reported the stale continuation text on every later run.
+    STREAM_INTERRUPTED_RECOVERED: 'The stream was interrupted. Please continue the task you were working on.',
   };
   if (apiRetryErrors[prompt]) {
     if (wantInit) emitInit(['run_command']);

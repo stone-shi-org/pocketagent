@@ -267,8 +267,24 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private static readonly TRANSIENT_ERROR_PATTERN =
     /\btimed?\s*out\b|deadline exceeded|context canceled|context cancelled|econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up|network error|connection reset|\bunavailable\b|stream (?:was )?interrupted/i;
 
-  /** agy's own wrapper around a backend failure it is retrying itself (`run.go`'s 5-attempt loop). */
-  private static readonly AGY_API_RETRY_ERROR_PATTERN = /^API error \(attempt \d+\):/;
+  /**
+   * `result.error` texts agy reports for a failure it handles *itself* and
+   * can recover from within the same run, so they may be stale by the time
+   * the run ends (see `recoveredFromApiErrors`):
+   *
+   * - its wrapper around a backend failure it is retrying (`run.go`'s
+   *   5-attempt loop);
+   * - its auto-continuation of an interrupted model stream, which it records
+   *   in the conversation as a step saying exactly this and then carries on.
+   *   Session MUXt_8g_lMFy (2026-11-14, agy 1.5.x): one interruption at step
+   *   430 was continued and answered, and every later run in that
+   *   conversation still ended `ERROR` with this text, even turns with no
+   *   interruption of their own. Because it also matches
+   *   `TRANSIENT_ERROR_PATTERN`, each finished turn was re-sent twice
+   *   (`git push` included) and then shown as failed anyway.
+   */
+  private static readonly AGY_API_RETRY_ERROR_PATTERN =
+    /^API error \(attempt \d+\):|^The stream was interrupted\. Please continue the task you were working on\.?$/;
 
   /**
    * Whether a non-SUCCESS `result` describes a run agy *recovered* from.
