@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { detectVersionDrift, type AgentInstallEvent } from '@pocketagent/protocol';
+import {
+  INSTALLABLE_AGENT_IDS,
+  detectVersionDrift,
+  type AgentInstallEvent,
+  type InstallableAgentId,
+} from '@pocketagent/protocol';
 import { ApiError, type ApiClient } from '../api/client.js';
 import { hostEndpoint } from '../api/host.js';
 import {
+  FLEET_INSTALLABLE_AGENT_LABELS,
   forceRestartHost,
   restartDrainedHosts,
+  summarizeHostAgentUpdate,
   updateAgentOnHosts,
+  updateAgentsOnHosts,
 } from '../components/FleetMaintenanceSection.js';
 import type { HostDirectory } from '../hosts/directory.js';
 import type { HostRecord } from '../hosts/host-status.js';
@@ -251,7 +259,7 @@ describe('HubPage capability cards (PA-133)', () => {
     expect(html).not.toContain('hub-host-problem');
   });
 
-  it('renders Tier 3 human-only buttons ("Restart drained hosts" and "Update [agent] on hosts…") on HubPage (PA-135)', () => {
+  it('renders Tier 3 human-only maintenance controls with multi-select coding agent checkboxes, "Update Selected" and "Update All" on HubPage (PA-135, PA-180)', () => {
     const dev01 = makeHostRecord({ id: 'dev01', label: 'dev01' });
     const html = renderToStaticMarkup(
       <HubPage
@@ -265,8 +273,19 @@ describe('HubPage capability cards (PA-133)', () => {
     );
 
     expect(html).toContain('Host maintenance');
+    expect(html).toContain('Coding agents to update');
+    for (const id of INSTALLABLE_AGENT_IDS) {
+      expect(html).toContain(FLEET_INSTALLABLE_AGENT_LABELS[id]);
+    }
+    expect(html).not.toContain('<select aria-label="Coding agent to update"');
     expect(html).toContain('Restart drained hosts');
-    expect(html).toContain('Update Claude Code on hosts…');
+    expect(html).toContain('id="hub-update-selected-agents-btn"');
+    expect(html).toContain('>Update Selected<');
+    expect(html).toContain('id="hub-update-all-agents-btn"');
+    expect(html).toContain('>Update All<');
+    // With no coding agent ticked yet, Update Selected starts disabled while Update All is enabled.
+    expect(html).toMatch(/id="hub-update-selected-agents-btn"[^>]*disabled/);
+    expect(html).not.toMatch(/id="hub-update-all-agents-btn"[^>]*disabled/);
   });
 
   it('restartDrainedHosts never sends force: true and reports 409 drain_blocked with blockers per host; forceRestartHost sends force: true for the single confirmed host (PA-135)', async () => {
@@ -370,6 +389,114 @@ describe('HubPage capability cards (PA-133)', () => {
     expect(outcomes.dev01?.progress.lines.join('\n')).toContain('Updating on dev01...');
     expect(outcomes.dev02?.progress.status).toBe('succeeded');
     expect(outcomes.dev02?.progress.lines.join('\n')).toContain('Updating on dev02...');
+  });
+
+  it('updateAgentsOnHosts updates multiple selected coding agents (or all coding agents) sequentially per host and isolates per-agent failures (PA-180)', async () => {
+    const dev01 = makeHostRecord({ id: 'dev01', label: 'dev01' });
+    const dev02 = makeHostRecord({ id: 'dev02', label: 'dev02' });
+    const eventsOrder: string[] = [];
+    const progressSummaries: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const clientFactory = (host: HostRecord): ApiClient =>
+      ({
+        installAgent: async (
+          id: InstallableAgentId,
+          onEvent: (event: AgentInstallEvent) => void,
+          _afterSeq?: number,
+          action?: string,
+        ) => {
+          const hostId = host.hubHostId ?? host.endpoint.id;
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          eventsOrder.push(`start:${hostId}:${id}:${action}`);
+          onEvent({
+            kind: 'install_started',
+            id,
+            action: 'update',
+            source: 'official',
+            packageName: id,
+            version: null,
+            attached: false,
+          });
+          onEvent({
+            kind: 'install_log',
+            seq: 1,
+            text: `Updating ${id} on ${hostId}\n`,
+            truncated: false,
+          });
+          await new Promise((r) => setTimeout(r, 5));
+          if (hostId === 'dev01' && id === 'codex') {
+            onEvent({
+              kind: 'install_finished',
+              ok: false,
+              error: 'codex installer exited 1',
+              setupState: 'not-installed',
+            });
+          } else {
+            onEvent({ kind: 'install_finished', ok: true, error: null, setupState: 'ready' });
+          }
+          eventsOrder.push(`end:${hostId}:${id}`);
+          inFlight -= 1;
+        },
+      }) as unknown as ApiClient;
+
+    // Deliberately pass out-of-order and duplicate selection to verify canonical catalog order + deduplication.
+    const selectedOutcomes = await updateAgentsOnHosts(
+      ['agy', 'claude', 'codex', 'claude'],
+      [dev01, dev02],
+      (snap) => {
+        if (snap.dev01) progressSummaries.push(`dev01:${summarizeHostAgentUpdate(snap.dev01)}`);
+      },
+      clientFactory,
+    );
+
+    expect(maxInFlight).toBe(1);
+    expect(eventsOrder).toEqual([
+      'start:dev01:claude:update',
+      'end:dev01:claude',
+      'start:dev01:codex:update',
+      'end:dev01:codex',
+      'start:dev01:agy:update',
+      'end:dev01:agy',
+      'start:dev02:claude:update',
+      'end:dev02:claude',
+      'start:dev02:codex:update',
+      'end:dev02:codex',
+      'start:dev02:agy:update',
+      'end:dev02:agy',
+    ]);
+
+    expect(progressSummaries).toContain('dev01:Queued');
+    expect(progressSummaries).toContain('dev01:Updating Claude Code (1/3)…');
+    expect(progressSummaries).toContain('dev01:Updating Codex (2/3)…');
+    expect(progressSummaries).toContain('dev01:Updating Antigravity (3/3)…');
+
+    // dev01 had 1 failed agent (codex) and 2 succeeded (claude, agy) — failure is preserved rather than overwritten.
+    expect(selectedOutcomes.dev01?.progress.status).toBe('failed');
+    expect(selectedOutcomes.dev01?.progress.error).toContain('Codex: codex installer exited 1');
+    expect(summarizeHostAgentUpdate(selectedOutcomes.dev01!)).toBe('2 updated, 1 failed');
+    expect(selectedOutcomes.dev01?.agents.map((a) => `${a.agentId}:${a.progress.status}`)).toEqual([
+      'claude:succeeded',
+      'codex:failed',
+      'agy:succeeded',
+    ]);
+
+    // dev02 succeeded on all 3 selected agents.
+    expect(selectedOutcomes.dev02?.progress.status).toBe('succeeded');
+    expect(summarizeHostAgentUpdate(selectedOutcomes.dev02!)).toBe('Updated (3/3)');
+
+    // "Update All" passes INSTALLABLE_AGENT_IDS and updates all 5 coding agents on the target host.
+    eventsOrder.length = 0;
+    const allOutcomes = await updateAgentsOnHosts(INSTALLABLE_AGENT_IDS, [dev02], undefined, clientFactory);
+    expect(eventsOrder).toEqual(
+      INSTALLABLE_AGENT_IDS.flatMap((id) => [`start:dev02:${id}:update`, `end:dev02:${id}`]),
+    );
+    expect(allOutcomes.dev02?.agents).toHaveLength(INSTALLABLE_AGENT_IDS.length);
+    expect(summarizeHostAgentUpdate(allOutcomes.dev02!)).toBe(
+      `Updated (${INSTALLABLE_AGENT_IDS.length}/${INSTALLABLE_AGENT_IDS.length})`,
+    );
   });
 
   it('shows Host vs Docker header badge, collapses long capability lists with +N more, and unifies Hub section cards (PA-179)', () => {

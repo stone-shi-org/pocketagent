@@ -9351,6 +9351,7 @@ button.hub-cap-chip.hub-cap-more:hover {
 .hub-row-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   flex: none;
 }
@@ -9429,6 +9430,30 @@ button.hub-cap-chip.hub-cap-more:hover {
 .hub-routing-actions .planner-btn {
   padding: 5px 10px;
   font-size: 12.5px;
+}
+
+/* PA-180: multi-agent update outcomes under each host in Host maintenance */
+.fleet-agent-outcomes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.fleet-agent-outcome {
+  font-size: 13px;
+  color: var(--text);
+}
+.fleet-agent-outcome > summary {
+  cursor: pointer;
+  font-weight: 500;
+  user-select: none;
+}
+.fleet-agent-outcome > summary .ok {
+  color: var(--ok);
+}
+.fleet-agent-outcome-queued {
+  font-size: 13px;
+  color: var(--text-dim);
 }
 
 .hub-discovered {

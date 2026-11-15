@@ -39,10 +39,93 @@ export interface RestartHostOutcome {
   readonly blockers: readonly DrainBlocker[];
 }
 
+export interface AgentUpdateItemOutcome {
+  readonly agentId: InstallableAgentId;
+  readonly agentLabel: string;
+  readonly progress: InstallProgress;
+}
+
 export interface AgentUpdateHostOutcome {
   readonly hostId: string;
   readonly label: string;
+  readonly agents: readonly AgentUpdateItemOutcome[];
   readonly progress: InstallProgress;
+}
+
+function deriveHostUpdateProgress(items: readonly AgentUpdateItemOutcome[]): InstallProgress {
+  if (items.length === 0) return emptyInstallProgress('update');
+  if (items.length === 1) return items[0]!.progress;
+
+  const running = items.find((item) => item.progress.status === 'running');
+  if (running !== undefined) {
+    return { ...running.progress, status: 'running' };
+  }
+  if (items.every((item) => item.progress.status === 'idle')) {
+    return emptyInstallProgress('update');
+  }
+  if (items.some((item) => item.progress.status === 'idle')) {
+    return { ...emptyInstallProgress('update'), status: 'running' };
+  }
+
+  const lines = items.flatMap((item) =>
+    item.progress.lines.map((line) => `[${item.agentLabel}] ${line}`),
+  );
+  const failed = items.filter((item) => item.progress.status === 'failed');
+  if (failed.length > 0) {
+    return {
+      ...emptyInstallProgress('update'),
+      status: 'failed',
+      lines,
+      error: failed
+        .map((item) => `${item.agentLabel}: ${item.progress.error ?? 'Update failed.'}`)
+        .join(' · '),
+    };
+  }
+  return {
+    ...emptyInstallProgress('update'),
+    status: 'succeeded',
+    lines,
+    error: null,
+  };
+}
+
+export function summarizeHostAgentUpdate(outcome: AgentUpdateHostOutcome): string {
+  const total = outcome.agents.length;
+  if (total <= 1) {
+    const prefix = total === 1 ? `${outcome.agents[0]!.agentLabel}: ` : '';
+    switch (outcome.progress.status) {
+      case 'running':
+        return `${prefix}Updating…`;
+      case 'succeeded':
+        return `${prefix}Updated`;
+      case 'failed':
+        return `${prefix}Update failed`;
+      default:
+        return `${prefix}Queued`;
+    }
+  }
+
+  const runningIdx = outcome.agents.findIndex((item) => item.progress.status === 'running');
+  if (runningIdx !== -1) {
+    const current = outcome.agents[runningIdx]!;
+    return `Updating ${current.agentLabel} (${runningIdx + 1}/${total})…`;
+  }
+
+  const idleCount = outcome.agents.filter((item) => item.progress.status === 'idle').length;
+  if (idleCount === total) return 'Queued';
+
+  const succeededCount = outcome.agents.filter((item) => item.progress.status === 'succeeded').length;
+  const failedCount = outcome.agents.filter((item) => item.progress.status === 'failed').length;
+  if (idleCount > 0) {
+    return `Updating (${succeededCount + failedCount}/${total})…`;
+  }
+  if (failedCount === 0) {
+    return `Updated (${succeededCount}/${total})`;
+  }
+  if (succeededCount === 0) {
+    return `Update failed (${failedCount}/${total} failed)`;
+  }
+  return `${succeededCount} updated, ${failedCount} failed`;
 }
 
 export function blockerDeepLink(host: HostRecord, blocker: DrainBlocker): string {
@@ -164,23 +247,35 @@ export async function forceRestartHost(
 }
 
 /**
- * Runs `POST /api/agents/install` with `action: 'update'` on each selected host
- * **one host at a time** (sequentially), streaming each host's log lines via
- * `onProgress`.
+ * Runs `POST /api/agents/install` with `action: 'update'` for each requested
+ * coding agent on each selected host **one host and one agent at a time**
+ * (sequentially — each backend enforces a single active install/update slot),
+ * streaming live log lines via `onProgress`.
  */
-export async function updateAgentOnHosts(
-  agentId: InstallableAgentId,
+export async function updateAgentsOnHosts(
+  agentIds: readonly InstallableAgentId[],
   targets: readonly HostRecord[],
   onProgress?: (outcomes: Readonly<Record<string, AgentUpdateHostOutcome>>) => void,
   clientFactory: (host: HostRecord) => ApiClient = (host) => createApiClient(host.endpoint),
 ): Promise<Record<string, AgentUpdateHostOutcome>> {
+  const orderedAgentIds = INSTALLABLE_AGENT_IDS.filter((id) => agentIds.includes(id));
+  if (orderedAgentIds.length === 0 || targets.length === 0) {
+    return {};
+  }
+
   const outcomes: Record<string, AgentUpdateHostOutcome> = {};
   for (const host of targets) {
     const id = host.hubHostId ?? host.endpoint.id;
+    const initialAgents: AgentUpdateItemOutcome[] = orderedAgentIds.map((agentId) => ({
+      agentId,
+      agentLabel: FLEET_INSTALLABLE_AGENT_LABELS[agentId],
+      progress: emptyInstallProgress('update'),
+    }));
     outcomes[id] = {
       hostId: id,
       label: host.label,
-      progress: emptyInstallProgress('update'),
+      agents: initialAgents,
+      progress: deriveHostUpdateProgress(initialAgents),
     };
   }
   onProgress?.({ ...outcomes });
@@ -188,43 +283,73 @@ export async function updateAgentOnHosts(
   for (const host of targets) {
     const id = host.hubHostId ?? host.endpoint.id;
     const client = clientFactory(host);
-    let latest: InstallProgress = {
-      ...emptyInstallProgress('update'),
-      status: 'running',
-    };
-    outcomes[id] = { hostId: id, label: host.label, progress: latest };
-    onProgress?.({ ...outcomes });
+    const items: AgentUpdateItemOutcome[] = [...outcomes[id]!.agents];
 
-    try {
-      await client.installAgent(
-        agentId,
-        (event) => {
-          latest = applyInstallEvent(latest, event);
-          outcomes[id] = { hostId: id, label: host.label, progress: latest };
-          onProgress?.({ ...outcomes });
-        },
-        0,
-        'update',
-      );
-    } catch (err) {
-      if (latest.status !== 'succeeded') {
-        latest = {
-          ...latest,
-          status: 'failed',
-          error:
-            err instanceof ApiError
-              ? err.message
-              : err instanceof Error
+    const publishHost = (): void => {
+      const snapshot = [...items];
+      outcomes[id] = {
+        hostId: id,
+        label: host.label,
+        agents: snapshot,
+        progress: deriveHostUpdateProgress(snapshot),
+      };
+      onProgress?.({ ...outcomes });
+    };
+
+    for (let idx = 0; idx < orderedAgentIds.length; idx += 1) {
+      const agentId = orderedAgentIds[idx]!;
+      const agentLabel = FLEET_INSTALLABLE_AGENT_LABELS[agentId];
+      let latest: InstallProgress = {
+        ...emptyInstallProgress('update'),
+        status: 'running',
+      };
+      items[idx] = { agentId, agentLabel, progress: latest };
+      publishHost();
+
+      try {
+        await client.installAgent(
+          agentId,
+          (event) => {
+            latest = applyInstallEvent(latest, event);
+            items[idx] = { agentId, agentLabel, progress: latest };
+            publishHost();
+          },
+          0,
+          'update',
+        );
+      } catch (err) {
+        if (latest.status !== 'succeeded') {
+          latest = {
+            ...latest,
+            status: 'failed',
+            error:
+              err instanceof ApiError
                 ? err.message
-                : 'The update could not be completed.',
-        };
-        outcomes[id] = { hostId: id, label: host.label, progress: latest };
-        onProgress?.({ ...outcomes });
+                : err instanceof Error
+                  ? err.message
+                  : 'The update could not be completed.',
+          };
+          items[idx] = { agentId, agentLabel, progress: latest };
+          publishHost();
+        }
       }
     }
   }
 
   return outcomes;
+}
+
+/**
+ * Convenience wrapper for updating a single coding agent sequentially across
+ * `targets`.
+ */
+export async function updateAgentOnHosts(
+  agentId: InstallableAgentId,
+  targets: readonly HostRecord[],
+  onProgress?: (outcomes: Readonly<Record<string, AgentUpdateHostOutcome>>) => void,
+  clientFactory: (host: HostRecord) => ApiClient = (host) => createApiClient(host.endpoint),
+): Promise<Record<string, AgentUpdateHostOutcome>> {
+  return updateAgentsOnHosts([agentId], targets, onProgress, clientFactory);
 }
 
 interface Props {
@@ -236,13 +361,13 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
   const bound = hosts.filter((host) => host.hubBound === true);
   const manageId = (host: HostRecord): string => host.hubHostId ?? host.endpoint.id;
 
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [agentId, setAgentId] = useState<InstallableAgentId>('claude');
+  const [selectedIds, setSelectedIds] = useState<string[]>(() => bound.map(manageId));
+  const [selectedAgentIds, setSelectedAgentIds] = useState<InstallableAgentId[]>([]);
   const [restarting, setRestarting] = useState(false);
   const [restartOutcomes, setRestartOutcomes] = useState<Record<string, RestartHostOutcome>>({});
   const [forceTarget, setForceTarget] = useState<HostRecord | null>(null);
   const [forceBusy, setForceBusy] = useState(false);
-  const [updatingAgent, setUpdatingAgent] = useState(false);
+  const [updatingMode, setUpdatingMode] = useState<'selected' | 'all' | null>(null);
   const [updateOutcomes, setUpdateOutcomes] = useState<Record<string, AgentUpdateHostOutcome>>({});
 
   // Default host selection to all bound hosts when the bound host set first loads.
@@ -258,6 +383,9 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
   const selectedHosts = bound.filter((host) => selectedIds.includes(manageId(host)));
   const toggleHost = (id: string): void => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const toggleAgent = (id: InstallableAgentId): void => {
+    setSelectedAgentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
   const handleRestartDrained = async (): Promise<void> => {
@@ -286,19 +414,22 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
     }
   };
 
-  const handleUpdateAgent = async (): Promise<void> => {
-    if (selectedHosts.length === 0) return;
-    setUpdatingAgent(true);
+  const runAgentUpdate = async (
+    targetAgentIds: readonly InstallableAgentId[],
+    mode: 'selected' | 'all',
+  ): Promise<void> => {
+    if (selectedHosts.length === 0 || targetAgentIds.length === 0) return;
+    setUpdatingMode(mode);
     try {
-      await updateAgentOnHosts(agentId, selectedHosts, (next) => setUpdateOutcomes({ ...next }));
+      await updateAgentsOnHosts(targetAgentIds, selectedHosts, (next) => setUpdateOutcomes({ ...next }));
     } catch (err) {
       onApiError(err);
     } finally {
-      setUpdatingAgent(false);
+      setUpdatingMode(null);
     }
   };
 
-  const agentLabel = FLEET_INSTALLABLE_AGENT_LABELS[agentId];
+  const updatingAgent = updatingMode !== null;
   const busy = restarting || updatingAgent || forceBusy;
 
   return (
@@ -309,48 +440,59 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
         <div className="hub-row-main">
           <strong>Human-only host actions</strong>
           <span>
-            Restarting a host and updating a coding agent CLI are never exposed to the Fleet agent or
-            any MCP client. Select the bound hosts to act on below; restarts check each host’s drain
-            state first and never force-interrupt active work without a separate per-host confirmation,
-            and agent updates run one host at a time.
+            Restarting a host and updating coding agent CLIs are never exposed to the Fleet agent or
+            any MCP client. Select the bound hosts and coding agents to act on below; restarts check
+            each host’s drain state first and never force-interrupt active work without a separate
+            per-host confirmation, and agent updates run sequentially one host and agent at a time.
           </span>
 
           {bound.length === 0 ? (
             <span className="hub-muted">Bind at least one host above to run maintenance actions.</span>
           ) : (
-            <div className="fleet-host-Checkboxes hub-checkbox-inline" role="group" aria-label="Target hosts">
-              {bound.map((host) => {
-                const id = manageId(host);
-                const checked = selectedIds.includes(id);
-                return (
-                  <label key={id} className="fleet-host-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      disabled={busy}
-                      onChange={() => toggleHost(id)}
-                    />
-                    <span>{host.label}</span>
-                  </label>
-                );
-              })}
+            <div className="fleet-field">
+              <span>Target hosts</span>
+              <div className="fleet-host-Checkboxes hub-checkbox-inline" role="group" aria-label="Target hosts">
+                {bound.map((host) => {
+                  const id = manageId(host);
+                  const checked = selectedIds.includes(id);
+                  return (
+                    <label key={id} className="fleet-host-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={busy}
+                        onChange={() => toggleHost(id)}
+                      />
+                      <span>{host.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
           )}
 
           <div className="fleet-field" style={{ marginTop: 8 }}>
-            <span>Coding agent to update</span>
-            <select
-              value={agentId}
-              disabled={busy || bound.length === 0}
-              onChange={(e) => setAgentId(e.target.value as InstallableAgentId)}
-              aria-label="Coding agent to update"
+            <span>Coding agents to update</span>
+            <div
+              className="fleet-agent-checkboxes hub-checkbox-inline"
+              role="group"
+              aria-label="Coding agents to update"
             >
-              {INSTALLABLE_AGENT_IDS.map((id) => (
-                <option key={id} value={id}>
-                  {FLEET_INSTALLABLE_AGENT_LABELS[id]} ({id})
-                </option>
-              ))}
-            </select>
+              {INSTALLABLE_AGENT_IDS.map((id) => {
+                const checked = selectedAgentIds.includes(id);
+                return (
+                  <label key={id} className="fleet-host-checkbox" title={id}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={busy || bound.length === 0}
+                      onChange={() => toggleAgent(id)}
+                    />
+                    <span>{FLEET_INSTALLABLE_AGENT_LABELS[id]}</span>
+                  </label>
+                );
+              })}
+            </div>
           </div>
 
           {Object.keys(restartOutcomes).length > 0 && (
@@ -404,25 +546,74 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
               {Object.values(updateOutcomes).map((outcome) => (
                 <div key={outcome.hostId} className="planner-section" style={{ marginTop: 8 }}>
                   <strong>
-                    {outcome.label} —{' '}
-                    {outcome.progress.status === 'running'
-                      ? 'Updating…'
-                      : outcome.progress.status === 'succeeded'
-                        ? 'Updated'
-                        : outcome.progress.status === 'failed'
-                          ? 'Update failed'
-                          : 'Queued'}
+                    {outcome.label} — {summarizeHostAgentUpdate(outcome)}
                   </strong>
-                  <pre className="hook-preview agent-install-log" style={{ marginTop: 4 }}>
-                    {outcome.progress.lines.length > 0
-                      ? outcome.progress.lines.join('\n')
-                      : outcome.progress.status === 'idle'
-                        ? 'Waiting for previous host to finish…'
-                        : 'Starting…'}
-                  </pre>
-                  {outcome.progress.error !== null && (
-                    <div className="error-box" role="alert">
-                      {outcome.progress.error}
+                  {outcome.agents.length <= 1 ? (
+                    <>
+                      <pre className="hook-preview agent-install-log" style={{ marginTop: 4 }}>
+                        {outcome.progress.lines.length > 0
+                          ? outcome.progress.lines.join('\n')
+                          : outcome.progress.status === 'idle'
+                            ? 'Waiting for previous host to finish…'
+                            : 'Starting…'}
+                      </pre>
+                      {outcome.progress.error !== null && (
+                        <div className="error-box" role="alert">
+                          {outcome.progress.error}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="fleet-agent-outcomes">
+                      {outcome.agents.map((item) => {
+                        const statusText =
+                          item.progress.status === 'running'
+                            ? 'Updating…'
+                            : item.progress.status === 'succeeded'
+                              ? 'Updated'
+                              : item.progress.status === 'failed'
+                                ? 'Update failed'
+                                : 'Queued';
+                        if (item.progress.status === 'idle') {
+                          return (
+                            <div key={item.agentId} className="fleet-agent-outcome-queued">
+                              <span>{item.agentLabel}</span>
+                              <span className="hub-muted"> — {statusText}</span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <details
+                            key={`${item.agentId}:${item.progress.status}`}
+                            className="fleet-agent-outcome"
+                            open={item.progress.status === 'running' || item.progress.status === 'failed'}
+                          >
+                            <summary>
+                              <span>{item.agentLabel}</span>
+                              {' — '}
+                              <span
+                                className={
+                                  item.progress.status === 'failed'
+                                    ? 'warn'
+                                    : item.progress.status === 'succeeded'
+                                      ? 'ok'
+                                      : undefined
+                                }
+                              >
+                                {statusText}
+                              </span>
+                            </summary>
+                            <pre className="hook-preview agent-install-log" style={{ marginTop: 4 }}>
+                              {item.progress.lines.length > 0 ? item.progress.lines.join('\n') : 'Starting…'}
+                            </pre>
+                            {item.progress.error !== null && (
+                              <div className="error-box" role="alert">
+                                {item.progress.error}
+                              </div>
+                            )}
+                          </details>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -442,11 +633,24 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
           </button>
           <button
             type="button"
-            id="hub-update-agent-btn"
-            disabled={busy || selectedHosts.length === 0}
-            onClick={() => void handleUpdateAgent()}
+            id="hub-update-selected-agents-btn"
+            disabled={busy || selectedHosts.length === 0 || selectedAgentIds.length === 0}
+            title={
+              selectedAgentIds.length === 0
+                ? 'Select at least one coding agent above, or click Update All.'
+                : undefined
+            }
+            onClick={() => void runAgentUpdate(selectedAgentIds, 'selected')}
           >
-            {updatingAgent ? `Updating ${agentLabel}…` : `Update ${agentLabel} on hosts…`}
+            {updatingMode === 'selected' ? 'Updating Selected…' : 'Update Selected'}
+          </button>
+          <button
+            type="button"
+            id="hub-update-all-agents-btn"
+            disabled={busy || selectedHosts.length === 0}
+            onClick={() => void runAgentUpdate(INSTALLABLE_AGENT_IDS, 'all')}
+          >
+            {updatingMode === 'all' ? 'Updating All…' : 'Update All'}
           </button>
         </div>
       </div>
