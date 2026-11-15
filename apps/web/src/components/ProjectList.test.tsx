@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ProjectInfo } from '@pocketagent/protocol';
-import { ProjectList, type ProjectsState } from './ProjectList.js';
+import { isShortGitBranch, ProjectList, type ProjectsState } from './ProjectList.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { hostEndpoint } from '../api/host.js';
 import { saveCollapsedProjects } from '../hosts/tree-pref.js';
@@ -222,5 +222,72 @@ describe('ProjectList tree status (PA-117)', () => {
     // Non-git project does not render a git badge, and nested worktree uses its own branch row without duplicating the badge
     const badgeMatches = html.match(/class="project-git-badge/g) ?? [];
     expect(badgeMatches).toHaveLength(1);
+    // Long branch names do not carry the non-shrinking short modifier
+    expect(html).not.toContain('project-git-badge--short');
+  });
+
+  it('marks short primary branches ("master", "main", "HEAD") with project-git-badge--short so "master" never truncates to "m…" (PA-180)', () => {
+    expect(isShortGitBranch('master')).toBe(true);
+    expect(isShortGitBranch('main')).toBe(true);
+    expect(isShortGitBranch('HEAD')).toBe(true);
+    expect(isShortGitBranch('develop')).toBe(true);
+    expect(isShortGitBranch('feature/pa-180')).toBe(false);
+
+    vi.stubGlobal('localStorage', fakeStorage());
+    const state = {
+      ...dummyState,
+      projects: [
+        {
+          ...dummyProject,
+          name: 'agents-remote-control',
+          cwd: '/data/repo/agents-remote-control',
+          isGitRepo: true,
+          gitBranch: 'master',
+          gitStatus: 'clean',
+          gitCommit: 'a077fbc000000000000000000000000000000000',
+          worktrees: [],
+        },
+        {
+          ...dummyProject,
+          name: 'interview-question-bank',
+          cwd: '/data/repo/interview-question-bank',
+          isGitRepo: true,
+          gitBranch: 'main',
+          gitStatus: 'unpushed',
+          gitCommit: 'b188cde000000000000000000000000000000000',
+          worktrees: [],
+        },
+        {
+          ...dummyProject,
+          name: 'long-branch-repo',
+          cwd: '/data/repo/long-branch-repo',
+          isGitRepo: true,
+          gitBranch: 'feature/pa-180-ui-fix',
+          gitStatus: 'dirty',
+          gitCommit: 'c299def000000000000000000000000000000000',
+          worktrees: [],
+        },
+      ],
+    } as unknown as ProjectsState;
+
+    const html = renderToStaticMarkup(
+      <HostProvider endpoint={hostEndpoint('host-1', '/h/host-1')}>
+        <ProjectList
+          state={state}
+          search=""
+          emptyHint="Nothing here"
+          onAddProject={() => {}}
+          onCompose={() => {}}
+          onApiError={() => {}}
+        />
+      </HostProvider>,
+    );
+
+    expect(html).toContain('class="project-git-badge project-git-badge--short project-git-badge--clean"');
+    expect(html).toContain('<span class="project-git-branch">master</span>');
+    expect(html).toContain('class="project-git-badge project-git-badge--short project-git-badge--unpushed"');
+    expect(html).toContain('<span class="project-git-branch">main</span>');
+    expect(html).toContain('class="project-git-badge project-git-badge--dirty"');
+    expect(html).toContain('<span class="project-git-branch">feature/pa-180-ui-fix</span>');
   });
 });

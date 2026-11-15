@@ -3284,6 +3284,7 @@ button.chat-rate-limit-badge {
 .project-name {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -3340,20 +3341,26 @@ button.chat-rate-limit-badge {
 }
 
 .project-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   unicode-bidi: plaintext;
 }
 
-/* PA-173: inline git badge on top-level git projects showing a small git
-   branch icon, the checked-out branch, and the working-tree status dot. */
+/* PA-173 / PA-180: inline git badge on top-level git projects showing a small
+   git branch icon, the checked-out branch, and the working-tree status dot.
+   Short primary branches (`main`, `master`, `develop`, `HEAD` —
+   `.project-git-badge--short`) keep `flex-shrink: 0` so `"master"` never
+   collapses to `"m…"` beside a long folder name; longer branch names may
+   shrink down to `min-width: 86px` (`78px` in `.sidebar`) so at least ~6–7
+   characters remain visible. */
 .project-git-badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-width: 0;
-  max-width: 140px;
+  min-width: 86px;
+  max-width: 160px;
   padding: 1px 7px;
   font-size: 11.5px;
   font-weight: 500;
@@ -3365,15 +3372,27 @@ button.chat-rate-limit-badge {
   flex-shrink: 1;
 }
 
+.project-git-badge--short {
+  min-width: auto;
+  max-width: none;
+  flex-shrink: 0;
+}
+
 .project-git-icon {
   flex: none;
   color: var(--text-dim);
 }
 
 .project-git-branch {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-git-badge--short .project-git-branch {
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .project-git-status {
@@ -4216,7 +4235,7 @@ button.chat-rate-limit-badge {
 
 .sidebar .project-name {
   font-size: 14.5px;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 4px;
 }
 
@@ -4242,10 +4261,16 @@ button.chat-rate-limit-badge {
 }
 
 .sidebar .project-git-badge {
-  max-width: 110px;
+  min-width: 78px;
+  max-width: 120px;
   padding: 1px 6px;
   font-size: 11px;
   background: var(--bg);
+}
+
+.sidebar .project-git-badge--short {
+  min-width: auto;
+  max-width: none;
 }
 
 /* `.sidebar .project-name` above and `.project--worktree .project-name`

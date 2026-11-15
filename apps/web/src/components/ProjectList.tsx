@@ -60,6 +60,18 @@ const GIT_STATUS_LABEL: Record<GitStatus, string> = {
   unpushed: 'Commits not pushed',
 };
 
+/**
+ * PA-180: short primary branch names (`main`, `master`, `HEAD`, `develop`,
+ * `staging`, `release`) never shrink or ellipsis-clip inside `.project-name` —
+ * shrinking `"master"` to `"m…"` beside a long project folder name made it
+ * indistinguishable from `"main"` at a glance.
+ */
+export const SHORT_GIT_BRANCH_MAX_LEN = 8;
+
+export function isShortGitBranch(branch: string): boolean {
+  return branch.length <= SHORT_GIT_BRANCH_MAX_LEN;
+}
+
 function rateLimitLabel(chat: ChatSummary): string | null {
   const limit = chat.rateLimit;
   if (!limit) return null;
@@ -959,30 +971,37 @@ function ProjectSection({
           >
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
-          {!nested && project.isGitRepo && (
-            <span
-              className={`project-git-badge${project.gitStatus ? ` project-git-badge--${project.gitStatus}` : ''}`}
-              title={
-                [
-                  project.gitBranch ?? 'HEAD',
-                  project.gitCommit ? project.gitCommit.slice(0, 7) : null,
-                  project.gitStatus ? GIT_STATUS_LABEL[project.gitStatus] : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')
-              }
-            >
-              <Icon name="branch" size={12} className="project-git-icon" />
-              <span className="project-git-branch">{project.gitBranch ?? 'HEAD'}</span>
-              {project.gitStatus && (
+          {!nested &&
+            project.isGitRepo &&
+            (() => {
+              const branchText = project.gitBranch ?? 'HEAD';
+              const shortMod = isShortGitBranch(branchText) ? ' project-git-badge--short' : '';
+              const statusMod = project.gitStatus ? ` project-git-badge--${project.gitStatus}` : '';
+              return (
                 <span
-                  className={`project-git-status project-git-status--${project.gitStatus}`}
-                  role="img"
-                  aria-label={GIT_STATUS_LABEL[project.gitStatus]}
-                />
-              )}
-            </span>
-          )}
+                  className={`project-git-badge${shortMod}${statusMod}`}
+                  title={
+                    [
+                      branchText,
+                      project.gitCommit ? project.gitCommit.slice(0, 7) : null,
+                      project.gitStatus ? GIT_STATUS_LABEL[project.gitStatus] : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  }
+                >
+                  <Icon name="branch" size={12} className="project-git-icon" />
+                  <span className="project-git-branch">{branchText}</span>
+                  {project.gitStatus && (
+                    <span
+                      className={`project-git-status project-git-status--${project.gitStatus}`}
+                      role="img"
+                      aria-label={GIT_STATUS_LABEL[project.gitStatus]}
+                    />
+                  )}
+                </span>
+              );
+            })()}
           <Icon name="chevron-down" className={`project-caret${isCollapsed ? ' closed' : ''}`} />
           {isCollapsed && (
             <span className="project-count">
