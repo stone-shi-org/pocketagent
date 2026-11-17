@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  JIRA_PROMPT_TEMPLATES,
   JIRA_PROMPT_TEMPLATE_IMPROVEMENT,
   jiraTemplateVariables,
   renderJiraTemplate,
@@ -126,5 +127,22 @@ describe('promptHeadline: the change line (PA-114)', () => {
     ).text;
     expect(promptHeadlineParts(old)).toEqual({ lead: '[PA-114] Improve user prompt display for jira webhook' });
     expect(promptHeadline(old)).toBe('[PA-114] Improve user prompt display for jira webhook');
+  });
+});
+
+describe('promptHeadline: every Jira preset', () => {
+  // Each preset's header must keep the `Issue: KEY` line this parser (and the
+  // server's chat-title fallback) looks for, the Epic one included.
+  it.each(JIRA_PROMPT_TEMPLATES.map((p) => [p.id, p.template] as const))('%s leads with [KEY] Summary', (_id, template) => {
+    const payload = {
+      webhookEvent: 'comment_created',
+      user: { displayName: 'Stone Shi' },
+      comment: { author: { displayName: 'Stone Shi' }, body: 'review the children' },
+      issue: { key: 'PA-200', fields: { summary: 'Fleet dashboards', issuetype: { name: 'Epic' } } },
+    };
+    const text = renderJiraTemplate(template, jiraTemplateVariables(payload, { webhookName: 'w', deliveryId: 'd' }), {
+      nonce: 'abc123',
+    }).text;
+    expect(promptHeadlineParts(text).lead).toBe('[PA-200] Fleet dashboards');
   });
 });

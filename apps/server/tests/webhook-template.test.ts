@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_JIRA_PROMPT_TEMPLATE,
   JIRA_PROMPT_TEMPLATES,
+  JIRA_PROMPT_TEMPLATE_EPIC,
   MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS,
+  jiraPresetForIssueType,
   JIRA_SAMPLE_PAYLOAD,
   JIRA_TEMPLATE_VARS,
   jiraTemplateVariables,
@@ -355,7 +357,11 @@ describe('renderJiraTemplate: sanitization', () => {
   // execute-on-approval preset to modify code.
   it('approval presets accept only approve/approved/approval labels, never agent-ready', async () => {
     const { JIRA_PROMPT_TEMPLATES } = await import('@pocketagent/protocol');
-    const approvalPresets = JIRA_PROMPT_TEMPLATES.filter((p) => p.id !== 'triage-only');
+    // The epic preset commits nothing and never goes to "In Review"; it has
+    // its own tests below.
+    const approvalPresets = JIRA_PROMPT_TEMPLATES.filter(
+      (p) => p.id !== 'triage-only' && p.id !== 'epic',
+    );
     expect(approvalPresets.length).toBeGreaterThanOrEqual(4);
     for (const preset of approvalPresets) {
       expect(preset.template, preset.id).toContain('"approve", "approved" or "approval"');
@@ -372,7 +378,11 @@ describe('renderJiraTemplate: sanitization', () => {
   // activity does not re-trigger the agent automatically.
   it('approval presets remove the agent-ready label after putting the ticket in review', async () => {
     const { JIRA_PROMPT_TEMPLATES } = await import('@pocketagent/protocol');
-    const approvalPresets = JIRA_PROMPT_TEMPLATES.filter((p) => p.id !== 'triage-only');
+    // The epic preset commits nothing and never goes to "In Review"; it has
+    // its own tests below.
+    const approvalPresets = JIRA_PROMPT_TEMPLATES.filter(
+      (p) => p.id !== 'triage-only' && p.id !== 'epic',
+    );
     expect(approvalPresets.length).toBeGreaterThanOrEqual(4);
     for (const preset of approvalPresets) {
       const reviewIdx = preset.template.indexOf(
@@ -383,6 +393,89 @@ describe('renderJiraTemplate: sanitization', () => {
       );
       expect(reviewIdx, `${preset.id} review step`).toBeGreaterThan(-1);
       expect(removeIdx, `${preset.id} remove agent-ready step`).toBeGreaterThan(reviewIdx);
+    }
+  });
+});
+
+describe('the Epic preset', () => {
+  const epic = JIRA_PROMPT_TEMPLATES.find((p) => p.id === 'epic');
+
+  it('is offered, and is what the Epic issue type maps to', () => {
+    expect(epic?.template).toBe(JIRA_PROMPT_TEMPLATE_EPIC);
+    expect(jiraPresetForIssueType('Epic')?.id).toBe('epic');
+    expect(jiraPresetForIssueType(' epic ')?.id).toBe('epic');
+  });
+
+  it('renders against an epic payload with nothing missing', () => {
+    const payload = {
+      webhookEvent: 'jira:issue_created',
+      issue: {
+        key: 'PA-200',
+        fields: { summary: 'Fleet dashboards', issuetype: { name: 'Epic' }, project: { key: 'PA', name: 'Pocket Agent' } },
+      },
+    };
+    const r = render(JIRA_PROMPT_TEMPLATE_EPIC, payload);
+    expect(r.missing).toEqual([]);
+    // `Issue:` on purpose: the chat title and the prompt bar parse it.
+    expect(r.text).toContain('Issue:        PA-200');
+    expect(r.text).toContain('`"Epic Link" = PA-200 OR parent = PA-200`');
+    // The regex must reach the agent with its backslashes, or `[` opens a class.
+    expect(r.text).toContain("git log --all -E --grep='\\[<child key>\\]'");
+  });
+
+  it('covers both uses: plan + create children, and review + close', () => {
+    const t = JIRA_PROMPT_TEMPLATE_EPIC;
+    expect(t).toContain('Plan mode');
+    expect(t).toContain('jira_link_to_epic');
+    expect(t).toContain('Review mode');
+    expect(t).toContain('Close mode');
+    expect(t).toContain('jira_transition_issue');
+  });
+
+  // Labelling children would start an agent on every one of them at once,
+  // before a human has read the plan.
+  it('never labels a child as ready or approved', () => {
+    expect(JIRA_PROMPT_TEMPLATE_EPIC).toContain(
+      'Do not add the "agent-ready", "approve", "approved" or "approval" labels to any child',
+    );
+  });
+
+  // A per-issue conversation sees every later event on the epic, so closing
+  // must not follow from an unrelated status change.
+  it('closes only on an explicit request, and only reviewed-complete children', () => {
+    const t = JIRA_PROMPT_TEMPLATE_EPIC;
+    expect(t).toContain('only when the latest comment explicitly asks to close');
+    expect(t).toContain('Close only children whose verdict in this conversation is "Complete"');
+    expect(t).toContain('Never close a child that is "Needs changes" or "Not implemented"');
+    expect(t).toContain('only if the user asked for it and every child is closed');
+  });
+
+  it('does not change code from the epic unless told to', () => {
+    expect(JIRA_PROMPT_TEMPLATE_EPIC).toContain(
+      'Do not modify code, commit or push while working on the epic itself unless the latest comment explicitly asks',
+    );
+  });
+});
+
+describe('jiraPresetForIssueType', () => {
+  it('maps each typed preset and leaves unknown types to the caller', () => {
+    expect(jiraPresetForIssueType('Bug')?.id).toBe('fix-issue');
+    expect(jiraPresetForIssueType('Story')?.id).toBe('new-feature');
+    expect(jiraPresetForIssueType('Task')?.id).toBe('task');
+    expect(jiraPresetForIssueType('Improvement')?.id).toBe('improvement');
+    expect(jiraPresetForIssueType('All type')).toBeUndefined();
+    expect(jiraPresetForIssueType('Spike')).toBeUndefined();
+    expect(jiraPresetForIssueType('')).toBeUndefined();
+  });
+
+  it('claims each issue type for at most one preset', () => {
+    const seen = new Map<string, string>();
+    for (const p of JIRA_PROMPT_TEMPLATES) {
+      for (const t of p.issueTypes ?? []) {
+        const k = t.toLowerCase();
+        expect(seen.get(k), `${t} claimed by ${seen.get(k)} and ${p.id}`).toBeUndefined();
+        seen.set(k, p.id);
+      }
     }
   });
 });

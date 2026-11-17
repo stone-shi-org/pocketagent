@@ -28,6 +28,7 @@ import {
   JIRA_PROMPT_TEMPLATES,
   JIRA_TEMPLATE_VARS,
   WEBHOOK_SLUG_RE,
+  jiraPresetForIssueType,
   parsePocketAgentId,
   pocketAgentId,
   pocketAgentLabelSlug,
@@ -1900,7 +1901,18 @@ export function WebhookEditorPage({
                         onChange={(e) => {
                           const val = e.target.value;
                           if (val !== 'custom') {
-                            updatePromptTemplateRoute(row.id, { issueType: val });
+                            // Bring the type's own preset along (Epic → the epic
+                            // workflow), but only over an untouched preset or a
+                            // blank template, never over hand-edited text.
+                            const typePreset = jiraPresetForIssueType(val);
+                            const replaceable =
+                              matchedPreset !== undefined || row.promptTemplate.trim() === '';
+                            updatePromptTemplateRoute(
+                              row.id,
+                              typePreset && replaceable
+                                ? { issueType: val, promptTemplate: typePreset.template }
+                                : { issueType: val },
+                            );
                           } else if (isKnownType) {
                             updatePromptTemplateRoute(row.id, { issueType: '' });
                           }

@@ -498,11 +498,104 @@ Workflow Instructions:
 
 ${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
+/**
+ * An epic is not a unit of code work, so this preset never implements
+ * anything on its own: it plans and creates the child tickets, and later
+ * reviews what those children shipped and closes the ones a human asked it to.
+ *
+ * Four details are deliberate:
+ * - **The header still says `Issue:`**, because the chat-title fallback
+ *   (`conversations/index.ts`) and the web prompt bar (`prompt-headline.ts`)
+ *   both find the key with `/Issue:\s*KEY/`.
+ * - **Children are linked through `jira_link_to_epic`**, and found with
+ *   `"Epic Link" = KEY OR parent = KEY`. Our Jira is Data Center, where an
+ *   epic's children hang off the Epic Link custom field (its id differs per
+ *   instance, so naming the tool beats naming a `customfield_…`), and `parent`
+ *   picks up real sub-tasks. Both clauses were checked against
+ *   jira.local.shifamily.com.
+ * - **Children never get `agent-ready` or an approval label.** Either one
+ *   would start an agent on every child at once, in parallel, before anyone
+ *   has read the plan. Starting work on a child stays a person's act.
+ * - **Closing needs an explicit request, and only reviewed children close.**
+ *   A per-issue conversation gets every later event on the epic. Without this
+ *   rule an unrelated status change could close a fleet of tickets.
+ */
+export const JIRA_PROMPT_TEMPLATE_EPIC = `A Jira epic event arrived: {{event}}.
+
+Issue:        {{issue.key}}
+Project:      {{issue.project}} ({{issue.projectKey}})
+Type:         {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Assignee:     {{issue.assignee}}
+Reporter:     {{issue.reporter}}
+Updated By:   {{user.displayName}}
+Labels:       {{issue.labels}}
+Components:   {{issue.components}}
+Changed:      {{changelog.fields}}
+
+Latest activity:
+{{change.headline}}
+
+Changes:
+{{changelog.summary}}
+
+Summary:
+{{issue.summary}}
+
+Description:
+{{issue.description}}
+
+Comment:
+{{comment.body}}
+
+Workflow Instructions:
+{{issue.key}} is an epic: a large piece of work that is delivered through its child tickets, not directly. Do not modify code, commit or push while working on the epic itself unless the latest comment explicitly asks you to fix something.
+
+0. Orientation (every time):
+   - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
+   - List the epic's existing children with the jira_search tool and the JQL \`"Epic Link" = {{issue.key}} OR parent = {{issue.key}}\`. Note each child's key, type, status and summary.
+   - Decide what is being asked from the latest comment and the latest activity, then follow exactly one of the modes below. If this conversation already holds a plan or a review for {{issue.key}}, build on it instead of starting over.
+
+1. Plan mode (the epic has no children yet, or the user asks for a plan, a re-plan, more tickets or changes to the existing breakdown):
+   - Investigate the repository and write a detailed implementation plan for the epic: goal, scope and non-goals, design and the affected areas of the code, an ordered breakdown into child tickets with the dependencies between them, risks and open questions, and how the work will be tested.
+   - Format the plan as a Markdown (.md) document, attach/post it to the Jira epic {{issue.key}}, and transition/mark the epic status to "In Progress" (or "in-progress").
+   - Create one child ticket per piece of work that can be implemented, reviewed and committed on its own. Use the "Task" issue type in project {{issue.projectKey}} unless the plan clearly calls for a "Bug" or "Improvement". Give each child:
+      - a specific summary;
+      - a description with context, what to change, the acceptance criteria and the keys of any tickets it depends on;
+      - the epic's components, where they apply.
+   - Link every child to the epic with the jira_link_to_epic tool, then run the JQL above again to check that each one is listed.
+   - Never create a child that duplicates an existing one. Update or comment on the existing ticket instead.
+   - Do not add the "agent-ready", "approve", "approved" or "approval" labels to any child, and do not assign a child unless asked. Starting work on a child is the user's decision.
+   - Post a comment on {{issue.key}} listing the child tickets in implementation order (key, summary, dependencies), and say which ones you created and which already existed.
+
+2. Review mode (the user asks to review, check or verify the implemented work, or asks to close children that you have not reviewed in this conversation):
+   - For each child (or only the keys the user named), find its commits with \`git log --all -E --grep='\\[<child key>\\]'\` (commits carry their ticket key in brackets, e.g. "[{{issue.projectKey}}-7] Task: …") and with any commit IDs in the child's own "Summary of Changes" comment. Run \`git fetch\` first if the repository has a remote.
+   - Review each child's diff against its acceptance criteria and the epic's plan. Look for missing pieces, bugs, missing tests, and conflicts between children. Run the relevant test suites.
+   - Give each child one verdict: "Complete", "Needs changes" or "Not implemented", with the commit IDs you reviewed.
+   - Post a review report on the epic {{issue.key}}: one line per child with its verdict, then the cross-cutting findings and what is still missing for the epic as a whole.
+   - For each child that "Needs changes", also post the specific findings as a comment on that child.
+
+3. Close mode (only when the latest comment explicitly asks to close children, sub-tasks or the epic):
+   - Close only children whose verdict in this conversation is "Complete". If the user named specific keys, close only those.
+   - For each child, find the closing transition ("Done", "Closed" or "Resolved") with jira_get_transitions, and apply it with jira_transition_issue. Then comment on the child that it was closed after the epic review, with its commit IDs.
+   - Never close a child that is "Needs changes" or "Not implemented". List each one you skipped and why in a comment on {{issue.key}}.
+   - Close the epic {{issue.key}} itself only if the user asked for it and every child is closed. After closing it, remove the "agent-ready" label from {{issue.key}}.
+
+4. Anything else (e.g. a status change or a comment with no request): do not post on Jira. Reply here with a short summary of the epic's state.
+
+${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
+
 export interface JiraPromptTemplatePreset {
   id: string;
   name: string;
   description: string;
   template: string;
+  /**
+   * Issue types this preset is written for. In the editor's per-issue-type
+   * map, choosing one of these types swaps in the preset, but only while the
+   * row still holds an unedited preset. A hand-edited template is never
+   * replaced. Case-insensitive. Absent on the fallback preset.
+   */
+  issueTypes?: readonly string[];
 }
 
 export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
@@ -517,26 +610,48 @@ export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
     name: 'Task (Direct Execution on Approval)',
     description: 'Execute task; when approved ("go ahead"/"approve" comment, or approve/approved/approval label), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_TASK,
+    issueTypes: ['Task', 'Sub-task'],
   },
   {
     id: 'improvement',
     name: 'Improvement (Direct Execution on Approval)',
     description: 'Execute improvement; when approved ("go ahead"/"approve" comment, or approve/approved/approval label), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_IMPROVEMENT,
+    issueTypes: ['Improvement'],
   },
   {
     id: 'fix-issue',
     name: 'Fix Issue (Triage + Auto-Fix & Commit on Approval)',
     description: 'Triage bug; when approved ("go ahead"/"fix it"/"approve" comment, or approve/approved/approval label), implement fix, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_FIX_ISSUE,
+    issueTypes: ['Bug', 'Incident'],
   },
   {
     id: 'new-feature',
     name: 'New Feature (Plan & Attach -> Execute on Approval)',
     description: 'Generate plan md, mark in-progress, wait; when approved ("go ahead"/"approve" comment, or approve/approved/approval label), implement, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_NEW_FEATURE,
+    issueTypes: ['New Feature', 'Feature', 'Story'],
+  },
+  {
+    id: 'epic',
+    name: 'Epic (Plan & Create Child Tickets -> Review & Close on Request)',
+    description:
+      'Plan the epic, attach the plan, and create and link child tickets without starting work on them; when asked, review each child\'s commits against its acceptance criteria, report verdicts, and close only the reviewed-complete children the user asked to close.',
+    template: JIRA_PROMPT_TEMPLATE_EPIC,
+    issueTypes: ['Epic'],
   },
 ];
+
+/**
+ * The preset written for `issueType`, if any (`JiraPromptTemplatePreset.issueTypes`).
+ * Lives here rather than in the editor so the type→preset table has one owner.
+ */
+export function jiraPresetForIssueType(issueType: string): JiraPromptTemplatePreset | undefined {
+  const t = issueType.trim().toLowerCase();
+  if (t === '') return undefined;
+  return JIRA_PROMPT_TEMPLATES.find((p) => p.issueTypes?.some((x) => x.toLowerCase() === t));
+}
 
 /** A realistic payload, so the editor can preview before any delivery exists. */
 export const JIRA_SAMPLE_PAYLOAD: unknown = {
