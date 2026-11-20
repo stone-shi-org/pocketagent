@@ -38,6 +38,7 @@ import {
 } from '../agent/hub-template-export.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
+import { ProvidersImporter, describeImportReport } from '../agent/providers-import.js';
 
 type RuntimeSettings = SettingsResponse['settings'];
 
@@ -639,189 +640,84 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
           setImportSuccess(null);
           setBusy(true);
 
-          let importedProvidersCount = 0;
-          let importedModelsCount = 0;
           let importedEmbeddings = false;
           let importedVoice = false;
-          let importedCodeAgentsCount = 0;
           let importedGeminiLive = false;
 
-          const currentProvidersRes = await api.listPlannerProviders();
-          let currentProviders = currentProvidersRes.providers ?? [];
-          const currentModelsRes = await api.listPlannerModels();
-          let currentModels = currentModelsRes.models ?? [];
-
-          const importSinglePlannerProvider = async (
-            imported: PlannerProviderTemplatePayload,
-          ): Promise<PlannerProvider> => {
-            const existingProvider =
-              currentProviders.find(
-                (p) => p.label === imported.label && p.baseUrl === imported.baseUrl,
-              ) ??
-              (imported.label === 'Default'
-                ? currentProviders.find((p) => p.label === 'Default' && !p.baseUrl)
-                : undefined);
-            const targetProvider = existingProvider
-              ? await api.updatePlannerProvider(existingProvider.id, {
-                  label: imported.label,
-                  baseUrl: imported.baseUrl,
-                  allowUnattended: imported.allowUnattended,
-                  ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
-                })
-              : await api.createPlannerProvider({
-                  label: imported.label,
-                  kind: imported.kind ?? 'openai-compatible',
-                  baseUrl: imported.baseUrl,
-                  allowUnattended: imported.allowUnattended,
-                  ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
-                });
-
-            currentProviders = [
-              ...currentProviders.filter((p) => p.id !== targetProvider.id),
-              targetProvider,
-            ];
-
-            const existingModelIds = new Set(
-              currentModels
-                .filter((m) => m.providerId === targetProvider.id)
-                .map((m) => m.modelId),
-            );
-            for (const m of imported.models) {
-              if (!existingModelIds.has(m.modelId)) {
-                const created = await api.createPlannerModel({
-                  ...m,
-                  providerId: targetProvider.id,
-                });
-                currentModels = [...currentModels, created];
-                importedModelsCount++;
-              }
+          const [providersRes, modelsRes, customRes] = await Promise.all([
+            api.listPlannerProviders(),
+            api.listPlannerModels(),
+            api.listCustomClaudeProviders().catch(() => null),
+          ]);
+          const importer = new ProvidersImporter(
+            api,
+            providersRes.providers ?? [],
+            modelsRes.models ?? [],
+            customRes?.providers ?? [],
+          );
+          // The optional sections are independent of the provider list: one that fails is a
+          // warning, not a reason to throw away what already landed.
+          const attempt = async (what: string, fn: () => Promise<void>): Promise<boolean> => {
+            try {
+              await fn();
+              return true;
+            } catch (err) {
+              importer.report.warnings.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+              return false;
             }
-            importedProvidersCount++;
-            return targetProvider;
           };
 
           if (envelope.kind === 'providers-and-models') {
             const bundle = rawData as ProvidersAndModelsExportData;
 
-            // 1. Providers and models
-            for (const prov of bundle.providers ?? []) {
-              await importSinglePlannerProvider(prov);
-            }
+            // 1. Providers and models, then code agents (which hang off a provider).
+            for (const prov of bundle.providers ?? []) await importer.importProvider(prov);
 
             // 2. Embeddings
             if (bundle.embeddings && (bundle.embeddings.baseUrl || bundle.embeddings.modelId)) {
-              await api.updatePlannerSettings({
-                embeddingBaseUrl: bundle.embeddings.baseUrl ?? undefined,
-                embeddingModelId: bundle.embeddings.modelId ?? undefined,
+              const embeddings = bundle.embeddings;
+              importedEmbeddings = await attempt('Embeddings', async () => {
+                await api.updatePlannerSettings({
+                  embeddingBaseUrl: embeddings.baseUrl ?? undefined,
+                  embeddingModelId: embeddings.modelId ?? undefined,
+                });
               });
-              importedEmbeddings = true;
             }
 
             // 3. Voice (TTS / STT)
             if (bundle.voice) {
-              await api.updateSettings({
-                ...(bundle.voice.liveSttUrl !== undefined ? { liveSttUrl: bundle.voice.liveSttUrl } : {}),
-                ...(bundle.voice.liveSttModel !== undefined ? { liveSttModel: bundle.voice.liveSttModel } : {}),
-                ...(bundle.voice.liveSttTtsModel !== undefined ? { liveSttTtsModel: bundle.voice.liveSttTtsModel } : {}),
-                ...(bundle.voice.voiceTurnSensitivity !== undefined ? { voiceTurnSensitivity: bundle.voice.voiceTurnSensitivity } : {}),
-                ...(bundle.voice.voiceTurnSilenceMs !== undefined ? { voiceTurnSilenceMs: bundle.voice.voiceTurnSilenceMs } : {}),
-                ...(bundle.voice.voiceSpokenSummaryEnabled !== undefined ? { voiceSpokenSummaryEnabled: bundle.voice.voiceSpokenSummaryEnabled } : {}),
+              const voice = bundle.voice;
+              importedVoice = await attempt('Voice', async () => {
+                await api.updateSettings({
+                  ...(voice.liveSttUrl !== undefined ? { liveSttUrl: voice.liveSttUrl } : {}),
+                  ...(voice.liveSttModel !== undefined ? { liveSttModel: voice.liveSttModel } : {}),
+                  ...(voice.liveSttTtsModel !== undefined ? { liveSttTtsModel: voice.liveSttTtsModel } : {}),
+                  ...(voice.voiceTurnSensitivity !== undefined ? { voiceTurnSensitivity: voice.voiceTurnSensitivity } : {}),
+                  ...(voice.voiceTurnSilenceMs !== undefined ? { voiceTurnSilenceMs: voice.voiceTurnSilenceMs } : {}),
+                  ...(voice.voiceSpokenSummaryEnabled !== undefined ? { voiceSpokenSummaryEnabled: voice.voiceSpokenSummaryEnabled } : {}),
+                });
               });
-              importedVoice = true;
             }
 
             // 4. Code agents (Custom Claude providers)
-            if (bundle.codeAgents && bundle.codeAgents.length > 0) {
-              const existingCustomRes = await api.listCustomClaudeProviders().catch(() => null);
-              const existingCustom = existingCustomRes?.providers ?? [];
-
-              for (const agent of bundle.codeAgents) {
-                const existing = existingCustom.find(
-                  (c) =>
-                    c.name === agent.name ||
-                    (c.baseUrl === agent.baseUrl && c.providerKind === agent.providerKind),
-                );
-
-                const matchedProvider =
-                  (agent.providerId ? currentProviders.find((p) => p.id === agent.providerId) : undefined) ??
-                  currentProviders.find(
-                    (p) =>
-                      p.baseUrl === agent.baseUrl &&
-                      (p.endpoints?.length ? p.endpoints : defaultEndpointsForProviderKind(p.kind)).includes('anthropic'),
-                  ) ??
-                  currentProviders.find((p) =>
-                    (p.endpoints?.length ? p.endpoints : defaultEndpointsForProviderKind(p.kind)).includes('anthropic'),
-                  );
-
-                if (existing) {
-                  await api.updateCustomClaudeProvider(existing.id, {
-                    name: agent.name,
-                    providerId: matchedProvider?.id ?? existing.providerId,
-                    providerKind: agent.providerKind,
-                    baseUrl: agent.baseUrl,
-                    models: agent.models,
-                    defaultModel: agent.defaultModel,
-                    smallModel: agent.smallModel,
-                    allowUnattended: agent.allowUnattended,
-                    supportsEffort: agent.supportsEffort,
-                  });
-                  importedCodeAgentsCount++;
-                } else if (matchedProvider) {
-                  await api.createCustomClaudeProvider({
-                    name: agent.name,
-                    providerId: matchedProvider.id,
-                    providerKind: agent.providerKind,
-                    allowUnattended: agent.allowUnattended,
-                    supportsEffort: agent.supportsEffort,
-                    defaultModel: agent.defaultModel,
-                    smallModel: agent.smallModel,
-                  });
-                  importedCodeAgentsCount++;
-                }
-              }
-            }
+            for (const agent of bundle.codeAgents ?? []) await importer.importCodeAgent(agent);
 
             // 5. Gemini Live
-            if (
-              bundle.geminiLive &&
-              (bundle.geminiLive.model || bundle.geminiLive.voice !== undefined || bundle.geminiLive.idleMinutes !== undefined)
-            ) {
-              await api
-                .updateGeminiLiveSettings({
-                  ...(bundle.geminiLive.model ? { model: bundle.geminiLive.model } : {}),
-                  ...(bundle.geminiLive.voice !== undefined ? { voice: bundle.geminiLive.voice } : {}),
-                  ...(bundle.geminiLive.idleMinutes !== undefined ? { idleMinutes: bundle.geminiLive.idleMinutes } : {}),
-                })
-                .catch(() => null);
-              importedGeminiLive = true;
+            const live = bundle.geminiLive;
+            if (live && (live.model || live.voice !== undefined || live.idleMinutes !== undefined)) {
+              importedGeminiLive = await attempt('Gemini Live', async () => {
+                await api.updateGeminiLiveSettings({
+                  ...(live.model ? { model: live.model } : {}),
+                  ...(live.voice !== undefined ? { voice: live.voice } : {}),
+                  ...(live.idleMinutes !== undefined ? { idleMinutes: live.idleMinutes } : {}),
+                });
+              });
             }
-
-            const parts: string[] = [];
-            if (importedProvidersCount > 0) parts.push(`${importedProvidersCount} provider(s)`);
-            if (importedModelsCount > 0) parts.push(`${importedModelsCount} model(s)`);
-            if (importedEmbeddings) parts.push('embeddings');
-            if (importedVoice) parts.push('TTS/STT');
-            if (importedCodeAgentsCount > 0) parts.push(`${importedCodeAgentsCount} code agent(s)`);
-            if (importedGeminiLive) parts.push('Gemini Live');
-
-            await load();
-            setImportSuccess(
-              parts.length > 0
-                ? `Imported successfully: ${parts.join(', ')}.`
-                : 'Providers and models imported successfully.',
-            );
           } else if (envelope.kind === 'planner-provider') {
-            if (Array.isArray(rawData)) {
-              for (const prov of rawData as PlannerProviderTemplatePayload[]) {
-                await importSinglePlannerProvider(prov);
-              }
-            } else {
-              await importSinglePlannerProvider(rawData as PlannerProviderTemplatePayload);
-            }
-            await load();
-            setImportSuccess(
-              `Imported ${importedProvidersCount} provider(s) and ${importedModelsCount} model(s).`,
-            );
+            const list = Array.isArray(rawData)
+              ? (rawData as PlannerProviderTemplatePayload[])
+              : [rawData as PlannerProviderTemplatePayload];
+            for (const prov of list) await importer.importProvider(prov);
           } else if (envelope.kind === 'planner-endpoint') {
             const parsed = parseTemplatePayload(
               'planner-endpoint',
@@ -829,34 +725,23 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
               envelope.name || 'Default',
             );
             if (parsed.ok && parsed.value.kind === 'planner-provider') {
-              await importSinglePlannerProvider(parsed.value.payload);
+              await importer.importProvider(parsed.value.payload);
             }
-            await load();
-            setImportSuccess(`Imported legacy LLM endpoint and ${importedModelsCount} model(s).`);
           } else if (envelope.kind === 'claude-provider') {
-            const agent = rawData as ClaudeProviderTemplatePayload;
-            const matchedProvider = currentProviders.find((p) =>
-              (p.endpoints?.length ? p.endpoints : defaultEndpointsForProviderKind(p.kind)).includes(
-                'anthropic',
-              ),
-            );
-            if (matchedProvider) {
-              await api.createCustomClaudeProvider({
-                name: agent.name,
-                providerId: matchedProvider.id,
-                providerKind: agent.providerKind,
-                allowUnattended: agent.allowUnattended,
-                supportsEffort: agent.supportsEffort,
-                defaultModel: agent.defaultModel,
-                smallModel: agent.smallModel,
-              });
-              await load();
-              setImportSuccess(`Imported code agent "${agent.name}".`);
-            } else {
-              setImportSuccess(
-                `Could not link code agent "${agent.name}": no Anthropic-enabled provider found.`,
-              );
-            }
+            await importer.importCodeAgent(rawData as ClaudeProviderTemplatePayload);
+          }
+
+          await load();
+          const extras: string[] = [];
+          if (importedEmbeddings) extras.push('embeddings');
+          if (importedVoice) extras.push('TTS/STT');
+          if (importedGeminiLive) extras.push('Gemini Live');
+          const { warnings } = importer.report;
+          const created = importer.report.providersCreated + importer.report.codeAgentsCreated;
+          const note = created > 0 ? ' API keys are never exported — enter them on any new provider.' : '';
+          setImportSuccess(`${describeImportReport(importer.report, extras)}${note}`);
+          if (warnings.length > 0) {
+            setError(`${warnings.length} item(s) could not be imported: ${warnings.join(' · ')}`);
           }
         } catch (err) {
           setError(err instanceof ApiError ? err.message : 'Could not import provider settings.');

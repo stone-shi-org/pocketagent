@@ -290,7 +290,11 @@ export class CustomClaudeProviderStore {
       ) {
         continue;
       }
-      const providerModels = normalizeModels(
+      // Not `normalizeModels`: it throws on an empty list, and a linked provider
+      // whose catalog is momentarily empty (mid-import, or its last model just
+      // removed) must keep the row's own list rather than fail the request that
+      // merely touched the catalog.
+      const providerModels = dedupeModels(
         readPlannerModels(this.db, plannerProvider.id).map((m) => m.modelId),
       );
       const models = providerModels.length > 0 ? providerModels : parseModels(row.models_json);
@@ -473,7 +477,10 @@ export class CustomClaudeProviderStore {
         400,
       );
     }
-    const providerModels = normalizeModels(
+    // Not `normalizeModels`: it throws "At least one model id is required." for an
+    // empty catalog, which made the fallbacks below unreachable and the message
+    // point at a field the user never typed.
+    const providerModels = dedupeModels(
       readPlannerModels(this.db, plannerProvider.id).map((m) => m.modelId),
     );
     const models =
@@ -668,7 +675,7 @@ function parseModels(json: string): string[] {
 }
 
 /** Trim, drop blanks, de-duplicate, keep first-seen order — same as the picker's. */
-function normalizeModels(models: readonly string[]): string[] {
+function dedupeModels(models: readonly string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of models) {
@@ -677,6 +684,12 @@ function normalizeModels(models: readonly string[]): string[] {
     seen.add(value);
     out.push(value);
   }
+  return out;
+}
+
+/** `dedupeModels`, but an empty result is the caller's mistake. */
+function normalizeModels(models: readonly string[]): string[] {
+  const out = dedupeModels(models);
   if (out.length === 0) {
     throw new CustomClaudeProviderError('At least one model id is required.', 'invalid', 400);
   }

@@ -722,6 +722,53 @@ describe('PA-154: Custom Claude linked to Anthropic-enabled Providers & Models e
     await ctx.cleanup();
   });
 
+  it('never answers "At least one model id is required" for a linked provider whose catalog is empty', async () => {
+    const dsRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/planner/providers',
+      headers: authHeaders(ctx.cookie),
+      payload: { label: 'DeepSeek', kind: 'deepseek', apiKey: 'sk-deepseek-shared' },
+    });
+    const ds = dsRes.json();
+
+    // Linking to a provider with no models falls back to the request's own list
+    // (it used to throw before the fallback was reachable).
+    const createRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/custom-claude-providers',
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        name: 'Claude Code (DeepSeek)',
+        providerId: ds.id,
+        models: ['deepseek-v4-pro'],
+        defaultModel: 'deepseek-v4-pro',
+      },
+    });
+    expect(createRes.statusCode, createRes.body).toBe(201);
+
+    // Adding then removing the provider's only model re-syncs a linked agent; an
+    // empty catalog must keep the agent's list, not 500 the catalog mutation.
+    const mRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/planner/models',
+      headers: authHeaders(ctx.cookie),
+      payload: { providerId: ds.id, modelId: 'deepseek-v4-pro', label: 'Pro' },
+    });
+    expect(mRes.statusCode, mRes.body).toBe(201);
+    const delRes = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/planner/models/${encodeURIComponent(mRes.json().id)}`,
+      headers: authHeaders(ctx.cookie),
+    });
+    expect(delRes.statusCode, delRes.body).toBe(204);
+    const list = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/custom-claude-providers',
+      headers: authHeaders(ctx.cookie),
+    });
+    expect(list.json().providers[0].models).toEqual(['deepseek-v4-pro']);
+  });
+
   it('creates a Custom Claude entry referencing an Anthropic-enabled providerId, derives its Anthropic URL, key, and models, and syncs on provider/model updates', async () => {
     // 1. Create a DeepSeek provider (both openai and anthropic enabled by default) and add models.
     const dsRes = await ctx.app.inject({
