@@ -35,6 +35,7 @@ import { usageProbeCwd } from '../usage/probe-cwd.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
 import { AgySession } from './agy-session.js';
+import { formatAgySettingsAutoApproveNotice, readAgySettingsAutoApprove } from '../agents/agy.js';
 import { OpencodeSession } from './opencode-session.js';
 import { OpencodeServerManager } from './opencode-server.js';
 import { CodexSession } from './codex-session.js';
@@ -708,6 +709,11 @@ export class SessionManager {
         this.notifyTreeIdle(session.spec.cwd);
       }
     });
+    if (session.transport === 'structured') {
+      session.on('idle', () => {
+        this.notifyTreeIdle(session.spec.cwd);
+      });
+    }
     session.on('exit', () => {
       this.persist(session);
       // A dead session holds nothing, so its tree may now be free.
@@ -955,7 +961,7 @@ export class SessionManager {
     // reflects reality instead of needing a second source of truth.
     //
     // `forcesSkipPermissions` overrides all of that unconditionally: an
-    // adapter that sets it (only `agy`, so far — see `agents/agy.ts`) has no
+    // adapter that sets it (e.g. `pi` — see `agents/pi.ts`) has no
     // synchronous approval channel at all in its structured mode, so there is
     // no "off" state to honour an opt-out into. This is the one case where
     // `skipPermissions` is not actually a choice made per session.
@@ -1043,6 +1049,7 @@ export class SessionManager {
             : {}),
           ...(model !== undefined ? { model } : {}),
           ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
+          skipPermissions,
         });
       }
 
@@ -1265,11 +1272,9 @@ export class SessionManager {
   }
 
   /**
-   * Structured, but via `AgySession` instead of the Claude Agent SDK — see
-   * that class for why it is a distinct code path rather than a flag on
-   * `startStructured`. `skipPermissions` is not a parameter here: it is
-   * always `true`, enforced in `create()` via `adapter.forcesSkipPermissions`
-   * before this is ever called.
+   * Structured, but via `AgySession` (`agy acp`) instead of the Claude Agent
+   * SDK — see that class for why it is a distinct code path rather than a flag
+   * on `startStructured`.
    */
   private async startAgy(args: {
     id: string;
@@ -1283,7 +1288,22 @@ export class SessionManager {
     resumeAgentSessionId?: string;
     model?: string;
     plannerChatId?: string | null;
+    skipPermissions?: boolean;
   }): Promise<AgySession> {
+    // `agy acp` in `default` mode still respects `~/.gemini/antigravity-cli/settings.json`.
+    // If the host's settings.json sets a non-supervised `toolPermission` (anything
+    // other than `request-review` / `strict` / unset), agy may auto-approve commands
+    // on its own. Keep `spec.skipPermissions` strictly equal to what the caller
+    // requested so we NEVER escalate `agy`'s argv with `--dangerously-skip-permissions`
+    // (e.g. stripping sandbox limits from `proceed-in-sandbox`), and record
+    // `bypassedBySettings` separately for honest disclosure (`skipPermissionsEnabled`
+    // and the persisted `skip_permissions` flag) plus a startup warning.
+    const settingsCheck = readAgySettingsAutoApprove({ homeDir: args.env.HOME });
+    const bypassedBySettings = !args.skipPermissions && settingsCheck.autoApproves;
+    const settingsAutoApproveNotice = bypassedBySettings
+      ? formatAgySettingsAutoApproveNotice(settingsCheck)
+      : undefined;
+
     const session = new AgySession({
       id: args.id,
       title: args.title,
@@ -1300,15 +1320,23 @@ export class SessionManager {
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
       plannerChatId: args.plannerChatId ?? null,
-      skipPermissions: true,
+      skipPermissions: args.skipPermissions === true,
+      bypassedBySettings,
+      ...(settingsAutoApproveNotice ? { settingsAutoApproveNotice } : {}),
     });
 
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // Pick up agy's own AI-generated title (from `annotations/<id>.pbtxt` or
-    // `conversation_summaries.db`) on each completed turn, and once on
-    // `session_started` when resuming an existing conversation.
+    // `agy acp` pushes titles live via `session_info_update`; persist them
+    // immediately and keep `refreshDerivedTitle` as a fallback for resumed
+    // sessions and on-disk annotations.
+    session.on('title', (rawTitle) => {
+      const clamped = clampTitle(rawTitle);
+      if (!clamped || clamped === session.derivedTitle) return;
+      session.setDerivedTitle(clamped);
+      this.persist(session);
+    });
     session.on('event', (_seq, event) => {
       if (event.kind === 'session_started') {
         this.persist(session);
@@ -2114,7 +2142,8 @@ export class SessionManager {
       // happening right now, not just what was chosen at creation.
       skipPermissionsEnabled:
         session.spec.skipPermissions === true ||
-        (session.transport === 'structured' && session.globalBypassActive),
+        (session.transport === 'structured' && session.globalBypassActive) ||
+        (session instanceof AgySession && session.bypassedBySettings),
       // Read off the adapter rather than persisted with the session: it is a
       // property of *how this agent runs*, not of a choice made at creation,
       // so it must follow the adapter's current configuration. Nothing is
@@ -2219,7 +2248,10 @@ export class SessionManager {
         session.externalId,
         session.transport,
         session.agentSessionId,
-        session.spec.skipPermissions === true ? 1 : 0,
+        session.spec.skipPermissions === true ||
+        (session instanceof AgySession && session.bypassedBySettings)
+          ? 1
+          : 0,
         session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
         session.plannerChatId ?? null,
       );
@@ -2234,7 +2266,7 @@ export class SessionManager {
         `UPDATE sessions
             SET status = ?, pid = ?, cols = ?, rows = ?, exit_code = ?, exit_signal = ?,
                 started_at = ?, ended_at = ?, last_activity_at = ?, external_id = ?,
-                agent_session_id = ?, title = ?
+                agent_session_id = ?, title = ?, skip_permissions = ?
           WHERE id = ?`,
       )
       .run(
@@ -2254,6 +2286,10 @@ export class SessionManager {
         // title once one was found rather than reverting to the generic
         // creation-time name.
         this.displayTitle(session),
+        session.spec.skipPermissions === true ||
+          (session instanceof AgySession && session.bypassedBySettings)
+          ? 1
+          : 0,
         session.id,
       );
   }

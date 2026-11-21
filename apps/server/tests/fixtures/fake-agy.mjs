@@ -1,102 +1,32 @@
 #!/usr/bin/env node
-// A stand-in for the `agy` CLI used by agy-session.test.ts. Real agy costs
-// real inference and network access, so this fixture emits the same line
-// shapes captured from live probes (v1.1.12 for the event shapes, v1.2.6 for
-// the stream-input handshake) without either.
+// A stand-in for the `agy` CLI used by agy-session.test.ts (ACP mode) and
+// agent-probe tests (`models` subcommand).
 //
-// It answers in three modes, matching the three ways `AgySession` invokes the
-// real binary:
-//
-//   `models`                       -> the plain-text model catalogue
-//   `--input-format stream-json`   -> the session's long-lived child: one
-//                                     NDJSON prompt per line on stdin, one
-//                                     turn each, process stays up in between
-//   `-p <prompt>`                  -> a one-shot turn, for `/help` and any
-//                                     other slash command agy answers itself
+// In `acp` mode, speaks newline-delimited JSON-RPC 2.0 over stdin/stdout,
+// mirroring the exact shapes captured against real `agy acp` v1.5.14:
+//   - `initialize` -> capabilities
+//   - `session/new` / `session/resume` -> sessionId, models, modes, + available_commands_update
+//   - `session/set_model` -> updates current model live
+//   - `session/prompt` -> streams session/update notifications, optionally sends
+//     server-initiated `session/request_permission` (when NOT started with
+//     --dangerously-skip-permissions), and resolves with per-turn usage
+//   - `session/cancel` -> cancels an in-flight turn
+//   - `session/close` -> acknowledges close
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import readline from 'node:readline';
 
 const args = process.argv.slice(2);
-function argVal(flag) {
-  const i = args.indexOf(flag);
-  return i >= 0 ? args[i + 1] : undefined;
-}
+const skipPermissions = args.includes('--dangerously-skip-permissions');
 
-const providedConversationId = argVal('--conversation');
-const conversationId = providedConversationId ?? crypto.randomUUID();
-const model = argVal('--model');
-const streamInput = argVal('--input-format') === 'stream-json';
-
-// Records the argv of *every* invocation (one JSON array per line), so a test
-// can assert on flags real agy would only ever reveal through behaviour we
-// cannot reproduce here — specifically `--add-dir`, which is what actually
-// binds agy to the session's directory rather than its own scratch project.
-// Off unless the test asks for it, since most tests don't care.
 if (process.env.AGY_FIXTURE_ARGV_FILE) {
   fs.appendFileSync(process.env.AGY_FIXTURE_ARGV_FILE, JSON.stringify(args) + '\n');
 }
-
-function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
+if (process.env.AGY_FIXTURE_PID_FILE) {
+  fs.writeFileSync(process.env.AGY_FIXTURE_PID_FILE, String(process.pid));
 }
 
-function emitInit(tools) {
-  emit({
-    event: 'init',
-    conversation_id: conversationId,
-    init: { cwd: process.cwd(), tools, permission_mode: 'always-proceed' },
-  });
-}
-
-// Real agy's `result` figures are cumulative over the *conversation*, not
-// per turn, once a driver holds one process open across several — confirmed
-// live against v1.2.6 (`input_tokens` 15047 then 30176 for two trivial turns,
-// `num_turns` 1 then 2, `duration_seconds` climbing past a turn's own
-// runtime). Reproduced here so `AgySession.makeStatsPerTurn` is actually
-// exercised; a fixture reporting flat per-turn numbers would make that
-// conversion untestable and let the transcript footer silently regress.
-let totalInputTokens = 0;
-let totalOutputTokens = 0;
-let totalTurns = 0;
-let totalDurationSeconds = 0;
-
-function emitResult(extra) {
-  totalInputTokens += 10;
-  totalOutputTokens += 5;
-  totalTurns += 1;
-  totalDurationSeconds += 30;
-  emit({
-    event: 'result',
-    result: {
-      conversation_id: conversationId,
-      status: 'SUCCESS',
-      response: '',
-      duration_seconds: totalDurationSeconds,
-      num_turns: totalTurns,
-      usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
-      ...extra,
-    },
-  });
-}
-
-/** A `result` line reporting agy's own error text, the way every live failure does. */
-function emitErrorResult(error, extra) {
-  emitResult({ status: 'ERROR', error, duration_seconds: 0, num_turns: 0, usage: { input_tokens: 0, output_tokens: 0 }, ...extra });
-}
-
-// `agy models` is a genuine top-level subcommand, not print mode — plain
-// text, one `<id>\t<label>` pair per line on stdout (its "Fetching..." status
-// line goes to stderr), captured live against v1.1.12.
-// `AgySession.fetchInitialModels()` spawns exactly this.
-//
-// Deliberately waits for stdin to close before answering: the real `agy
-// models` was confirmed live to hang forever — zero output, not even its own
-// status line — reading an open, unclosed stdin pipe (Node's default `spawn`
-// leaves one). `fetchInitialModels()` fixes this with `child.stdin.end()`
-// right after spawning; without this `await`, that bug could regress with
-// nothing here to catch it, since every other branch in this fixture answers
-// immediately regardless of stdin.
+// Keep `agy models` working for any tests that probe the model catalog directly.
 if (args[0] === 'models') {
   process.stdin.resume();
   process.stdin.on('end', () => {
@@ -105,311 +35,440 @@ if (args[0] === 'models') {
     process.stdout.write('claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n');
     process.exit(0);
   });
-} else if (streamInput) {
-  runStreamMode();
+} else if (args[0] === 'acp') {
+  runAcpServer();
 } else {
-  runOneShot(argVal('-p') ?? '');
+  process.stderr.write(`unexpected agy mode: ${args.join(' ')}\n`);
+  process.exit(2);
 }
 
-/**
- * The session's long-lived child.
- *
- * The load-bearing difference from the one-shot path: a turn finishing does
- * **not** end this process. `AgySession` relies on that — it is the whole
- * point of using `--input-format stream-json` (see its class doc comment) —
- * so a fixture that exited per turn would make every regression it guards
- * against invisible. Only `FAIL` exits, standing in for a genuine crash.
- */
-function runStreamMode() {
-  emitInit(['run_command', 'view_file']);
+function send(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+function runAcpServer() {
+  let sessionId = null;
+  let currentModel = 'auto';
+  let serverReqId = 1;
+  let turnCounter = 0;
+
+  /** Map of server-initiated request id -> resolve(result) */
+  const pendingClientReplies = new Map();
+  /** Active in-flight prompt state, for `session/cancel`. */
+  let activeCancel = null;
+
+  const AVAILABLE_MODELS = [
+    { modelId: 'auto', name: 'Gemini Pro Next' },
+    { modelId: 'gemini-flash-next', name: 'Gemini Flash Next' },
+    { modelId: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+  ];
+
+  const AVAILABLE_MODES = [
+    { id: 'default', name: 'Default', description: 'Ask before edits and commands.' },
+    { id: 'accept-edits', name: 'Accept edits', description: 'Approve file edits.' },
+    { id: 'auto', name: 'Auto', description: 'Approve safe commands.' },
+    { id: 'plan', name: 'Plan', description: 'Plan before executing.' },
+  ];
+
+  function notifyUpdate(update) {
+    send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: { sessionId, update },
+    });
+  }
+
+  function requestPermission(toolCall) {
+    const id = String(serverReqId++);
+    return new Promise((resolve) => {
+      pendingClientReplies.set(id, resolve);
+      send({
+        jsonrpc: '2.0',
+        id,
+        method: 'session/request_permission',
+        params: {
+          sessionId,
+          toolCall,
+          options: [
+            { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+            { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+          ],
+        },
+      });
+    });
+  }
+
   const rl = readline.createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    let parsed;
+    let msg;
     try {
-      parsed = JSON.parse(trimmed);
+      msg = JSON.parse(trimmed);
     } catch {
       return;
     }
-    // Mirrors the real validator, which rejects a frame with no `event` and a
-    // `user` event with no `message`.
-    if (!parsed || parsed.event !== 'user' || !parsed.message) {
-      emitErrorResult('stream input message is missing the "event" field');
+
+    // Reply from client to our server-initiated request (e.g. session/request_permission)
+    if (msg.id !== undefined && msg.method === undefined) {
+      const resolver = pendingClientReplies.get(String(msg.id));
+      if (resolver) {
+        pendingClientReplies.delete(String(msg.id));
+        resolver(msg.result ?? null);
+      }
       return;
     }
-    const text = (parsed.message.content ?? [])
-      .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
-      .join('');
-    runTurn(text, { exitWhenDone: false });
+
+    // Notification from client
+    if (msg.method === 'session/cancel') {
+      if (activeCancel) activeCancel();
+      return;
+    }
+
+    const { id, method, params = {} } = msg;
+
+    if (method === 'initialize') {
+      if (process.env.AGY_FIXTURE_HANG_INIT === '1') {
+        return; // Simulate a wedged CLI that never responds to initialize.
+      }
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: 1,
+          agentCapabilities: {
+            loadSession: true,
+            promptCapabilities: { image: true, audio: false, embeddedContext: true },
+            sessionCapabilities: { resume: {}, close: {}, load: {}, list: {}, additionalDirectories: {} },
+          },
+          agentInfo: { name: 'Fake Antigravity ACP Server', version: '1.5.14' },
+        },
+      });
+      return;
+    }
+
+    if (method === 'session/new' || method === 'session/resume') {
+      if (process.env.AGY_FIXTURE_FAIL_SESSION_NEW === '1') {
+        send({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32000, message: 'simulated session/new failure' },
+        });
+        return;
+      }
+      sessionId = method === 'session/resume' && params.sessionId ? params.sessionId : crypto.randomUUID();
+      if (process.env.AGY_FIXTURE_RPC_LOG) {
+        fs.appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({ method, sessionId }) + '\n');
+      }
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          sessionId,
+          models: { availableModels: AVAILABLE_MODELS, currentModelId: currentModel },
+          modes: { currentModeId: 'default', availableModes: AVAILABLE_MODES },
+        },
+      });
+      // Push available_commands_update right after session/new|resume, just like real agy acp.
+      notifyUpdate({
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [
+          { name: 'goal', description: 'Run until the specified goal is completely finished.' },
+          { name: 'compact', description: 'Compact the conversation now.' },
+          { name: 'plan', description: 'Plan carefully before executing a task.' },
+        ],
+      });
+      return;
+    }
+
+    if (method === 'session/set_model') {
+      currentModel = params.modelId ?? currentModel;
+      if (process.env.AGY_FIXTURE_RPC_LOG) {
+        fs.appendFileSync(
+          process.env.AGY_FIXTURE_RPC_LOG,
+          JSON.stringify({ method, modelId: currentModel }) + '\n',
+        );
+      }
+      send({ jsonrpc: '2.0', id, result: {} });
+      return;
+    }
+
+    if (method === 'session/close') {
+      if (process.env.AGY_FIXTURE_RPC_LOG) {
+        fs.appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({ method, sessionId }) + '\n');
+      }
+      send({ jsonrpc: '2.0', id, result: {} });
+      return;
+    }
+
+    if (method === 'session/prompt') {
+      const blocks = Array.isArray(params.prompt) ? params.prompt : [];
+      const text = blocks
+        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join('');
+      void handlePrompt(id, text);
+      return;
+    }
+
+    send({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } });
   });
-  // agy exits on stdin EOF — confirmed live, and what `terminate()` relies on
-  // for a clean shutdown ahead of its SIGTERM.
+
   rl.on('close', () => process.exit(0));
 
-  // If SIGTERM arrives (e.g. terminating mid-turn or escalating after grace timeout),
-  // agy's Go context cancellation aborts the stream input with context canceled.
-  process.on('SIGTERM', () => {
-    process.stderr.write('error: stream input cancelled: context canceled\n');
-    emitErrorResult('stream input cancelled: context canceled');
-    process.exit(1);
-  });
-}
+  async function handlePrompt(rpcId, text) {
+    turnCounter++;
 
-/** One `-p <prompt>` invocation: one turn, then the process is done. */
-function runOneShot(prompt) {
-  runTurn(prompt, { exitWhenDone: true, emitInit: true });
-}
+    if (text === 'CRASH') {
+      process.stderr.write('simulated crash\n');
+      process.exit(1);
+    }
 
-function runTurn(prompt, { exitWhenDone, emitInit: wantInit = false }) {
-  const done = () => {
-    if (exitWhenDone) process.exit(0);
-  };
-
-  if (prompt === 'FAIL') {
-    // A genuine crash: no `result` line at all, a reason on stderr, non-zero
-    // exit. In stream mode this kills the long-lived child mid-turn, which is
-    // the one death `AgySession.onChildClose` has to report and recover from.
-    process.stderr.write('simulated failure\n');
-    process.exit(1);
-  }
-
-  // Mirrors a live-captured quota failure: agy reports the real reason in
-  // `result.error` and writes nothing to stderr. `AgySession` must surface
-  // `result.error`, not the opaque `agy exited with code 1` fallback that an
-  // empty stderr would otherwise leave it with.
-  if (prompt === 'QUOTA') {
-    emitErrorResult(
-      'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
-    );
-    done();
-    return;
-  }
-
-  // Same shape, but with error text `AgySession.TRANSIENT_ERROR_PATTERN`
-  // recognizes as worth retrying automatically instead of surfacing straight
-  // to the user. `TIMEOUT_ALWAYS` fails every attempt, to exercise giving up
-  // once the retry budget runs out.
-  if (prompt === 'TIMEOUT_ALWAYS') {
-    emitErrorResult('timeout waiting for response');
-    done();
-    return;
-  }
-
-  // The same, but only for the *first* attempt — later attempts succeed.
-  // State lives in a scratch file rather than in this process, because the
-  // one-shot path genuinely is a fresh process per attempt; the test passes
-  // its path via `AGY_FIXTURE_TIMEOUT_ONCE_FILE`.
-  const onceErrors = {
-    TIMEOUT_ONCE: 'timeout waiting for response',
-    CONTEXT_CANCELED_ONCE: 'context canceled',
-    STREAM_INTERRUPTED_ONCE: 'The stream was interrupted. Please continue the task you were working on.',
-  };
-  if (onceErrors[prompt]) {
-    const stateFile = process.env.AGY_FIXTURE_TIMEOUT_ONCE_FILE;
-    if (stateFile && !fs.existsSync(stateFile)) {
-      fs.writeFileSync(stateFile, 'seen');
-      emitErrorResult(onceErrors[prompt]);
-      done();
+    if (text === 'CRASH_BETWEEN_TURNS') {
+      notifyUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 2 } },
+      });
+      setTimeout(() => process.exit(1), 50);
       return;
     }
-    // Falls through to the normal echo turn below once the state file exists.
-  }
 
-  // Mirrors a permanently wedged conversation, captured live: replaying a turn
-  // against a specific `--conversation <id>` twice outside PocketAgent, both
-  // times, finished in a few seconds with the model's answer already in
-  // `result.response` — yet `result.status` was `ERROR`/`"context canceled"`
-  // and `result.duration_seconds` sat above 600 and climbed by wall-clock time
-  // rather than either replay's own runtime, pointing at a deadline attached
-  // to the conversation itself. No amount of retrying that same
-  // `--conversation` id ever succeeds; only dropping it for a fresh one does —
-  // this fixture fails whenever a `--conversation` was actually passed, and
-  // answers normally the moment one isn't (see `AgySession`'s
-  // conversation-reset path, which discards the child bound to that id).
-  if (prompt === 'WEDGED_CONVERSATION' && providedConversationId) {
-    if (wantInit) emitInit(['run_command']);
-    emitErrorResult('context canceled', { response: 'OK', duration_seconds: 608.19, num_turns: 7 });
-    done();
-    return;
-  }
+    if (text === 'DANGLING_TOOL_ERROR') {
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: `call_dangle_err_${turnCounter}`,
+        name: 'run_command',
+        rawInput: { CommandLine: 'echo fail' },
+        status: 'in_progress',
+        kind: 'execute',
+        title: 'echo fail',
+      });
+      // No terminal tool_call_update — turn fails outright.
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        error: { code: -32000, message: 'tool execution aborted' },
+      });
+      return;
+    }
 
-  // agy's own backend retries (`run.go`: "Run: attempt N failed (INTERNAL
-  // (code 500)…), retrying"), captured on session Q5NDdfjcLPiU: the run
-  // recovered and answered, yet `result` still said ERROR with the last stale
-  // retry message. `_RECOVERED` ends on the answer; `_EXHAUSTED` ends on the
-  // error step, which is what a run that really failed looks like in agy's
-  // own conversation store.
-  const apiRetryErrors = {
-    API_ERRORS_RECOVERED: 'API error (attempt 4): INTERNAL (code 500): Internal error encountered.',
-    API_503_RECOVERED: 'API error (attempt 2): UNAVAILABLE (code 503): The service is currently unavailable.',
-    API_ERRORS_EXHAUSTED: 'API error (attempt 5): INTERNAL (code 500): Internal error encountered.',
-    // Session MUXt_8g_lMFy: agy continued an interrupted stream itself, then
-    // reported the stale continuation text on every later run.
-    STREAM_INTERRUPTED_RECOVERED: 'The stream was interrupted. Please continue the task you were working on.',
-  };
-  if (apiRetryErrors[prompt]) {
-    if (wantInit) emitInit(['run_command']);
-    const answer = `echo: ${prompt}`;
-    emitText(answer);
-    if (prompt === 'API_ERRORS_EXHAUSTED') {
-      emit({
-        event: 'step_update',
-        step_update: { conversation_id: conversationId, step_index: 4, state: 'DONE', step_type: 'error_message' },
+    if (text === 'DANGLING_READ_END_TURN') {
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: `call_dangle_read_${turnCounter}`,
+        name: 'read_file',
+        rawInput: { Path: '/tmp/foo.txt' },
+        status: 'in_progress',
+        kind: 'read',
+        title: 'File foo.txt',
+      });
+      // Non-execute tool with no terminal update, followed by normal end_turn.
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'done reading' },
+      });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } },
+      });
+      return;
+    }
+
+    if (text === 'QUOTA') {
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        error: {
+          code: -32000,
+          message: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): quota exceeded',
+        },
+      });
+      return;
+    }
+
+    if (text === 'TIMEOUT_ONCE') {
+      const stateFile = process.env.AGY_FIXTURE_TIMEOUT_ONCE_FILE;
+      if (stateFile && !fs.existsSync(stateFile)) {
+        fs.writeFileSync(stateFile, 'seen');
+        send({
+          jsonrpc: '2.0',
+          id: rpcId,
+          error: { code: -32000, message: 'timeout waiting for response' },
+        });
+        return;
+      }
+    }
+
+    if (text === 'SLOW_CANCEL') {
+      await new Promise((resolve) => {
+        const t = setTimeout(() => {
+          activeCancel = null;
+          send({
+            jsonrpc: '2.0',
+            id: rpcId,
+            result: { stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 5 } },
+          });
+          resolve();
+        }, 10_000);
+        activeCancel = () => {
+          clearTimeout(t);
+          activeCancel = null;
+          send({
+            jsonrpc: '2.0',
+            id: rpcId,
+            error: { code: -32800, message: 'request cancelled' },
+          });
+          resolve();
+        };
+      });
+      return;
+    }
+
+    // Emit live session title on the first turn, just like real agy acp.
+    if (turnCounter === 1) {
+      notifyUpdate({
+        sessionUpdate: 'session_info_update',
+        title: `Title for ${text.slice(0, 24)}`,
       });
     }
-    emitErrorResult(apiRetryErrors[prompt], { response: answer, duration_seconds: 42, num_turns: 3 });
-    done();
-    return;
-  }
 
-  // `/help` resolves locally in real agy — no `init` line, no tool step, zero
-  // tokens/duration — captured live against v1.1.12. `fetchInitialCommands()`
-  // sends exactly this and expects exactly this shape.
-  if (prompt === '/help') {
-    emit({
-      event: 'command_result',
-      command: {
-        name: 'help',
-        data: {
-          commands: [
-            { name: 'agents', description: 'List available custom agents' },
-            { name: 'model', description: 'Set a model' },
-            { name: 'usage', aliases: ['quota'], description: 'View model quota usage' },
-          ],
+    if (text === 'NEED_APPROVAL') {
+      const toolCallId = `call_perm_${turnCounter}`;
+      const toolCall = {
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        name: 'run_command',
+        args: { CommandLine: 'echo approved', WaitMsBeforeAsync: 5000 },
+        rawInput: { CommandLine: 'echo approved', WaitMsBeforeAsync: 5000 },
+        status: 'in_progress',
+        kind: 'execute',
+        title: 'echo approved',
+      };
+      notifyUpdate(toolCall);
+
+      let allowed = skipPermissions;
+      if (!skipPermissions) {
+        notifyUpdate({ ...toolCall, sessionUpdate: 'tool_call_update', status: 'pending' });
+        const reply = await requestPermission({ ...toolCall, status: 'pending' });
+        const outcome = reply?.outcome;
+        allowed = outcome?.outcome === 'selected' && outcome?.optionId === 'allow';
+      }
+
+      if (allowed) {
+        notifyUpdate({ ...toolCall, sessionUpdate: 'tool_call_update', status: 'in_progress' });
+        notifyUpdate({
+          ...toolCall,
+          sessionUpdate: 'tool_call_update',
+          status: 'completed',
+          rawOutput: { output: 'approved\n' },
+        });
+        notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ran echo approved' },
+        });
+      } else {
+        notifyUpdate({
+          ...toolCall,
+          sessionUpdate: 'tool_call_update',
+          status: 'failed',
+          rawOutput: { error: 'User denied permission' },
+        });
+        notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'command denied' },
+        });
+      }
+
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 20 } },
+      });
+      return;
+    }
+
+    if (text === 'BACKGROUND_TASK') {
+      const taskFile = process.env.AGY_FIXTURE_BACKGROUND_TASK_FILE;
+      const toolCallId = `call_bg_${turnCounter}`;
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        name: 'run_command',
+        rawInput: { CommandLine: 'sleep 1 && echo bg', WaitMsBeforeAsync: 100 },
+        status: 'in_progress',
+        kind: 'execute',
+        title: 'sleep 1 && echo bg',
+      });
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'started' },
+      });
+      // Resolve turn BEFORE background task completes — matching real agy acp v1.5.14.
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 50, outputTokens: 10 } },
+      });
+      // Complete background task asynchronously while process stays alive between turns.
+      setTimeout(() => {
+        if (taskFile) fs.writeFileSync(taskFile, 'FINISHED');
+        notifyUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          name: 'run_command',
+          status: 'completed',
+          rawOutput: { output: 'bg\n' },
+        });
+        notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Background task finished.' },
+        });
+      }, 250);
+      return;
+    }
+
+    // Default turn: thought + tool_call + tool_call_update + text chunks + per-turn usage.
+    notifyUpdate({
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text: 'thinking about it' },
+    });
+    const callId = `call_${turnCounter}`;
+    notifyUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: callId,
+      name: 'run_command',
+      rawInput: { CommandLine: 'echo hi' },
+      status: 'in_progress',
+      kind: 'execute',
+      title: 'echo hi',
+    });
+    notifyUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      name: 'run_command',
+      status: 'completed',
+      rawOutput: { output: 'hi\n' },
+    });
+    const replyText = `echo: ${text} model=${currentModel}`;
+    notifyUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: replyText },
+    });
+    send({
+      jsonrpc: '2.0',
+      id: rpcId,
+      result: {
+        stopReason: 'end_turn',
+        usage: {
+          inputTokens: 100 + turnCounter,
+          outputTokens: 25,
+          cachedReadTokens: 40,
+          cachedWriteTokens: 0,
         },
       },
     });
-    emitResult({
-      response: '/agents\tList available custom agents\n/model\tSet a model\n/usage (quota)\tView model quota usage\n',
-      duration_seconds: 0,
-      num_turns: 0,
-      usage: { input_tokens: 0, output_tokens: 0 },
-    });
-    done();
-    return;
   }
-
-  // Any other slash command agy answers itself. Reached only through the
-  // one-shot path, because `AgySession.runSlashTurn` is what sends it — the
-  // real CLI refuses a slash command on the stream-json input entirely.
-  if (prompt.startsWith('/')) {
-    emitResult({ response: `handled ${prompt} locally`, duration_seconds: 0, num_turns: 0 });
-    done();
-    return;
-  }
-
-  // Stands in for agy's own background tasks: `run_command` converts anything
-  // still running past `WaitMsBeforeAsync` into a task that the *turn* does
-  // not wait for. The timer here outlives the turn exactly as such a task
-  // does, so it only ever fires if the process is still alive afterwards —
-  // which is precisely the regression this fixture exists to catch.
-  if (prompt === 'BACKGROUND_TASK') {
-    const taskFile = process.env.AGY_FIXTURE_BACKGROUND_TASK_FILE;
-    if (taskFile) {
-      setTimeout(() => {
-        try {
-          fs.writeFileSync(taskFile, 'FINISHED');
-        } catch {
-          /* the test already tore down */
-        }
-      }, 500);
-    }
-    emitResult({ response: 'Started it in the background; waiting for it to finish.' });
-    done();
-    return;
-  }
-
-  // `invoke_subagent`'s real shape, captured live: its own step marks itself
-  // `DONE` almost immediately (a premature "launched" acknowledgment, not the
-  // sub-agent's actual completion — see `normalizeAgyStepUpdate`'s doc
-  // comment), well before the turn's `result` line, which is delayed here to
-  // give a test room to observe "still pending" in between.
-  if (prompt === 'SUBAGENT') {
-    const subagentInfo = {
-      subagents: [
-        {
-          type_name: 'self',
-          role: 'File Writer',
-          initial_prompt: 'write stuff',
-          conversation_id: 'sub-1',
-          log_uri: 'file:///tmp/sub-1/transcript.jsonl',
-        },
-      ],
-    };
-    for (const state of ['ACTIVE', 'DONE']) {
-      emit({
-        event: 'step_update',
-        step_update: {
-          conversation_id: conversationId,
-          step_index: 1,
-          state,
-          step_type: 'subagent',
-          tool_name: 'invoke_subagent',
-          subagent_info: subagentInfo,
-        },
-      });
-    }
-    setTimeout(() => {
-      emitText('The sub-agent finished.');
-      emitResult({ response: 'The sub-agent finished.', duration_seconds: 0.2 });
-      done();
-    }, 150);
-    return;
-  }
-
-  if (wantInit) emitInit(['run_command', 'view_file']);
-
-  emit({
-    event: 'step_update',
-    step_update: {
-      conversation_id: conversationId,
-      step_index: 1,
-      state: 'ACTIVE',
-      step_type: 'tool',
-      tool_name: 'run_command',
-      tool_info: { name: 'run_command', parameters: { CommandLine: 'echo hi' } },
-    },
-  });
-  emit({
-    event: 'step_update',
-    step_update: {
-      conversation_id: conversationId,
-      step_index: 1,
-      state: 'DONE',
-      step_type: 'tool',
-      tool_name: 'run_command',
-      tool_info: { name: 'run_command', parameters: { CommandLine: 'echo hi' }, output: 'hi\n' },
-    },
-  });
-
-  const respond = () => {
-    // Echoes the `--model` flag (when present) into the response text, so a
-    // test can confirm `AgySession.setModel()` actually reached the *next*
-    // child's argv rather than just recording it internally.
-    const text = model ? `echo: ${prompt} model=${model}` : `echo: ${prompt}`;
-    emitText(text);
-    emitResult({ response: text });
-    done();
-  };
-
-  if (prompt === 'SLOW') {
-    // Long enough for a test to call interrupt()/terminate() before this fires.
-    setTimeout(respond, 5000);
-  } else {
-    respond();
-  }
-}
-
-function emitText(text) {
-  emit({
-    event: 'step_update',
-    step_update: {
-      conversation_id: conversationId,
-      step_index: 3,
-      state: 'DONE',
-      step_type: 'agent_response',
-      text_delta: text,
-    },
-  });
 }

@@ -57,9 +57,8 @@ export interface AgentAdapter {
   /**
    * Which structured engine drives this adapter's `structured` transport.
    * Undefined (the default) means the Claude Agent SDK, via `StructuredSession`.
-   * `'agy-cli'` means `AgySession`, which spawns the `agy` CLI's headless
-   * `stream-json` mode fresh for each turn instead of holding one SDK query
-   * open. `'opencode-server'` means `OpencodeSession`, talking HTTP + SSE to
+   * `'agy-cli'` means `AgySession`, which holds one long-lived `agy acp`
+   * JSON-RPC stdio server process per session. `'opencode-server'` means `OpencodeSession`, talking HTTP + SSE to
    * one `opencode serve` process shared across every opencode session.
    * `'codex-app-server'` means `CodexSession`, talking JSON-RPC over stdio to
    * one shared `codex app-server` process. `'pi-rpc'` means `PiSession`,

@@ -4138,30 +4138,52 @@ These are load-bearing. Several were bugs first.
 - **A project is an added folder, or a directory inside one.** Chats in a directory outside
   every folder are not listed, so removing a folder actually removes it. Nothing is deleted;
   re-adding brings its chats back.
-- **An `agy` session is one long-lived process, and a turn ending must never end it.**
-  `AgySession` drives the CLI with `--input-format stream-json` — agy's own documented
-  "so a driver can keep a session open" mode — writing one NDJSON prompt per turn to a
-  child that outlives every turn. It used to spawn `agy -p <prompt>` per turn, and that
-  silently destroyed work: agy converts any `run_command` still running past the model's
-  `WaitMsBeforeAsync` (the model routinely passes 10s) into a background task, the model
-  will happily end its turn while one is still `RUNNING` ("waiting for the tests to
-  finish"), and the process exiting cancelled it — `Cancelling steps [614]` / `CLI store
-  manager shutting down` in agy's own log, with a two-minute `pnpm test` killed 71s in and
-  the session left idle insisting it was still waiting. Holding the process open also
-  makes agy *defer* the turn's `result` until its background tasks drain (confirmed
-  against v1.2.6: a 150s task held the turn open 152.7s, where the same probe under `-p`
-  ended the turn in 5.8s and killed the task), so `busy` is finally honest. Three things
-  follow. A slash command must go out as its own one-shot `--print` invocation, because
-  agy answers those itself and refuses them on the stream ("run it as its own
-  `--print /x` invocation") — and the check for one must not match a leading absolute
-  path, or an ordinary prompt silently loses the guarantee. `--model` is spawn-time only,
-  so a switch recycles the child *between* turns (`respawnBeforeNextTurn`) rather than
-  killing the running turn's background work. And `result` figures are
-  **conversation-cumulative** on a held-open process rather than per-turn, so
-  `makeStatsPerTurn` converts them or every turn footer after the first reports growing
-  nonsense. Asserted in `apps/server/tests/agy-session.test.ts`, whose fixture
-  deliberately stays alive across turns so a regression to per-turn processes fails a
-  test rather than passing quietly.
+- **An `agy` session is one long-lived ACP process (`agy acp`), and a turn ending must never end it.**
+  `AgySession` drives the CLI over its Agent Client Protocol stdio server (`agy acp --add-dir <cwd>`),
+  speaking newline-delimited JSON-RPC 2.0 on one child process that outlives every turn (replacing
+  the older `--input-format stream-json` headless print-mode driver in PA-181). Four properties are
+  load-bearing:
+  1. **Real approval gate (off by default) and honest disclosure:** `--dangerously-skip-permissions`
+     is passed *only* when `spec.skipPermissions` is true (`agents/agy.ts` no longer sets
+     `forcesSkipPermissions`). When off, `agy acp` sends server-initiated `session/request_permission`
+     requests that park indefinitely in `AgySession.pending` until answered via `resolvePermission`
+     — no timeout. Two upstream `agy` policies are enforced/disclosed in code rather than left
+     silent:
+     - `agy acp`'s `default` mode still honours `~/.gemini/antigravity-cli/settings.json` (and
+       `session/set_mode(default)` does not override it). At spawn (and on respawn),
+       `readAgySettingsAutoApprove` reads `settings.json` read-only and fails closed: any
+       configured `toolPermission` other than known supervised values (`"request-review"`,
+       `"strict"`, or unset) sets `bypassedBySettings` for honest disclosure
+       (`skipPermissionsEnabled: true`, persisted `skip_permissions = 1`, and a startup warning
+       naming the file and key) **without** adding `--dangerously-skip-permissions` to `agy`'s
+       argv (preserving e.g. `proceed-in-sandbox` bounds).
+     - `agy` auto-approves file edits inside the project workspace in all modes (only terminal
+       commands and non-workspace file access prompt). `createAgyAdapter` sets `providerDisclosure`
+       so this is shown persistently on the session and in the new-session, cron, and webhook
+       editors.
+     - `--dangerously-skip-permissions` is spawn-time only so `applyGlobalSkipPermissions` is a
+       no-op (same posture as terminal sessions).
+  2. **Background tasks survive turns and keep `busy` honest:** `agy acp` resolves `session/prompt`
+     with `end_turn` while a background `run_command` is still running, keeps the task alive because
+     the process stays up, and pushes reactive `session/update` notifications asynchronously when it
+     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`, pruning non-`execute`
+     calls at `end_turn` and clearing all entries on turn error/retry so stale ids cannot strand
+     `busy`) and idle reactive streaming (`idleFlushTimer`) in `updateBusy()`. When `busy` flips
+     `true -> false`, `AgySession` emits `'idle'`, which `SessionManager` maps to `notifyTreeIdle`
+     so `RunQueue` wakes immediately after background work drains. `POST /api/admin/restart` drain
+     (`midTurnSessions`) sees the session as busy while background work runs, and `interrupt()`
+     cancels reactive work and parked permissions (emitting `permission_resolved`).
+  3. **Bounded handshake and no leaked children:** `initialize` and `session/new` / `session/resume`
+     are bounded by `handshakeTimeoutMs` (default 15s), and any failed or timed-out handshake
+     immediately kills the spawned child process.
+  4. **Live session API & workspace binding:** `session/new` / `session/resume` provide the
+     conversation UUID (matching `~/.gemini/antigravity-cli/brain/<id>/`) and model catalog,
+     `available_commands_update` advertises slash commands, `session/set_model` switches models
+     live without respawning, `session_info_update` pushes AI-generated titles live (also persisted
+     to `annotations/<id>.pbtxt` and `conversation_summaries.db`), `session/prompt` returns
+     per-turn token usage directly, and `--add-dir <cwd>` binds agy to the session's directory.
+     Asserted in `apps/server/tests/agy-session.test.ts` against a long-lived fake ACP stdio
+     server fixture.
 - **`cols`/`rows` are `nonnegative()`, not `positive()`** — a structured session has no
   character grid and reports 0. Requiring a positive value silently invalidated every
   `attached` frame for structured sessions.

@@ -1,26 +1,24 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { AgentAdapter } from './types.js';
 import { resolveExecutable } from './registry.js';
 import { normalizeAgyModelList } from '../sessions/normalize.js';
 
 /**
- * Google's Antigravity CLI (`agy`), driven only over the `structured`
- * transport via its headless `--output-format stream-json` mode.
+ * Google's Antigravity CLI (`agy`), driven over the `structured` transport via
+ * its Agent Client Protocol stdio server (`agy acp`).
  *
  * There is deliberately no `terminal` entry in `transports`: `agy`'s
  * interactive TUI works fine over a PTY, but this adapter exists specifically
- * to get the native tool-card UI, and print mode is the only surface that
- * emits machine-readable events.
+ * to get the native tool-card UI and button-driven approval sheet.
  *
- * That same print mode is why `forcesSkipPermissions` is `true` and not just
- * `supportsSkipPermissions`: probing the real CLI (v1.1.12) shows every
- * headless run reports `"permission_mode":"always-proceed"` — with or without
- * `--dangerously-skip-permissions`, and regardless of `--mode` — because print
- * mode has no stdin channel to pause on. There is no synchronous approval
- * gate to wire `canUseTool` into, so unlike Claude's adapter this can never
- * offer the normal off-by-default behaviour; every session this starts is
- * bypassed from birth, and the client must say so permanently rather than
- * offer a checkbox that implies an off state which does not exist. See
- * `AgySession` for the long-lived subprocess model this implies.
+ * Over ACP, `agy` supports a real approval gate via `session/request_permission`
+ * when started without `--dangerously-skip-permissions`, so `supportsSkipPermissions`
+ * is a genuine per-session opt-in (off by default) rather than forced. Note that
+ * `agy acp`'s `default` mode still respects `~/.gemini/antigravity-cli/settings.json`
+ * (`toolPermission: "always-proceed"` auto-approves tools even without the CLI flag).
+ * See `AgySession` for the long-lived ACP subprocess model.
  */
 /**
  * Force `agy`'s `CompositeTokenStorage` onto its file-based token store
@@ -51,15 +49,78 @@ export function agyFileTokenStorageEnv(
   };
 }
 
+/**
+ * Values of `toolPermission` in `~/.gemini/antigravity-cli/settings.json`
+ * known to ask for approval before running terminal commands. Anything else
+ * (`always-proceed`, `proceed-in-sandbox`, `custom`, or any future/unknown
+ * value) fails closed and is disclosed as potentially auto-approving so a
+ * bypassed session is never shown as supervised. Confirmed live against
+ * agy 1.5.14: `session/set_mode(default)` does not override `settings.json`.
+ */
+const AGY_SUPERVISED_POLICIES = new Set(['request-review', 'strict']);
+
+export interface AgySettingsAutoApproveInfo {
+  autoApproves: boolean;
+  toolPermission: string | null;
+  settingsPath: string;
+}
+
+/**
+ * Format the startup warning shown when agy's `settings.json` carries a
+ * non-supervised `toolPermission` value.
+ */
+export function formatAgySettingsAutoApproveNotice(info: AgySettingsAutoApproveInfo): string {
+  const value = info.toolPermission ?? 'unknown';
+  return `agy's ${info.settingsPath} sets toolPermission: "${value}", so agy may auto-approve commands on its own without PocketAgent's approval gate. Change toolPermission to "request-review" or "strict" (or remove it) to require PocketAgent approval.`;
+}
+
+/**
+ * Read agy's `settings.json` read-only to detect whether host-level
+ * `toolPermission` may auto-approve commands even when PocketAgent starts
+ * `agy acp` without `--dangerously-skip-permissions`. Fails closed for any
+ * configured value other than known supervised modes (`request-review`,
+ * `strict`). Never throws.
+ */
+export function readAgySettingsAutoApprove(opts: {
+  settingsPath?: string;
+  homeDir?: string;
+} = {}): AgySettingsAutoApproveInfo {
+  const settingsPath =
+    opts.settingsPath ??
+    path.join(opts.homeDir || os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+  try {
+    const raw = fs.readFileSync(settingsPath, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { autoApproves: false, toolPermission: null, settingsPath };
+    }
+    const tp = (parsed as Record<string, unknown>).toolPermission;
+    if (typeof tp !== 'string' || !tp.trim()) {
+      return { autoApproves: false, toolPermission: null, settingsPath };
+    }
+    const normalized = tp.trim().toLowerCase();
+    return {
+      autoApproves: !AGY_SUPERVISED_POLICIES.has(normalized),
+      toolPermission: tp.trim(),
+      settingsPath,
+    };
+  } catch {
+    return { autoApproves: false, toolPermission: null, settingsPath };
+  }
+}
+
+export const AGY_EDIT_APPROVAL_DISCLOSURE =
+  'Antigravity CLI (agy) auto-approves file edits inside the project folder; terminal commands ask for approval unless skip-permissions or ~/.gemini/antigravity-cli/settings.json toolPermission overrides it.';
+
 export function createAgyAdapter(bin: string): AgentAdapter {
   return {
     id: 'agy',
     displayName: 'Antigravity CLI',
-    description: 'Google Antigravity CLI (agy), structured — no approval gate in this mode',
+    description: 'Google Antigravity CLI (agy), structured via ACP',
     transports: ['structured'],
     defaultTransport: 'structured',
     supportsSkipPermissions: true,
-    forcesSkipPermissions: true,
+    providerDisclosure: AGY_EDIT_APPROVAL_DISCLOSURE,
     structuredKind: 'agy-cli',
 
     buildCommand() {

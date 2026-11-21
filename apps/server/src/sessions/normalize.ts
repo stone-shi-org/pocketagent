@@ -429,230 +429,190 @@ function stringifyToolResult(content: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// agy (Google Antigravity CLI) — headless `agy --output-format stream-json`
+// agy (Google Antigravity CLI) — Agent Client Protocol (`agy acp`)
 // ---------------------------------------------------------------------------
 
 /**
- * Translate one line of `agy --output-format stream-json` output into zero or
- * more normalized events.
+ * Translate one ACP `session/update` payload (`params.update`) from `agy acp`
+ * into zero or more normalized events.
  *
- * Shapes below were captured against the real CLI (v1.1.12): each line is
- * `{"event": "init" | "step_update" | "result", ...}`. Kept pure and
- * defensive for the same reason as `normalizeSdkMessage` — an unrecognized
- * shape (a future agy version, or a line this parser has not seen) must
- * return `[]`, never throw and never take down `AgySession`'s pump loop.
+ * Shapes below were captured against the real CLI (v1.5.14): each update
+ * carries `sessionUpdate: "agent_message_chunk" | "agent_thought_chunk" |
+ * "tool_call" | "tool_call_update" | "available_commands_update" |
+ * "session_info_update" | "usage_update" | "current_mode_update" |
+ * "config_option_update" | "plan"`. Kept pure and defensive for the same
+ * reason as `normalizeSdkMessage` — an unrecognized shape must return `[]`,
+ * never throw, and never take down `AgySession`'s pump loop.
  */
-export function normalizeAgyMessage(message: unknown): AgentEvent[] {
-  if (!isRecord(message)) return [];
-  const event = str(message.event);
+export function normalizeAgyAcpUpdate(
+  update: unknown,
+  opts: { messageId?: string; thoughtId?: string } = {},
+): AgentEvent[] {
+  if (!isRecord(update)) return [];
+  const kind = str(update.sessionUpdate);
 
-  switch (event) {
-    case 'init':
-      return normalizeAgyInit(message);
-    case 'step_update':
-      return normalizeAgyStepUpdate(message);
-    case 'result':
-      return normalizeAgyResult(message);
-    case 'command_result':
-      return normalizeAgyCommandResult(message);
+  switch (kind) {
+    case 'agent_message_chunk': {
+      const text = extractAcpChunkText(update.content);
+      if (!text) return [];
+      return [{ kind: 'text_delta', id: opts.messageId ?? 'agy_msg', text }];
+    }
+    case 'agent_thought_chunk': {
+      const text = extractAcpChunkText(update.content);
+      if (!text) return [];
+      return [{ kind: 'thinking_delta', id: opts.thoughtId ?? 'agy_thought', text }];
+    }
+    case 'tool_call':
+      return normalizeAgyAcpToolCall(update);
+    case 'tool_call_update':
+      return normalizeAgyAcpToolCallUpdate(update);
+    case 'available_commands_update': {
+      const commands = normalizeSlashCommands(update.availableCommands);
+      return [{ kind: 'commands_available', commands }];
+    }
     default:
+      // `session_info_update`, `usage_update`, `current_mode_update`,
+      // `config_option_update`, `plan`, and any future update types are either
+      // handled directly by `AgySession` or ignored safely here.
       return [];
   }
 }
 
-/**
- * agy resolves `/help` (and other built-ins) locally — confirmed live
- * (v1.1.12): zero tokens, zero duration, no model turn — and reports it as
- * `{"event":"command_result","command":{"name":"help","data":{"commands":[...]}}}`.
- * Only `/help`'s own `data.commands` matches `SlashCommandInfo[]`; every other
- * command name's `data` means something else entirely (`/agents` lists
- * subagents, `/model` lists models, ...) and must not be misread as one.
- * `AgySession.fetchInitialCommands()` runs `/help` once, silently, at start
- * for exactly this event; this same case also fires if a user types `/help`
- * themselves mid-conversation, keeping the picker's list fresh for free.
- */
-function normalizeAgyCommandResult(message: Record<string, unknown>): AgentEvent[] {
-  const command = isRecord(message.command) ? message.command : null;
-  if (!command || str(command.name) !== 'help') return [];
-  const data = isRecord(command.data) ? command.data : null;
-  if (!data) return [];
-  return [{ kind: 'commands_available', commands: normalizeSlashCommands(data.commands) }];
+function extractAcpChunkText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (isRecord(content) && str(content.type) === 'text') {
+    return str(content.text) ?? '';
+  }
+  return '';
 }
 
-function normalizeAgyInit(message: Record<string, unknown>): AgentEvent[] {
-  const init = isRecord(message.init) ? message.init : {};
+function extractAcpLocationPath(locations: unknown): string | null {
+  if (!Array.isArray(locations)) return null;
+  for (const loc of locations) {
+    if (isRecord(loc)) {
+      const p = str(loc.path);
+      if (p) return p;
+    }
+  }
+  return null;
+}
+
+function normalizeAgyAcpToolCall(update: Record<string, unknown>): AgentEvent[] {
+  const id = str(update.toolCallId);
+  if (!id) return [];
+  const name = str(update.name) ?? 'tool';
+  const input = isRecord(update.rawInput)
+    ? update.rawInput
+    : isRecord(update.args)
+      ? update.args
+      : {};
+  const filePath = extractAgyPath(input) ?? extractAcpLocationPath(update.locations);
+  const summary = summarizeAgyTool(name, input) || str(update.title) || name;
   return [
     {
-      kind: 'session_started',
-      agentSessionId: str(message.conversation_id) ?? null,
-      // The `init` line carries no model field — `--model`/`models` live
-      // outside the event stream — so this stays null rather than guessing.
-      model: null,
-      cwd: str(init.cwd) ?? '',
-      tools: Array.isArray(init.tools) ? init.tools.filter(isString) : [],
-      permissionMode: str(init.permission_mode) ?? null,
+      kind: 'tool_use',
+      id,
+      name,
+      input,
+      summary,
+      filePath,
     },
   ];
 }
 
-function normalizeAgyStepUpdate(message: Record<string, unknown>): AgentEvent[] {
-  const update = isRecord(message.step_update) ? message.step_update : null;
-  if (!update) return [];
-
-  const stepType = str(update.step_type);
-  const conversationId = str(update.conversation_id) ?? '';
-  const stepIndex = num(update.step_index) ?? 0;
-  const stepId = `agy_${conversationId}_${stepIndex}`;
-
-  if (stepType === 'agent_response') {
-    const text = str(update.text_delta) ?? '';
-    if (!text) return [];
-    return [{ kind: 'text_delta', id: stepId, text }];
+function normalizeAgyAcpToolCallUpdate(update: Record<string, unknown>): AgentEvent[] {
+  const id = str(update.toolCallId);
+  if (!id) return [];
+  const status = str(update.status);
+  // `pending` (before permission approval) and `in_progress` (after approval)
+  // are intermediate lifecycle transitions, not completed tool results.
+  if (status !== 'completed' && status !== 'failed' && status !== 'cancelled') {
+    return [];
   }
 
-  if (stepType === 'tool') {
-    const toolInfo = isRecord(update.tool_info) ? update.tool_info : {};
-    const name = str(update.tool_name) ?? str(toolInfo.name) ?? 'tool';
-    const input = isRecord(toolInfo.parameters) ? toolInfo.parameters : {};
-
-    if (str(update.state) === 'DONE') {
-      const error = isRecord(toolInfo.error) ? toolInfo.error : null;
-      const output = str(toolInfo.output) ?? (error ? str(error.message) ?? '' : '');
-      return [
-        {
-          kind: 'tool_result',
-          id: `agy_tr_${conversationId}_${stepIndex}`,
-          toolUseId: stepId,
-          content: clamp(output, MAX_RESULT_CHARS),
-          truncated: output.length > MAX_RESULT_CHARS,
-          isError: error !== null,
-        },
-      ];
-    }
-
-    // Any non-DONE state (only "ACTIVE" observed) is the call starting.
-    return [
-      {
-        kind: 'tool_use',
-        id: stepId,
-        name,
-        input,
-        summary: summarizeAgyTool(name, input),
-        filePath: extractAgyPath(input),
-      },
-    ];
-  }
-
-  /**
-   * agy's real sub-agent launcher (`invoke_subagent`) — confirmed live by
-   * running `agy --output-format stream-json` directly, bypassing this
-   * normalizer entirely: it does NOT arrive as `step_type: 'tool'` the way
-   * every other tool call does. It gets its own step type, with a payload
-   * shaped nothing like `tool_info` — `subagent_info.subagents[]`, each
-   * `{role, initial_prompt, conversation_id, log_uri}`. Before this, that
-   * shape fell straight through to the catch-all below and vanished: no
-   * `tool_use`, so no fleet-view sub-agent chip and no tool card in the
-   * normal transcript either, even though the sub-agent genuinely ran
-   * (confirmed by checking the file it was asked to write).
-   *
-   * Only the `ACTIVE` half is handled here, deliberately — this step's own
-   * `DONE` (same `step_index`, moments later) is a second trap layered on
-   * the first: confirmed live with a real ~15s background task that it is
-   * *not* the subagent actually finishing, only the `invoke_subagent` call
-   * itself returning (fire-and-forget, same shape as Claude's `Agent` tool's
-   * premature "launched" acknowledgment). agy pushes no equivalent of
-   * Claude's `task_notification` for the real completion — the model can
-   * poll `manage_subagents` for status, but nothing says so unprompted — so
-   * `AgySession` resolves these itself against the one boundary that *is*
-   * reliable: the turn's own `result` line, since a turn observed live did
-   * not end until the background subagent genuinely finished. See
-   * `AgySession`'s `pendingSubagents`.
-   */
-  if (stepType === 'subagent') {
-    if (str(update.state) === 'DONE') return [];
-
-    const info = isRecord(update.subagent_info) ? update.subagent_info : {};
-    const subagents = Array.isArray(info.subagents) ? info.subagents : [];
-
-    return subagents
-      .map((raw, i): AgentEvent | null => {
-        if (!isRecord(raw)) return null;
-        const subConversationId = str(raw.conversation_id) ?? `${stepId}_${i}`;
-        const input = { role: str(raw.role) ?? '', prompt: str(raw.initial_prompt) ?? '' };
-        return {
-          kind: 'tool_use',
-          id: `agy_sub_${subConversationId}`,
-          name: 'invoke_subagent',
-          input,
-          summary: summarizeAgyTool('invoke_subagent', input),
-          filePath: null,
-        };
-      })
-      .filter((e): e is AgentEvent => e !== null);
-  }
-
-  // user_input / checkpoint / unknown step types are internal bookkeeping —
-  // we synthesize our own `user_prompt` event in `AgySession.prompt()`, and
-  // the rest has nothing worth showing.
-  return [];
+  const output = extractAcpToolOutput(update);
+  return [
+    {
+      kind: 'tool_result',
+      id: `agy_tr_${id}`,
+      toolUseId: id,
+      content: clamp(output, MAX_RESULT_CHARS),
+      truncated: output.length > MAX_RESULT_CHARS,
+      isError: status === 'failed' || status === 'cancelled',
+    },
+  ];
 }
 
-function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
-  const result = isRecord(message.result) ? message.result : {};
-  const usage = isRecord(result.usage) ? result.usage : {};
-  const status = str(result.status);
-  const durationSeconds = num(result.duration_seconds);
-  const isError = status !== undefined && status !== 'SUCCESS';
-  const errorText = str(result.error);
-
-  const events: AgentEvent[] = [];
-  // agy's own reason for a failed turn (e.g. a quota-exhausted
-  // "Eligibility check failed: RESOURCE_EXHAUSTED..." from the Antigravity
-  // backend) lives in this JSON field, not on stderr — confirmed live via
-  // the `/usage` poller hitting the same shape. Without surfacing it here,
-  // the process exiting non-zero moments later falls back to the opaque
-  // `agy exited with code 1` in `AgySession.runTurn`, discarding the one
-  // piece of text that actually explains what happened.
-  if (isError && errorText) {
-    if (isAgyQuotaError(errorText)) {
-      // agy's structured stream names the exhaustion but does not include its
-      // reset time. The browser fills that one field from the existing,
-      // account-level `/usage` cache without guessing from error prose.
-      events.push({ kind: 'rate_limit', provider: 'agy', resetsAt: null, limitType: null, resetsAtLabel: null });
-    }
-    if (!isAgyStreamCancelledError(errorText)) {
-      events.push({ kind: 'notice', level: 'error', text: errorText });
-    }
+function extractAcpToolOutput(update: Record<string, unknown>): string {
+  if (isRecord(update.rawOutput)) {
+    const out = str(update.rawOutput.output);
+    if (out !== undefined) return out;
+    const err = str(update.rawOutput.error);
+    if (err !== undefined) return err;
+    const msg = str(update.rawOutput.message);
+    if (msg !== undefined) return msg;
+    const keys = Object.keys(update.rawOutput);
+    if (keys.length > 0) return JSON.stringify(update.rawOutput);
+  } else if (typeof update.rawOutput === 'string') {
+    return update.rawOutput;
   }
-  events.push({
-    kind: 'turn_complete',
-    stopReason: status ?? null,
-    isError,
-    numTurns: num(result.num_turns),
-    durationMs: durationSeconds !== null ? Math.round(durationSeconds * 1000) : null,
-    // Headless agy reports token counts, never a dollar figure.
-    costUsd: null,
-    inputTokens: num(usage.input_tokens),
-    outputTokens: num(usage.output_tokens),
-    completedAt: Date.now(),
-  });
-  return events;
+
+  if (Array.isArray(update.content)) {
+    const parts: string[] = [];
+    for (const item of update.content) {
+      if (!isRecord(item)) continue;
+      const itemType = str(item.type);
+      if (itemType === 'content' && isRecord(item.content)) {
+        const t = str(item.content.text);
+        if (t) parts.push(t);
+      } else if (itemType === 'diff') {
+        const diffPath = str(item.path);
+        parts.push(diffPath ? `Updated ${diffPath}` : 'Updated file');
+      } else if (itemType === 'text') {
+        const t = str(item.text);
+        if (t) parts.push(t);
+      }
+    }
+    if (parts.length > 0) return parts.join('\n');
+  }
+
+  return '';
 }
 
-function isAgyQuotaError(error: string): boolean {
+/**
+ * Parse `models.availableModels` from `agy acp`'s `session/new` or
+ * `session/resume` response into PocketAgent's `ModelInfo[]`.
+ */
+export function normalizeAgyAcpModels(models: unknown): ModelInfo[] {
+  if (!isRecord(models) || !Array.isArray(models.availableModels)) return [];
+  const result: ModelInfo[] = [];
+  for (const raw of models.availableModels) {
+    if (!isRecord(raw)) continue;
+    const value = str(raw.modelId);
+    const displayName = str(raw.name) ?? value;
+    if (!value || !displayName) continue;
+    result.push({
+      value,
+      displayName,
+      description: str(raw.description) ?? '',
+      supportsEffort: false,
+      supportedEffortLevels: [],
+    });
+  }
+  return result;
+}
+
+export function isAgyQuotaError(error: string): boolean {
   return /\bresource_exhausted\b|\bquota\b|\bcode\s*429\b|\brate[ -]?limit(?:ed)?\b/i.test(error);
-}
-
-function isAgyStreamCancelledError(error: string): boolean {
-  return /stream input cancel/i.test(error);
 }
 
 /**
  * A short human sentence for one of agy's own tool names.
  *
  * Kept separate from `summarizeToolUse`: agy's tool surface (`run_command`,
- * `write_to_file`, `view_file`, ...) does not overlap with Claude Code's, and
- * conflating the two switch statements would make either one harder to read.
+ * `write_file`/`write_to_file`, `read_file`/`view_file`, ...) does not overlap
+ * with Claude Code's, and conflating the two switch statements would make
+ * either one harder to read.
  */
 export function summarizeAgyTool(name: string, input: Record<string, unknown>): string {
   const file = extractAgyPath(input);
@@ -660,15 +620,18 @@ export function summarizeAgyTool(name: string, input: Record<string, unknown>): 
 
   switch (name) {
     case 'run_command': {
-      const cmd = str(input.CommandLine) ?? '';
+      const cmd = str(input.CommandLine) ?? str(input.command) ?? '';
       return cmd ? `Run ${clamp(cmd.split('\n')[0] ?? cmd, 80)}` : 'Run command';
     }
     case 'view_file':
+    case 'read_file':
       return base ? `Read ${base}` : 'Read file';
     case 'write_to_file':
+    case 'write_file':
       return base ? `Write ${base}` : 'Write file';
     case 'replace_file_content':
     case 'multi_replace_file_content':
+    case 'edit_file':
     case 'sed_file':
       return base ? `Edit ${base}` : 'Edit file';
     case 'list_dir':
@@ -685,14 +648,9 @@ export function summarizeAgyTool(name: string, input: Record<string, unknown>): 
     case 'ask_permission':
     case 'ask_question':
       return 'Asking a question';
-    // agy's real sub-agent launcher — confirmed live via `agy --output-format
-    // stream-json` directly (bypassing normalization entirely): it does NOT
-    // appear as an ordinary tool step at all, see `normalizeAgyStepUpdate`'s
-    // `step_type === 'subagent'` branch, which is what actually calls this
-    // with `{role, prompt}` synthesized from that different event shape.
     case 'invoke_subagent': {
-      const role = str(input.role);
-      const prompt = str(input.prompt);
+      const role = str(input.role) ?? str(input.Role);
+      const prompt = str(input.prompt) ?? str(input.Prompt);
       return `Subagent: ${clamp(role || prompt || '', 60)}`;
     }
     default: {

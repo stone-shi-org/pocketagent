@@ -2,9 +2,22 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
-import type { AgentEvent, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
+import type {
+  AgentEvent,
+  PermissionDecision,
+  PermissionRequestEvent,
+  PromptImage,
+  SessionStatus,
+} from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeAgyMessage, normalizeAgyModelList } from './normalize.js';
+import { formatAgySettingsAutoApproveNotice, readAgySettingsAutoApprove } from '../agents/agy.js';
+import {
+  extractAgyPath,
+  isAgyQuotaError,
+  normalizeAgyAcpModels,
+  normalizeAgyAcpUpdate,
+  summarizeAgyTool,
+} from './normalize.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
 export interface AgySessionSpec {
@@ -17,21 +30,37 @@ export interface AgySessionSpec {
   workspaceLabel: string;
   eventBufferBytes: number;
   createdAt: number;
-  /** agy's own `conversation_id`, to continue via `--conversation`. */
+  /** agy's own conversation UUID, to continue via ACP `session/resume`. */
   resumeAgentSessionId?: string;
   /** Absolute path to the `agy` executable, when not on PATH. */
   executablePath?: string;
-  /** Initial model to use on the first turn, or null/absent for default. */
+  /** Initial model to switch to right after handshake, or absent for default. */
   model?: string;
   /**
-   * Always `true`. Unlike `StructuredSessionSpec.skipPermissions` this is not
-   * a per-session choice — see `agents/agy.ts` for why headless agy has no
-   * approval gate to opt out of bypassing. Kept as a field (rather than a
-   * hardcoded constant read at each call site) purely so this struct has the
-   * same shape as `StructuredSessionSpec` for `SessionInfo.skipPermissionsEnabled`
-   * and the persistent UI banner that reads it.
+   * Explicit, off-by-default opt-in to `--dangerously-skip-permissions`.
+   * Controls the CLI flag ONLY. When false/absent, `agy acp` is spawned
+   * without `--dangerously-skip-permissions`.
    */
-  skipPermissions: true;
+  skipPermissions?: boolean;
+  /**
+   * True when host-level `~/.gemini/antigravity-cli/settings.json` sets a
+   * non-supervised `toolPermission` value while `skipPermissions` was false.
+   * Kept separate from `skipPermissions` so disclosure (`skipPermissionsEnabled`
+   * and persisted `skip_permissions`) is honest WITHOUT escalating agy's argv
+   * to `--dangerously-skip-permissions` (which would strip sandbox bounds from
+   * `proceed-in-sandbox`, etc.).
+   */
+  bypassedBySettings?: boolean;
+  /**
+   * Optional warning notice emitted at session start when agy's host-level
+   * `settings.json` sets a non-supervised `toolPermission` value.
+   */
+  settingsAutoApproveNotice?: string;
+  /**
+   * Optional bound (ms) for the ACP `initialize` + `session/new|resume`
+   * handshake. Defaults to 15_000ms.
+   */
+  handshakeTimeoutMs?: number;
   /**
    * PA-75: the Pocket Agent chat that created this session via
    * `start_subagent_session`, or null for human/trigger sessions.
@@ -39,99 +68,60 @@ export interface AgySessionSpec {
   plannerChatId?: string | null;
 }
 
-/**
- * One in-flight turn on the session's long-lived child.
- *
- * Every field here was a closure variable in the per-turn-process version;
- * they are a struct now only because the child's stdout handler is installed
- * once per *process* and so cannot close over the turn it happens to be
- * serving. `settled` guards the two independent ways a turn can end — its
- * own `result` line, or the child dying under it — from both resolving it.
- */
+interface AcpPermissionOption {
+  optionId: string;
+  name?: string;
+  kind?: string;
+}
+
+interface PendingAcpPermission {
+  event: PermissionRequestEvent;
+  rpcId: string | number;
+  options: AcpPermissionOption[];
+}
+
+interface PendingRpc {
+  method: string;
+  resolve: (result: unknown) => void;
+  reject: (err: Error) => void;
+}
+
+interface QueuedPrompt {
+  text: string;
+  image?: PromptImage;
+}
+
 interface ActiveTurn {
-  readonly text: string;
+  readonly prompt: QueuedPrompt;
   readonly attempt: number;
-  readonly conversationResetTried: boolean;
-  /**
-   * Whether the child serving this turn was spawned with `--conversation`,
-   * i.e. bound to a conversation it did not create.
-   *
-   * This — not "is `_agentSessionId` set?" — is what gates the wedged-
-   * conversation reset, and the distinction is load-bearing now that one
-   * child serves many turns: the child announces a conversation id in its own
-   * `init` line the moment it starts, so after the first turn of a *brand
-   * new* session `_agentSessionId` is populated too. Resetting on that would
-   * throw away a conversation this process just minted, which is the "already
-   * fresh attempt is a genuine dead end" case the reset deliberately excludes.
-   */
-  readonly resumedConversation: boolean;
-  /** Wall clock at the moment this attempt's prompt was written — see `AgySession.cumulative`. */
   readonly startedAt: number;
-  settled: boolean;
-  /** See `AgySession.suppressCloseNotice` — set from this turn's `result` line. */
-  resultErrorShown: boolean;
-  /** agy's own error text, when this turn's failure looks worth retrying silently. */
-  pendingRetryText: string | null;
-  /** Distinguishes "resend to the same conversation" from "drop it and start fresh". */
-  pendingWedgedReset: boolean;
-  /**
-   * The most recent `step_update` this turn received, in arrival order, and
-   * whether that step carried any answer text. Read only by
-   * `AgySession.recoveredFromApiErrors` — see there for why the *last* step is
-   * the evidence.
-   */
-  lastStep: { key: string; type: string | null; hasText: boolean } | null;
-  resolve: () => void;
+  interrupted: boolean;
 }
 
 /**
- * An agent driven by Google's `agy` CLI in headless
- * `--input-format stream-json --output-format stream-json` mode: **one
- * long-lived process per session**, fed one NDJSON prompt per line on stdin
- * and answering one `result` line per turn.
+ * An agent driven by Google's `agy` CLI over its Agent Client Protocol stdio
+ * server (`agy acp`): **one long-lived process per session**, speaking
+ * newline-delimited JSON-RPC 2.0 over stdin/stdout.
  *
- * This is the same process shape as `StructuredSession` — the Claude Agent
- * SDK holds one long-lived query open and is fed prompts through an async
- * generator, because it *is* the agent process — and agy's changelog
- * introduced this input format (1.1.15) for exactly that: "so a driver can
- * keep a session open." PocketAgent is that driver.
+ * Compared to the old headless `--input-format stream-json` driver, ACP gives
+ * PocketAgent:
+ *  - A real, synchronous approval gate (`session/request_permission`), parked
+ *    with no timeout until a human responds in the browser.
+ *  - Automatic AI-generated session titles (`session_info_update`, plus
+ *    on-disk `annotations/<id>.pbtxt` and `conversation_summaries.db`).
+ *  - Live model switching (`session/set_model`), model catalog (`session/new`),
+ *    slash command discovery (`available_commands_update`), and per-turn token
+ *    usage directly in `session/prompt` responses — eliminating the extra
+ *    `agy models` and `agy -p /help` probe subprocesses and `makeStatsPerTurn`.
+ *  - Background `run_command` survival across turns because the `agy acp`
+ *    process stays alive; reactive `session/update` notifications pushed after
+ *    `end_turn` continue streaming to the client while idle.
  *
- * **It used to be one `agy -p <prompt>` process per turn, and that silently
- * destroyed work.** agy's `run_command` hands the model a
- * `WaitMsBeforeAsync` budget (the model routinely passes 10s) and *converts
- * any command still running past it into a background task* the model then
- * polls with `manage_task`. A turn ends the moment the model answers without
- * a tool call — which it will happily do while a background task is still
- * `RUNNING`, saying something like "waiting for the tests to finish". In
- * per-turn `-p` mode, the process then exited and took the task with it;
- * confirmed live in agy's own log:
- *
- *     conversation_manager.go:1426] Cancelling steps [614] in conversation <id>
- *     manager.go:789] CLI store manager shutting down
- *
- * A 2-minute `pnpm test` was killed 71s in, the session went idle with the
- * agent's last words claiming it was waiting, and nothing was left running
- * to ever wake it. Holding one process open fixes it at the root, and does
- * more than merely not-killing the task: confirmed empirically against
- * v1.2.6, agy *defers the turn's own `result` line* until its background
- * tasks drain (a 150s task held the turn open 152.7s), where the same probe
- * under `-p` ended the turn in 5.8s and cancelled the task. So the session
- * now stays honestly `busy` for as long as work is actually outstanding.
- *
- * Two consequences of the mode worth knowing. `isAlive()` still reflects
- * whether this session has been *terminated*, not whether the child is up:
- * the child is spawned lazily by the first `prompt()` (an idle session that
- * is never prompted never spawns one) and is respawned, resuming with
- * `--conversation <id>`, if it ever dies. And agy answers its own slash
- * commands locally and refuses them on this stream — "`/x` is answered by
- * the CLI itself and is unavailable with --input-format stream-json; run it
- * as its own --print /x invocation" — so `runSlashTurn` does exactly that,
- * the same one-shot shape `fetchInitialCommands` already used for `/help`.
- *
- * There is no approval flow: `pendingPermissions()` is always empty and
- * `resolvePermission()` always reports nothing pending, because there is
- * nothing upstream that would ever call `emitEvent` with a
- * `permission_request` — see `agents/agy.ts` for why.
+ * Note on global skip-permissions: `agy acp` exposes `default`, `accept-edits`,
+ * `auto`, and `plan` modes, but no live "bypass all" mode — `--dangerously-skip-permissions`
+ * is spawn-time only. `applyGlobalSkipPermissions` is therefore a no-op (same
+ * posture as terminal sessions); new sessions inherit the global switch at
+ * creation via `SessionManager.create`.
  */
 export class AgySession extends EventEmitter<StructuredSessionEvents> {
   readonly transport = 'structured' as const;
@@ -141,183 +131,58 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   readonly buffer: EventBuffer;
   readonly epoch: string;
 
-  /**
-   * The session's one long-lived `agy` process, or null before the first
-   * prompt has spawned it and after it has died or been killed. Unlike the
-   * per-turn process this replaced, a *turn* ending does not clear this —
-   * `activeTurn` tracks the turn, `child` tracks the process, and keeping
-   * the two separate is the whole point (see the class doc comment).
-   */
   private child: ChildProcessWithoutNullStreams | null = null;
-  /**
-   * The turn currently awaiting a `result` line from `child`, holding the
-   * per-turn decisions that used to live as closure variables inside the
-   * per-turn spawn. One child now serves many turns, so its line handler is
-   * installed once and has to find the turn in flight here rather than
-   * closing over it.
-   */
-  private activeTurn: ActiveTurn | null = null;
-  /**
-   * Set when the live child must be recycled before the next turn because a
-   * spawn-time flag changed under it — today only `--model` (see
-   * `setModel`). Deliberately deferred rather than acted on immediately: a
-   * model switch must not kill a background task belonging to the turn that
-   * is still running.
-   */
-  private respawnBeforeNextTurn = false;
-  /**
-   * Running totals from the last `result` line, for turning agy's figures
-   * into per-turn ones.
-   *
-   * In per-turn `-p` mode every `result` described exactly one turn, because
-   * the process *was* one turn. On a long-lived child they are
-   * **conversation-cumulative** instead — confirmed live against v1.2.6: two
-   * trivial consecutive turns reported `input_tokens` 15047 then 30176,
-   * `num_turns` 1 then 2, and `duration_seconds` 63.7 then 64.9 for a turn
-   * that actually took two seconds. Emitting those straight through would
-   * make the transcript's per-turn footer (duration, `N↑ M↓`, tok/s — see
-   * `Transcript.tsx`) grow without bound and read as nonsense on every turn
-   * after the first.
-   */
-  private cumulative = { inputTokens: 0, outputTokens: 0, numTurns: 0 };
-  /** Whether the live child was spawned with `--conversation` — see `ActiveTurn.resumedConversation`. */
-  private childResumedConversation = false;
-  /** Last 4 KB of the live child's stderr, for a death with no `result` line to explain it. */
+  private nextRpcId = 1;
+  private readonly pendingRpc = new Map<number, PendingRpc>();
+  private readonly pending = new Map<string, PendingAcpPermission>();
   private stderrTail = '';
-  /**
-   * Set when a `result` line has already surfaced agy's own error text, so
-   * the child dying moments later does not follow the real reason with a
-   * useless "agy exited with code 1". The per-turn equivalent was a closure
-   * variable; it outlives the turn here because the death it guards against
-   * happens after the turn has been settled.
-   */
-  private suppressCloseNotice = false;
-  private readonly queue: string[] = [];
+
+  private readonly queue: QueuedPrompt[] = [];
   private draining = false;
   private closed = false;
-  /**
-   * Set only while waiting out a transient-error backoff between retries
-   * (see `MAX_TURN_RETRIES`), i.e. exactly when no turn is in flight but one
-   * is still logically outstanding. `interrupt()` checks this first:
-   * without it, hitting stop during that window found nothing to interrupt,
-   * did nothing visible, and the scheduled retry fired anyway right after —
-   * indistinguishable from interrupt being silently ignored.
-   */
+  private activeTurn: ActiveTurn | null = null;
   private cancelPendingRetry: (() => void) | null = null;
-  /** Set by `setModel`; included in the next (and every later) child's argv. */
-  private _desiredModel: string | null = null;
+  /**
+   * Tool calls started via `tool_call` that have not yet reached a terminal
+   * `tool_call_update` (`completed` / `failed` / `cancelled`), mapped to their
+   * ACP `kind` (`execute`, `edit`, `read`, …). Because `agy acp` resolves
+   * `session/prompt` with `end_turn` while a background `run_command` is still
+   * running, tracking in-flight `execute` calls keeps `busy` honest so
+   * `RunQueue`, `POST /api/admin/restart` drain, and `interrupt()` all know agy
+   * is still actively working in the checkout. Non-`execute` calls are pruned
+   * at `end_turn`, and all entries are cleared on turn error/retry so a missing
+   * terminal update can never strand `busy === true`.
+   */
+  private readonly inFlightToolCalls = new Map<string, string | null>();
+  private _bypassedBySettings = false;
 
+  private _desiredModel: string | null = null;
   private _status: SessionStatus = 'starting';
   private _agentSessionId: string | null = null;
   private _startedAt: number | null = null;
   private _endedAt: number | null = null;
   private _lastActivityAt: number | null = null;
   private _busy = false;
-  /** See `busySince` getter. */
   private _busySince: number | null = null;
-  /**
-   * `tool_use` ids of `invoke_subagent` calls still awaiting resolution.
-   * agy's own step lifecycle for that tool call marks itself `DONE` almost
-   * immediately — confirmed live not to mean the background sub-agent
-   * actually finished (see `normalizeAgyStepUpdate`'s doc comment) — and
-   * pushes nothing else when it really does. The one boundary that *is*
-   * trustworthy, confirmed against the same live run, is the turn's own
-   * `result` line: resolved here in `runTurn`, and defensively in `finish()`
-   * too, so a turn that errors or gets killed mid-flight cannot leave a
-   * fleet-view chip stuck open forever either.
-   */
-  private readonly pendingSubagents = new Set<string>();
+  private _derivedTitle: string | null = null;
 
   /**
-   * How many times a turn is silently re-run before its error is finally
-   * shown to the user, when that error looks transient (see
-   * `TRANSIENT_ERROR_PATTERN`). Kept small: a *persistent* problem (the host
-   * genuinely cannot reach the Antigravity backend) should still surface
-   * within a few seconds rather than stall the turn indefinitely behind
-   * silent retries.
+   * Streamed prose and reasoning accumulators. The web client's `dropStreaming`
+   * discards unfinalized `text_delta`/`thinking_delta` blocks when a turn ends
+   * or a new block starts, so we flush these into finalized `text`/`thinking`
+   * events before each `tool_call` and before `turn_complete`.
    */
+  private streamedText = '';
+  private streamedThought = '';
+  private messageSeq = 0;
+  private thoughtSeq = 0;
+  private idleFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private static readonly DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
   private static readonly MAX_TURN_RETRIES = 2;
-
-  /**
-   * Backoff before each retry, indexed by attempt number (0-based); the last
-   * entry repeats for any attempt beyond its length.
-   */
   private static readonly RETRY_BACKOFF_MS = [1000, 3000];
-
-  /**
-   * Backoff before the one conversation-reset retry described on
-   * `runTurn`'s `conversationResetTried` parameter. Deliberately the same as
-   * the first normal retry's backoff — this is not a slower path, just a
-   * different one.
-   */
-  private static readonly CONVERSATION_RESET_BACKOFF_MS = AgySession.RETRY_BACKOFF_MS[0];
-
-  /**
-   * Matches agy's own `result.error` text for a turn that failed for an
-   * infrastructure reason — a network hiccup or a timeout talking to the
-   * Antigravity backend — rather than something a retry can never fix (a
-   * quota error, a bad prompt, an auth failure; see the `QUOTA` case
-   * `normalizeAgyResult` already surfaces verbatim, which must NOT match
-   * this). Confirmed live on a prod host: "timeout waiting for response"
-   * surfaced from an otherwise healthy conversation, and a plain re-run of
-   * the same turn succeeded — so retrying automatically here trades a few
-   * seconds of silent delay for not dropping the user's prompt on a hiccup
-   * that had nothing to do with what they asked.
-   */
   private static readonly TRANSIENT_ERROR_PATTERN =
     /\btimed?\s*out\b|deadline exceeded|context canceled|context cancelled|econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up|network error|connection reset|\bunavailable\b|stream (?:was )?interrupted/i;
-
-  /**
-   * `result.error` texts agy reports for a failure it handles *itself* and
-   * can recover from within the same run, so they may be stale by the time
-   * the run ends (see `recoveredFromApiErrors`):
-   *
-   * - its wrapper around a backend failure it is retrying (`run.go`'s
-   *   5-attempt loop);
-   * - its auto-continuation of an interrupted model stream, which it records
-   *   in the conversation as a step saying exactly this and then carries on.
-   *   Session MUXt_8g_lMFy (2026-11-14, agy 1.5.x): one interruption at step
-   *   430 was continued and answered, and every later run in that
-   *   conversation still ended `ERROR` with this text, even turns with no
-   *   interruption of their own. Because it also matches
-   *   `TRANSIENT_ERROR_PATTERN`, each finished turn was re-sent twice
-   *   (`git push` included) and then shown as failed anyway.
-   */
-  private static readonly AGY_API_RETRY_ERROR_PATTERN =
-    /^API error \(attempt \d+\):|^The stream was interrupted\. Please continue the task you were working on\.?$/;
-
-  /**
-   * Whether a non-SUCCESS `result` describes a run agy *recovered* from.
-   *
-   * agy retries a failed backend request itself (`Run: attempt N failed
-   * (INTERNAL (code 500): …), retrying in …` in its log), and each failure is
-   * recorded as an error step in the conversation. When a later attempt
-   * succeeds, the run carries on to its answer — and agy still ends it with
-   * `status` non-SUCCESS and `error` set to the last of those stale retry
-   * messages. Seen on session Q5NDdfjcLPiU (2026-11-07): three bursts of four
-   * 500s, each recovered, and the final reply was followed by
-   * `API error (attempt 4): INTERNAL (code 500)`, so a finished turn read as
-   * failed.
-   *
-   * The evidence that separates the two is the trajectory's *last step*,
-   * measured across every conversation in `~/.gemini/antigravity-cli`: a run
-   * that really failed ends on its error step, a recovered one ends on a model
-   * response after it. A response that calls tools is followed by tool steps,
-   * so a non-empty `agent_response` arriving last is the final answer. This
-   * holds whether or not agy streams its error steps (if it does, one arriving
-   * last fails the check). The error must also be agy's retry wrapper, which
-   * keeps it off the wedged-conversation path: that failure also carries a
-   * `response`, under `context canceled`, and is not recovered.
-   */
-  private static recoveredFromApiErrors(turn: ActiveTurn, result: Record<string, unknown>): boolean {
-    const status = typeof result.status === 'string' ? result.status : undefined;
-    if (status === undefined || status === 'SUCCESS') return false;
-    const errorText = typeof result.error === 'string' ? result.error.trim() : '';
-    if (!AgySession.AGY_API_RETRY_ERROR_PATTERN.test(errorText)) return false;
-    const response = typeof result.response === 'string' ? result.response.trim() : '';
-    if (!response) return false;
-    return turn.lastStep?.type === 'agent_response' && turn.lastStep.hasText;
-  }
 
   constructor(spec: AgySessionSpec, epoch?: string) {
     super();
@@ -328,6 +193,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._agentSessionId = spec.resumeAgentSessionId ?? null;
     this._desiredModel = spec.model ?? null;
+    this._bypassedBySettings = spec.bypassedBySettings === true;
   }
 
   // ---- Shared session surface ---------------------------------------------
@@ -369,8 +235,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     return 'agy-cli';
   }
   get survivesServerRestart(): boolean {
-    // Same reasoning as StructuredSession: no process to survive, but the
-    // conversation does, via `--conversation <id>`.
+    // No process survives, but the conversation does via ACP `session/resume`.
     return false;
   }
   get agentSessionId(): string | null {
@@ -379,20 +244,17 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   get busy(): boolean {
     return this._busy;
   }
-  /** See `StructuredSession.busySince`'s doc comment. */
   get busySince(): number | null {
     return this._busySince;
   }
-  /** No global-bypass concept here: every session is already maximally bypassed. */
+  /** `--dangerously-skip-permissions` is spawn-time only in `agy acp`. */
   get globalBypassActive(): boolean {
     return false;
   }
-  private _derivedTitle: string | null = null;
-  /**
-   * The conversation's own title from agy's on-disk annotations or summaries
-   * database, once `SessionManager` has read it. Supersedes `spec.title` for
-   * display without mutating `spec` itself.
-   */
+  /** True when host `settings.json` may auto-approve commands without `--dangerously-skip-permissions`. */
+  get bypassedBySettings(): boolean {
+    return this._bypassedBySettings;
+  }
   get derivedTitle(): string | null {
     return this._derivedTitle;
   }
@@ -406,200 +268,173 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
 
   // ---- Lifecycle -----------------------------------------------------------
 
-  /** Not `async` despite matching `StructuredSession.start()`'s signature: there is nothing to await — each turn's process is spawned lazily by `prompt()`. */
-  start(): Promise<void> {
+  async start(): Promise<void> {
     this._startedAt = Date.now();
     this._lastActivityAt = this._startedAt;
-    this.setStatus('running');
-    this.fetchInitialCommands();
-    this.fetchInitialModels();
-    if (this._desiredModel) {
+    await this.spawnAndHandshake();
+    if (!this.closed) {
+      this.setStatus('running');
+      if (this.spec.settingsAutoApproveNotice) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: this.spec.settingsAutoApproveNotice,
+        });
+      }
+    }
+  }
+
+  /**
+   * Spawn `agy acp`, perform the bounded ACP `initialize` handshake, and open
+   * or resume the session. Kills the spawned child and throws if the process
+   * cannot start, hangs past `handshakeTimeoutMs`, or fails handshake.
+   */
+  private async spawnAndHandshake(isRespawn = false): Promise<void> {
+    if (this.child) {
+      this.killChildNow(this.child);
+    }
+
+    if (isRespawn && !this.spec.skipPermissions) {
+      const check = readAgySettingsAutoApprove({ homeDir: this.spec.env.HOME });
+      const prev = this._bypassedBySettings;
+      this._bypassedBySettings = check.autoApproves;
+      if (check.autoApproves && !prev) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: formatAgySettingsAutoApproveNotice(check),
+        });
+      }
+    }
+
+    const args = ['acp', '--add-dir', this.spec.cwd];
+    if (this.spec.skipPermissions) {
+      args.push('--dangerously-skip-permissions');
+    }
+
+    const bin = this.spec.executablePath ?? 'agy';
+    const child = spawn(bin, args, { cwd: this.spec.cwd, env: this.spec.env });
+    this.child = child;
+    this.stderrTail = '';
+
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on('line', (line) => this.handleLine(child, line));
+    child.stderr.on('data', (chunk: Buffer) => {
+      this.stderrTail = (this.stderrTail + chunk.toString()).slice(-4000);
+    });
+    child.on('error', (err) => this.onChildClose(child, null, null, `agy failed to start: ${err.message}`));
+    child.on('close', (code, signal) => this.onChildClose(child, code, signal, null));
+
+    const handshakeTimeoutMs =
+      this.spec.handshakeTimeoutMs ?? AgySession.DEFAULT_HANDSHAKE_TIMEOUT_MS;
+
+    let sessionRes: Record<string, unknown> | null;
+    try {
+      await this.rpcWithTimeout(
+        'initialize',
+        {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+          clientInfo: { name: 'pocketagent', version: '1.0.0' },
+        },
+        handshakeTimeoutMs,
+      );
+
+      const isResume = this._agentSessionId !== null;
+      sessionRes = (await this.rpcWithTimeout(
+        isResume ? 'session/resume' : 'session/new',
+        isResume
+          ? { sessionId: this._agentSessionId, cwd: this.spec.cwd, mcpServers: [] }
+          : { cwd: this.spec.cwd, mcpServers: [] },
+        handshakeTimeoutMs,
+      )) as Record<string, unknown> | null;
+    } catch (err) {
+      this.killChildNow(child);
+      throw err;
+    }
+
+    const sessionId =
+      isRecord(sessionRes) && typeof sessionRes.sessionId === 'string'
+        ? sessionRes.sessionId
+        : this._agentSessionId;
+    if (sessionId) {
+      this._agentSessionId = sessionId;
+    }
+
+    const models = isRecord(sessionRes) ? normalizeAgyAcpModels(sessionRes.models) : [];
+    if (models.length > 0) {
+      this.emitEvent({ kind: 'models_available', models });
+    }
+
+    const currentModelId =
+      isRecord(sessionRes) && isRecord(sessionRes.models) && typeof sessionRes.models.currentModelId === 'string'
+        ? sessionRes.models.currentModelId
+        : null;
+    const currentModeId =
+      isRecord(sessionRes) && isRecord(sessionRes.modes) && typeof sessionRes.modes.currentModeId === 'string'
+        ? sessionRes.modes.currentModeId
+        : null;
+
+    if (this._desiredModel && this._agentSessionId && this._desiredModel !== currentModelId) {
+      try {
+        await this.rpc('session/set_model', {
+          sessionId: this._agentSessionId,
+          modelId: this._desiredModel,
+        });
+        this.emitEvent({ kind: 'model_changed', model: this._desiredModel });
+      } catch (err) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `Failed to set initial model (${this._desiredModel}): ${errText(err)}`,
+        });
+      }
+    } else if (this._desiredModel) {
       this.emitEvent({ kind: 'model_changed', model: this._desiredModel });
     }
-    return Promise.resolve();
+
+    this.emitEvent({
+      kind: 'session_started',
+      agentSessionId: this._agentSessionId,
+      model: this._desiredModel ?? currentModelId,
+      cwd: this.spec.cwd,
+      tools: [],
+      permissionMode: this.spec.skipPermissions ? 'always-proceed' : (currentModeId ?? 'default'),
+    });
   }
 
   /**
-   * Learn agy's model catalog for the picker, via its own `models`
-   * subcommand — confirmed live (v1.1.12): plain text, one `<id>\t<label>`
-   * pair per line on stdout (its "Fetching available models..." status line
-   * goes to stderr), not the `stream-json`/`-p` shape `fetchInitialCommands`
-   * uses, since `models` is a genuine top-level subcommand rather than an
-   * in-conversation slash command. Same best-effort discipline: a failure
-   * here costs the picker, never the session.
-   *
-   * `child.stdin.end()` matters here specifically: unlike `-p` mode (used by
-   * `fetchInitialCommands`/`runTurn`, neither of which need this), `models`
-   * was confirmed live to hang forever reading an open, unclosed stdin pipe
-   * — with zero output, not even its own status line — when spawned exactly
-   * the way Node's default `stdio` leaves it. Closing stdin immediately
-   * (rather than passing `stdio: ['ignore', ...]` to `spawn`) keeps the
-   * result typed as `ChildProcessWithoutNullStreams`, since nothing else
-   * here needs `stdio` to change.
+   * Switch the active model live via ACP `session/set_model` — no process
+   * recycle needed, so any background tasks remain untouched.
    */
-  private fetchInitialModels(): void {
-    const bin = this.spec.executablePath ?? 'agy';
-    let child: ChildProcessWithoutNullStreams;
-    try {
-      child = spawn(bin, ['models'], { cwd: this.spec.cwd, env: this.spec.env });
-    } catch {
-      return;
-    }
-    child.stdin.end();
-
-    let stdout = '';
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on('data', () => {
-      // Nothing here is worth surfacing — see the doc comment above.
-    });
-    child.on('error', () => {});
-    child.on('close', (code) => {
-      if (code !== 0) return;
-      const models = normalizeAgyModelList(stdout);
-      if (models.length > 0) this.emitEvent({ kind: 'models_available', models });
-    });
-
-    // Same defensive backstop as `fetchInitialCommands`'s probe.
-    const killer = setTimeout(() => {
+  async setModel(model: string): Promise<void> {
+    if (!this.isAlive()) return;
+    this._desiredModel = model;
+    if (this.child && this._agentSessionId) {
       try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }, 10_000);
-    child.on('exit', () => clearTimeout(killer));
-  }
-
-  /**
-   * Switch the model agy uses starting with the *next* turn, by adding
-   * `--model <value>` to the *next child's* spawn argv — confirmed
-   * empirically that continuing a conversation (`--conversation <id>`) with a
-   * different `--model` on a later invocation actually changes the effective
-   * model for that and later turns.
-   *
-   * `--model` is a spawn-time flag and agy's stream input has no message that
-   * changes it mid-process, so honouring this means replacing the live child.
-   * That is deferred to `ensureChild` via `respawnBeforeNextTurn` rather than
-   * done here, for the reason the whole class exists: recycling the process
-   * *now* would kill whatever the current turn still has running in the
-   * background. So this stays the same "next prompt" contract every other
-   * backend confirms over a live channel, with no round trip to wait for —
-   * `model_changed` fires immediately rather than after a confirmation that
-   * will only ever arrive once that next turn actually starts.
-   */
-  setModel(model: string): Promise<void> {
-    if (this.isAlive()) {
-      this._desiredModel = model;
-      this.respawnBeforeNextTurn = true;
-      this.emitEvent({ kind: 'model_changed', model });
-    }
-    return Promise.resolve();
-  }
-
-  /**
-   * The flags every `-p` invocation needs, including `--add-dir <cwd>`.
-   *
-   * **`--add-dir` is load-bearing, not a hint.** Spawning agy with
-   * `{ cwd }` is not enough to make it work in that directory: agy resolves
-   * its *workspace* from its own project registry
-   * (`~/.gemini/antigravity-cli/cache/projects.json`), entirely
-   * independently of the OS-level cwd of the process. Its own changelog
-   * calls this out at 1.0.12 — "updated the project resolution logic to
-   * default regardless of the active workspace" — so with no `--add-dir`
-   * and no `--project`, every session silently lands in the default
-   * project, whose workspace is agy's own scratch directory
-   * (`~/.gemini/antigravity-cli/scratch`).
-   *
-   * Reproduced outside PocketAgent against v1.1.22: spawned with cwd
-   * `/tmp/agyprobe/testA` and asked to write a file "in your current
-   * working directory", agy wrote it to
-   * `~/.gemini/antigravity-cli/scratch/` instead. Adding `--add-dir <cwd>`
-   * put the same write in the intended directory, on a fresh conversation
-   * *and* on a resumed one (`--conversation <id>`), and did not add an
-   * entry to `projects.json` — so this is a per-invocation workspace
-   * override with no persistent side effect. It must be passed on **every**
-   * turn, since each turn is a fresh process (see the class doc comment).
-   *
-   * Note what is *not* checkable here: agy's `init` line reports only
-   * `cwd`, `tools` and `permission_mode` — never the workspace it actually
-   * resolved — and its `cwd` field faithfully echoes the OS cwd we spawned
-   * with even when the workspace is wrong. There is therefore no signal in
-   * the event stream to verify this against; passing the flag is the whole
-   * of the guarantee.
-   */
-  private baseArgs(): string[] {
-    return [
-      '--output-format',
-      'stream-json',
-      '--dangerously-skip-permissions',
-      '--add-dir',
-      this.spec.cwd,
-    ];
-  }
-
-  /**
-   * Learn agy's built-in command list for the picker, via its own `/help` —
-   * confirmed live (v1.1.12) to resolve locally with zero tokens, zero
-   * duration, and no model turn, so this costs nothing and has no
-   * conversation-visible side effect worth suppressing beyond not queuing it
-   * like a real prompt. No `--conversation` is passed: the built-in list is
-   * fixed and does not depend on any session's history. Best-effort and
-   * silent — a failure here just means no picker, never a broken session, so
-   * every error is swallowed rather than surfaced as a notice.
-   */
-  private fetchInitialCommands(): void {
-    const bin = this.spec.executablePath ?? 'agy';
-    // `--add-dir` matters even for this probe: workspace-local slash commands
-    // and skills live under the workspace, so asking the default (scratch)
-    // project for `/help` would list a different set than the session's own
-    // directory actually has.
-    const args = [...this.baseArgs(), '-p', '/help'];
-
-    let child: ChildProcessWithoutNullStreams;
-    try {
-      child = spawn(bin, args, { cwd: this.spec.cwd, env: this.spec.env });
-    } catch {
-      return;
-    }
-
-    // Never tracked as `this.child`: this probe is fully independent of the
-    // real turn queue, so it must not be visible to interrupt()/terminate()'s
-    // bookkeeping for the actual conversation.
-    const rl = readline.createInterface({ input: child.stdout });
-    rl.on('line', (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
+        await this.rpc('session/set_model', {
+          sessionId: this._agentSessionId,
+          modelId: model,
+        });
+      } catch (err) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `Failed to switch model to ${model}: ${errText(err)}`,
+        });
         return;
       }
-      for (const event of normalizeAgyMessageSafe(parsed)) {
-        if (event.kind === 'commands_available') this.emitEvent(event);
-      }
-    });
-    child.stderr.on('data', () => {
-      // Nothing here is worth surfacing — see the doc comment above.
-    });
-    child.on('error', () => {});
-
-    // A defensive backstop, not an expected path: real `/help` resolves
-    // instantly (observed duration_seconds: 0). Guards against an orphaned
-    // process if a future agy version ever makes this a real, slow turn.
-    const killer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }, 10_000);
-    child.on('exit', () => clearTimeout(killer));
+    }
+    this.emitEvent({ kind: 'model_changed', model });
   }
 
-  /** No-op: nothing here ever asks the operator's global switch to apply. */
+  /**
+   * No-op: `agy acp` has no live "bypass all" mode — `--dangerously-skip-permissions`
+   * is a spawn-time flag only (same posture as terminal sessions).
+   */
   applyGlobalSkipPermissions(_enabled: boolean): Promise<void> {
     return Promise.resolve();
   }
@@ -610,11 +445,53 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.emit('status', status);
   }
 
-  /** Stamps `busySince` only on an actual false->true transition. */
   private setBusy(busy: boolean): void {
     if (this._busy === busy) return;
     this._busy = busy;
     this._busySince = busy ? Date.now() : null;
+    if (!busy) {
+      this.emit('idle');
+    }
+  }
+
+  /**
+   * Recompute `busy` from every active signal: a draining prompt queue, an
+   * active prompt RPC, an in-flight background tool call, a parked permission
+   * request, or reactive idle output still streaming.
+   */
+  private updateBusy(): void {
+    const busy =
+      !this.closed &&
+      (this.draining ||
+        this.activeTurn !== null ||
+        this.inFlightToolCalls.size > 0 ||
+        this.pending.size > 0 ||
+        this.idleFlushTimer !== null);
+    this.setBusy(busy);
+  }
+
+  private killChildNow(child: ChildProcessWithoutNullStreams): void {
+    if (this.child === child) {
+      this.child = null;
+    }
+    try {
+      child.stdin.end();
+    } catch {
+      /* already gone */
+    }
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      /* already gone */
+    }
+    const killer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }, 1000);
+    killer.unref?.();
   }
 
   private emitEvent(event: AgentEvent): void {
@@ -622,592 +499,454 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.emit('event', entry.seq, entry.event);
   }
 
-  // ---- Conversation ----------------------------------------------------------
+  // ---- JSON-RPC transport ---------------------------------------------------
 
-  /** Queue a user turn. Safe to call while a previous turn is still running. */
-  prompt(text: string): boolean {
-    if (!this.isAlive()) return false;
-    this._lastActivityAt = Date.now();
-    this.setBusy(true);
-
-    this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
-    this.queue.push(text);
-    void this.drain();
-    return true;
+  private writeJson(payload: unknown): void {
+    if (!this.child) throw new Error('agy ACP process is not running');
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
-  /**
-   * Runs queued turns one at a time.
-   *
-   * Still strictly serial even though the child could accept a second `user`
-   * frame while the first turn runs (agy queues them — "Auto-flush: sending
-   * %d queued input(s)"): a turn is only recognizable as finished by its own
-   * `result` line, and with two in flight there is no way to tell which
-   * `result` belongs to which prompt, which is what `activeTurn` depends on.
-   */
-  private async drain(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
-    try {
-      while (!this.closed && this.queue.length > 0) {
-        const text = this.queue.shift();
-        if (text === undefined) continue;
-        await (isSlashCommand(text) ? this.runSlashTurn(text) : this.runTurn(text));
+  private rpc(method: string, params: unknown): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.child) {
+        reject(new Error('agy ACP process is not running'));
+        return;
       }
-    } finally {
-      this.draining = false;
-      if (!this.closed) this.setBusy(false);
-    }
-  }
-
-  /**
-   * The flags that turn print mode into a driver-held stream.
-   *
-   * `--print=` must carry an (empty) value *attached* to the flag: a
-   * valueless `--print` swallows the next flag as its prompt, which agy
-   * itself rejects ("--print took \"--input-format\" as its prompt"), and
-   * passing a real prompt here is an error too ("--input-format stream-json
-   * reads prompts from stdin, so a prompt given on the command line would be
-   * ignored"). `--output-format stream-json` is already in `baseArgs()`, and
-   * agy requires the pair — it refuses `--input-format stream-json` without
-   * it.
-   */
-  private static readonly STREAM_INPUT_ARGS = ['--print=', '--input-format', 'stream-json'];
-
-  /**
-   * The session's long-lived child, spawned on demand and resumed against
-   * the existing conversation whenever it has to be replaced.
-   *
-   * Returns null only when the spawn itself threw, having already surfaced
-   * why — callers treat that as "this turn cannot run" rather than retrying.
-   */
-  private ensureChild(): ChildProcessWithoutNullStreams | null {
-    // A deferred recycle (see `respawnBeforeNextTurn`) happens here, between
-    // turns, rather than at the moment the flag was set — which is what
-    // keeps a model switch from killing the running turn's background work.
-    if (this.child && this.respawnBeforeNextTurn) this.discardChild();
-    this.respawnBeforeNextTurn = false;
-    if (this.child) return this.child;
-
-    const args = [...this.baseArgs(), ...AgySession.STREAM_INPUT_ARGS];
-    this.childResumedConversation = this._agentSessionId !== null;
-    if (this._agentSessionId) args.push('--conversation', this._agentSessionId);
-    if (this._desiredModel) args.push('--model', this._desiredModel);
-
-    const bin = this.spec.executablePath ?? 'agy';
-    let child: ChildProcessWithoutNullStreams;
-    try {
-      child = spawn(bin, args, { cwd: this.spec.cwd, env: this.spec.env });
-    } catch (err) {
-      this.emitEvent({ kind: 'notice', level: 'error', text: `Failed to run agy: ${errText(err)}` });
-      return null;
-    }
-    this.child = child;
-    this.stderrTail = '';
-    this.suppressCloseNotice = false;
-
-    const rl = readline.createInterface({ input: child.stdout });
-    rl.on('line', (line) => this.handleChildLine(child, line));
-    child.stderr.on('data', (chunk: Buffer) => {
-      this.stderrTail = (this.stderrTail + chunk.toString()).slice(-4000);
+      const id = this.nextRpcId++;
+      this.pendingRpc.set(id, { method, resolve, reject });
+      try {
+        this.writeJson({ jsonrpc: '2.0', id, method, params });
+      } catch (err) {
+        this.pendingRpc.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
-    child.on('error', (err) => this.onChildClose(child, null, null, `agy failed to start: ${err.message}`));
-    child.on('close', (code, signal) => this.onChildClose(child, code, signal, null));
-    return child;
   }
 
-  /**
-   * Drop the current child because *we* are replacing it — a model change,
-   * or a wedged conversation whose id is baked into this child's own argv.
-   *
-   * Clearing `this.child` first is what makes the death silent: every path
-   * in `onChildClose` is guarded on the child still being the current one,
-   * so a discarded child's `close` settles no turn and surfaces no notice.
-   */
-  private discardChild(): void {
-    const child = this.child;
-    if (!child) return;
-    this.child = null;
-    try {
-      child.stdin.end();
-    } catch {
-      /* already gone */
-    }
-    child.kill('SIGTERM');
+  private rpcWithTimeout(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.child) {
+        reject(new Error('agy ACP process is not running'));
+        return;
+      }
+      const id = this.nextRpcId++;
+      const timer = setTimeout(() => {
+        if (this.pendingRpc.delete(id)) {
+          reject(new Error(`Timed out waiting for agy ACP ${method} after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingRpc.set(id, {
+        method,
+        resolve: (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
+      try {
+        this.writeJson({ jsonrpc: '2.0', id, method, params });
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingRpc.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   }
 
-  /** One NDJSON line from the long-lived child. */
-  private handleChildLine(child: ChildProcessWithoutNullStreams, line: string): void {
+  private handleLine(child: ChildProcessWithoutNullStreams, line: string): void {
     if (this.closed || child !== this.child) return;
     const trimmed = line.trim();
     if (!trimmed) return;
     this._lastActivityAt = Date.now();
 
-    let parsed: unknown;
+    let msg: unknown;
     try {
-      parsed = JSON.parse(trimmed);
+      msg = JSON.parse(trimmed);
     } catch {
       return; // Never let one malformed line take down the session.
     }
+    if (!isRecord(msg)) return;
 
-    const turn = this.activeTurn;
-    // Held as a narrowed local rather than re-tested inline: a `const
-    // isResult = isRecord(parsed) && ...` boolean does not carry the
-    // narrowing into the blocks below.
-    const record = isRecord(parsed) ? parsed : null;
-    const isResult = record !== null && record.event === 'result';
+    const hasId = msg.id !== undefined && msg.id !== null;
+    const method = typeof msg.method === 'string' ? msg.method : null;
 
-    if (turn && record !== null && record.event === 'step_update' && isRecord(record.step_update)) {
-      const update = record.step_update;
-      const key = `${String(update.conversation_id ?? '')}:${String(update.step_index ?? '')}`;
-      const type = typeof update.step_type === 'string' ? update.step_type : null;
-      const text = typeof update.text_delta === 'string' && update.text_delta.trim().length > 0;
-      const sameStep = turn.lastStep?.key === key;
-      turn.lastStep = { key, type, hasText: text || (sameStep && (turn.lastStep?.hasText ?? false)) };
-    }
-
-    // Finalize any streamed text *before* the `turn_complete` that the
-    // `result` line below normalizes to. The client drops a still-
-    // "streaming" text block wholesale when a turn ends (it has no way to
-    // match a delta stream to a completed block by id — see `transcript.ts`'s
-    // `dropStreaming`), so an agy answer that only ever arrived as
-    // `text_delta` chunks would render, then vanish the instant the turn
-    // finished. `result.response` carries the same text the deltas already
-    // streamed (observed against the real CLI), so it doubles as the closing
-    // block whether or not deltas arrived — not just the fallback for when
-    // they didn't.
-    if (isResult && record) {
-      const result = isRecord(record.result) ? record.result : {};
-      if (turn && AgySession.recoveredFromApiErrors(turn, result)) {
-        // agy reported the run as failed, but it recovered: see
-        // `recoveredFromApiErrors`. Say what happened as a warning, then
-        // rewrite the line so everything below treats it as the success it
-        // was. Above the retry decision deliberately: a recovered 503
-        // ("UNAVAILABLE") matches `TRANSIENT_ERROR_PATTERN`, and retrying
-        // would re-run a turn that already finished, tools included.
-        this.emitEvent({
-          kind: 'notice',
-          level: 'warn',
-          text: `agy hit backend errors during this turn and recovered (last: ${String(result.error).trim()})`,
-        });
-        const { error: _dropped, ...rest } = result;
-        void _dropped;
-        record.result = { ...rest, status: 'SUCCESS' };
-      }
-      const effective = isRecord(record.result) ? record.result : {};
-      const status = typeof effective.status === 'string' ? effective.status : undefined;
-      const errorText = typeof effective.error === 'string' ? effective.error.trim() : '';
-      const looksTransient =
-        status !== undefined &&
-        status !== 'SUCCESS' &&
-        errorText.length > 0 &&
-        AgySession.TRANSIENT_ERROR_PATTERN.test(errorText);
-      const isRetryable = looksTransient && (turn?.attempt ?? 0) < AgySession.MAX_TURN_RETRIES;
-      // The normal retry budget is spent, but this still looks like the
-      // infrastructure-error pattern rather than something a retry can never
-      // fix, and this attempt was continuing a real conversation (an
-      // already-fresh attempt failing this way is a genuine dead end — see
-      // `runTurn`'s `conversationResetTried` doc comment).
-      const looksWedged =
-        looksTransient &&
-        !isRetryable &&
-        (turn?.resumedConversation ?? false) &&
-        !(turn?.conversationResetTried ?? false);
-
-      if (turn && (isRetryable || looksWedged)) {
-        // Don't show the response or count this as the shown error: a retry
-        // is coming, and the generic normalizer below is skipped entirely
-        // for this line so no premature `turn_complete` fires either.
-        turn.pendingRetryText = errorText;
-        turn.pendingWedgedReset = looksWedged;
+    // 1. Server-initiated JSON-RPC request (e.g. `session/request_permission`).
+    if (hasId && method !== null) {
+      const rpcId = typeof msg.id === 'number' || typeof msg.id === 'string' ? msg.id : String(msg.id);
+      if (method === 'session/request_permission') {
+        this.handlePermissionRequest(rpcId, msg.params);
       } else {
-        const response = typeof result.response === 'string' ? result.response.trim() : '';
-        if (response) {
-          this.emitEvent({ kind: 'text', id: `agy_final_${this.id}_${Date.now()}`, text: response });
-        }
-        if (status !== undefined && status !== 'SUCCESS' && errorText) {
-          if (turn) turn.resultErrorShown = true;
-          this.suppressCloseNotice = true;
+        try {
+          this.writeJson({
+            jsonrpc: '2.0',
+            id: rpcId,
+            error: { code: -32601, message: `Unsupported client method: ${method}` },
+          });
+        } catch {
+          /* pipe already closed */
         }
       }
-
-      // See `pendingSubagents`'s doc comment: the turn's own `result` line is
-      // the one point trusted as "the sub-agent is actually done" — the
-      // step's own `DONE` moments after it started is not. A retry restarts
-      // the whole turn, so any sub-agent tool card left open by this attempt
-      // closes as ended-early rather than "finished", the same distinction
-      // `onChildClose`'s defensive flush draws for a death mid-flight.
-      const retrying = Boolean(turn?.pendingRetryText);
-      this.flushPendingSubagents(
-        retrying ? 'The turn hit a transient error and is being retried.' : 'Subagent finished.',
-        retrying,
-      );
+      return;
     }
 
-    // Skipped when retrying: the generic normalizer would turn this same
-    // `result` line into a user-visible `notice`/`turn_complete` for an error
-    // the retry may well erase a moment later.
-    if (!turn?.pendingRetryText) {
-      for (const event of normalizeAgyMessageSafe(parsed)) {
-        if (event.kind === 'session_started') {
-          if (event.agentSessionId) {
-            this._agentSessionId = event.agentSessionId;
-          }
-          if (this._desiredModel && !event.model) {
-            event.model = this._desiredModel;
-          }
-        }
-        if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
-          this.pendingSubagents.add(event.id);
-        }
-        if (event.kind === 'turn_complete') this.makeStatsPerTurn(event, turn);
-        this.emitEvent(event);
+    // 2. Response to one of our JSON-RPC requests.
+    if (hasId && typeof msg.id === 'number') {
+      const pending = this.pendingRpc.get(msg.id);
+      if (!pending) return;
+      this.pendingRpc.delete(msg.id);
+      if (isRecord(msg.error)) {
+        const errMsg =
+          typeof msg.error.message === 'string' && msg.error.message.trim()
+            ? msg.error.message.trim()
+            : `ACP ${pending.method} error`;
+        pending.reject(new Error(errMsg));
+      } else {
+        pending.resolve(msg.result);
       }
+      return;
     }
 
-    if (isResult) this.completeTurn();
+    // 3. Server notification (e.g. `session/update`).
+    if (method === 'session/update' && isRecord(msg.params)) {
+      this.handleSessionUpdate(msg.params.update);
+    }
   }
 
-  /**
-   * The long-lived child died.
-   *
-   * In the per-turn version this was the normal end of every turn; here it is
-   * always either our own teardown or an anomaly, because a healthy child
-   * outlives the turn that spawned it.
-   */
+  private handleSessionUpdate(update: unknown): void {
+    if (!isRecord(update)) return;
+    const kind = typeof update.sessionUpdate === 'string' ? update.sessionUpdate : '';
+
+    if (kind === 'session_info_update') {
+      const title = typeof update.title === 'string' ? update.title.trim() : '';
+      if (title && title !== this._derivedTitle) {
+        this._derivedTitle = title;
+        this.emit('title', title);
+      }
+      return;
+    }
+
+    // Track in-flight tool calls so `busy` stays honest when a background
+    // `run_command` outlives `session/prompt`'s `end_turn`.
+    if (kind === 'tool_call') {
+      const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+      const callKind = typeof update.kind === 'string' ? update.kind : null;
+      if (callId) this.inFlightToolCalls.set(callId, callKind);
+      this.flushStreamedThought();
+      this.flushStreamedText();
+      this.updateBusy();
+    } else if (kind === 'tool_call_update') {
+      const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+      const status = typeof update.status === 'string' ? update.status : '';
+      if (callId && (status === 'completed' || status === 'failed' || status === 'cancelled')) {
+        this.inFlightToolCalls.delete(callId);
+        if (!this.activeTurn) this.scheduleIdleFlush();
+        this.updateBusy();
+      }
+    }
+
+    const messageId = `agy_msg_${this.id}_${this.messageSeq}`;
+    const thoughtId = `agy_thought_${this.id}_${this.thoughtSeq}`;
+
+    let events: AgentEvent[];
+    try {
+      events = normalizeAgyAcpUpdate(update, { messageId, thoughtId });
+    } catch {
+      return;
+    }
+
+    for (const event of events) {
+      if (event.kind === 'thinking_delta') {
+        this.streamedThought += event.text;
+        if (!this.activeTurn) {
+          this.scheduleIdleFlush();
+        }
+      } else if (event.kind === 'text_delta') {
+        this.flushStreamedThought();
+        this.streamedText += event.text;
+        if (!this.activeTurn) {
+          this.scheduleIdleFlush();
+        }
+      }
+      this.emitEvent(event);
+    }
+  }
+
+  private scheduleIdleFlush(): void {
+    if (this.idleFlushTimer) clearTimeout(this.idleFlushTimer);
+    this.idleFlushTimer = setTimeout(() => {
+      this.idleFlushTimer = null;
+      if (!this.activeTurn && !this.closed) {
+        this.flushStreamedThought();
+        this.flushStreamedText();
+      }
+      this.updateBusy();
+    }, 500);
+    this.idleFlushTimer.unref?.();
+    this.updateBusy();
+  }
+
+  private clearIdleFlush(): void {
+    if (this.idleFlushTimer) {
+      clearTimeout(this.idleFlushTimer);
+      this.idleFlushTimer = null;
+    }
+  }
+
+  private flushStreamedThought(): void {
+    if (!this.streamedThought) return;
+    const text = this.streamedThought;
+    const id = `agy_thought_${this.id}_${this.thoughtSeq++}`;
+    this.streamedThought = '';
+    this.emitEvent({ kind: 'thinking', id, text });
+  }
+
+  private flushStreamedText(): void {
+    if (!this.streamedText) return;
+    const text = this.streamedText;
+    const id = `agy_msg_${this.id}_${this.messageSeq++}`;
+    this.streamedText = '';
+    this.emitEvent({ kind: 'text', id, text });
+  }
+
   private onChildClose(
     child: ChildProcessWithoutNullStreams,
     code: number | null,
     signal: NodeJS.Signals | null,
     startError: string | null,
   ): void {
-    // A child we already replaced or deliberately discarded: its death is
-    // ours, and settles nothing. See `discardChild`.
     if (child !== this.child) return;
     this.child = null;
+    this.clearIdleFlush();
+    this.inFlightToolCalls.clear();
 
-    const turn = this.activeTurn;
+    // Clear any parked permission sheets so the browser never keeps stale approvals.
+    this.clearPendingPermissions();
+    this.updateBusy();
 
-    // Defensive twin of the `result` handler's flush: this only does anything
-    // if the process ended without ever producing a `result` line — the
-    // normal case already cleared the set.
-    this.flushPendingSubagents('The turn ended before this sub-agent finished.', true);
+    const reason =
+      startError ??
+      (this.stderrTail.trim() ||
+        (signal ? `agy exited on signal ${signal}` : `agy exited with code ${code ?? 'unknown'}`));
 
-    if (!turn) {
-      // Died between turns. The next prompt respawns and resumes the
-      // conversation, so this is recoverable — but it must still be said out
-      // loud, because whatever agy was running in the background died with
-      // it, and an unreported death there is exactly the silence this class
-      // is shaped to prevent.
-      if (!this.closed && !this.suppressCloseNotice) {
+    for (const [id, pending] of this.pendingRpc) {
+      this.pendingRpc.delete(id);
+      pending.reject(new Error(reason));
+    }
+
+    if (!this.activeTurn && !this.closed && this._status === 'running') {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text:
+          startError ??
+          'agy stopped between turns, so any background task it was still running has ended. The next prompt resumes the conversation.',
+      });
+    }
+  }
+
+  // ---- Conversation ---------------------------------------------------------
+
+  /** Queue a user turn. Safe to call while a previous turn is still running. */
+  prompt(text: string, image?: PromptImage): boolean {
+    if (!this.isAlive()) return false;
+    this._lastActivityAt = Date.now();
+    this.setBusy(true);
+
+    this.clearIdleFlush();
+    this.flushStreamedThought();
+    this.flushStreamedText();
+
+    this.emitEvent({
+      kind: 'user_prompt',
+      id: crypto.randomBytes(6).toString('hex'),
+      text,
+      ...(image ? { image } : {}),
+    });
+    this.queue.push({ text, ...(image ? { image } : {}) });
+    void this.drain();
+    return true;
+  }
+
+  private async drain(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      while (!this.closed && this.queue.length > 0) {
+        const next = this.queue.shift();
+        if (!next) continue;
+        await this.runTurn(next, 0);
+      }
+    } finally {
+      this.draining = false;
+      this.updateBusy();
+    }
+  }
+
+  private async runTurn(prompt: QueuedPrompt, attempt: number): Promise<void> {
+    if (this.closed) return;
+
+    // Respawn and resume if the child died between turns (or has no session id).
+    if (!this.child || !this._agentSessionId) {
+      if (this.child) this.killChildNow(this.child);
+      try {
+        await this.spawnAndHandshake(true);
+      } catch (err) {
+        this.emitEvent({ kind: 'notice', level: 'error', text: `Failed to run agy: ${errText(err)}` });
+        this.emitEvent({
+          kind: 'turn_complete',
+          stopReason: 'ERROR',
+          isError: true,
+          numTurns: null,
+          durationMs: null,
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+          completedAt: Date.now(),
+        });
+        return;
+      }
+    }
+
+    const turn: ActiveTurn = {
+      prompt,
+      attempt,
+      startedAt: Date.now(),
+      interrupted: false,
+    };
+    this.activeTurn = turn;
+
+    const contentBlocks: unknown[] = [];
+    if (prompt.image) {
+      contentBlocks.push({
+        type: 'image',
+        data: prompt.image.data,
+        mimeType: prompt.image.mediaType,
+      });
+    }
+    if (prompt.text || contentBlocks.length === 0) {
+      contentBlocks.push({ type: 'text', text: prompt.text });
+    }
+
+    try {
+      const res = (await this.rpc('session/prompt', {
+        sessionId: this._agentSessionId,
+        prompt: contentBlocks,
+      })) as Record<string, unknown> | null;
+
+      if (this.activeTurn === turn) this.activeTurn = null;
+      // Only command-type calls (`kind: "execute"`) can genuinely outlive
+      // `end_turn` as background tasks; prune everything else so a missing
+      // terminal update on a read/edit/search tool can never strand `busy`.
+      for (const [callId, callKind] of [...this.inFlightToolCalls]) {
+        if (callKind !== 'execute') this.inFlightToolCalls.delete(callId);
+      }
+      this.flushStreamedThought();
+      this.flushStreamedText();
+
+      const stopReason =
+        isRecord(res) && typeof res.stopReason === 'string' ? res.stopReason : 'end_turn';
+      const usage = isRecord(res) && isRecord(res.usage) ? res.usage : null;
+      const inputTokens = usage && typeof usage.inputTokens === 'number' ? usage.inputTokens : null;
+      const outputTokens = usage && typeof usage.outputTokens === 'number' ? usage.outputTokens : null;
+      const cacheReadTokens =
+        usage && typeof usage.cachedReadTokens === 'number' && usage.cachedReadTokens > 0
+          ? usage.cachedReadTokens
+          : null;
+      const cacheWriteTokens =
+        usage && typeof usage.cachedWriteTokens === 'number' && usage.cachedWriteTokens > 0
+          ? usage.cachedWriteTokens
+          : null;
+
+      this.emitEvent({
+        kind: 'turn_complete',
+        stopReason,
+        isError: false,
+        numTurns: 1,
+        durationMs: Date.now() - turn.startedAt,
+        costUsd: null,
+        inputTokens,
+        outputTokens,
+        ...(cacheReadTokens !== null ? { cacheReadTokens } : {}),
+        ...(cacheWriteTokens !== null ? { cacheWriteTokens } : {}),
+        completedAt: Date.now(),
+      });
+    } catch (err) {
+      if (this.activeTurn === turn) this.activeTurn = null;
+      // Clear any in-flight tool calls on error/retry so stale ids from a
+      // failed attempt can never strand `busy === true`.
+      this.inFlightToolCalls.clear();
+      if (this.closed) return;
+
+      const errorText = errText(err);
+      const isRetryable =
+        !turn.interrupted &&
+        attempt < AgySession.MAX_TURN_RETRIES &&
+        AgySession.TRANSIENT_ERROR_PATTERN.test(errorText);
+
+      if (isRetryable) {
+        // Discard partial output from the failed attempt before retrying.
+        this.streamedThought = '';
+        this.streamedText = '';
+        const backoffMs =
+          AgySession.RETRY_BACKOFF_MS[Math.min(attempt, AgySession.RETRY_BACKOFF_MS.length - 1)] ?? 1000;
         this.emitEvent({
           kind: 'notice',
           level: 'warn',
-          text:
-            startError ??
-            'agy stopped between turns, so any background task it was still running has ended. The next prompt resumes the conversation.',
+          text: `agy hit a transient error (${errorText}) — retrying (${attempt + 1}/${AgySession.MAX_TURN_RETRIES})…`,
+        });
+        const continued = await this.waitRetryBackoff(backoffMs);
+        if (continued && !this.closed) {
+          await this.runTurn(prompt, attempt + 1);
+        }
+        return;
+      }
+
+      this.flushStreamedThought();
+      this.flushStreamedText();
+
+      if (isAgyQuotaError(errorText)) {
+        this.emitEvent({
+          kind: 'rate_limit',
+          provider: 'agy',
+          resetsAt: null,
+          limitType: null,
+          resetsAtLabel: null,
         });
       }
-      this.suppressCloseNotice = false;
-      return;
-    }
-
-    if (startError) {
-      this.settleTurn(turn, startError);
-      return;
-    }
-    if (signal || this.closed) {
-      // Our own interrupt()/terminate() already emitted a notice, or the
-      // session was torn down mid-turn — never schedule a retry either way.
-      this.settleTurn(turn, null);
-      return;
-    }
-    this.settleTurn(
-      turn,
-      turn.resultErrorShown || code === 0 || code === null
-        ? null
-        : this.stderrTail.trim() || `agy exited with code ${code}`,
-    );
-  }
-
-  /**
-   * End a turn that never got its own `result` line — the child crashed, was
-   * killed, or would not accept the write.
-   *
-   * Emits a synthetic `turn_complete` alongside the notice. A `result` line
-   * is normally the *only* thing that produces one (see `normalizeAgyResult`),
-   * so without this the transcript would keep a turn open forever on exactly
-   * the paths where something already went wrong.
-   */
-  private settleTurn(turn: ActiveTurn, notice: string | null): void {
-    if (turn.settled) return;
-    turn.settled = true;
-    if (this.activeTurn === turn) this.activeTurn = null;
-    if (notice) this.emitEvent({ kind: 'notice', level: 'error', text: notice });
-    this.emitEvent({
-      kind: 'turn_complete',
-      stopReason: 'ERROR',
-      isError: true,
-      numTurns: null,
-      durationMs: null,
-      costUsd: null,
-      inputTokens: null,
-      outputTokens: null,
-    });
-    turn.resolve();
-  }
-
-  /**
-   * This turn's `result` line has been processed: resolve it, or start the
-   * one retry it asked for.
-   */
-  private completeTurn(): void {
-    const turn = this.activeTurn;
-    if (!turn || turn.settled) return;
-    turn.settled = true;
-    this.activeTurn = null;
-
-    if (turn.pendingWedgedReset) {
-      // See `runTurn`'s `conversationResetTried` doc comment. The child
-      // carries the wedged conversation id in its own argv, so it has to go
-      // with it — this is the one retry that cannot reuse the live process.
-      this._agentSessionId = null;
-      this.discardChild();
-      this.emitEvent({
-        kind: 'notice',
-        level: 'warn',
-        text: `agy's conversation looks stuck (${turn.pendingRetryText}) — starting a new conversation and retrying…`,
-      });
-      this.scheduleRetry(turn, AgySession.CONVERSATION_RESET_BACKOFF_MS, 0, true);
-      return;
-    }
-    if (turn.pendingRetryText) {
-      const backoffMs =
-        AgySession.RETRY_BACKOFF_MS[Math.min(turn.attempt, AgySession.RETRY_BACKOFF_MS.length - 1)];
-      this.emitEvent({
-        kind: 'notice',
-        level: 'warn',
-        text: `agy hit a transient error (${turn.pendingRetryText}) — retrying (${turn.attempt + 1}/${AgySession.MAX_TURN_RETRIES})…`,
-      });
-      // Deliberately reuses the live child: what the retry needs is the same
-      // conversation, and recycling a healthy process would kill whatever it
-      // still has running in the background for no reason.
-      this.scheduleRetry(turn, backoffMs, turn.attempt + 1, turn.conversationResetTried);
-      return;
-    }
-    turn.resolve();
-  }
-
-  private scheduleRetry(
-    turn: ActiveTurn,
-    // `number | undefined` rather than `number`: both backoff constants are
-    // array lookups, which `noUncheckedIndexedAccess` widens, and setTimeout
-    // itself accepts undefined (treating it as 0). Narrowing here would only
-    // add a `?? fallback` that no caller can actually reach.
-    backoffMs: number | undefined,
-    attempt: number,
-    conversationResetTried: boolean,
-  ): void {
-    const retryTimer = setTimeout(() => {
-      this.cancelPendingRetry = null;
-      if (this.closed) {
-        turn.resolve();
-        return;
+      if (!turn.interrupted) {
+        this.emitEvent({ kind: 'notice', level: 'error', text: errorText });
       }
-      void this.runTurn(turn.text, attempt, conversationResetTried).then(turn.resolve);
-    }, backoffMs);
-    retryTimer.unref?.();
-    // See `cancelPendingRetry`'s doc comment — `interrupt()` calls this
-    // instead of looking for a turn that is not in flight right now.
-    this.cancelPendingRetry = () => {
-      clearTimeout(retryTimer);
-      this.cancelPendingRetry = null;
-      turn.resolve();
-    };
+      this.emitEvent({
+        kind: 'turn_complete',
+        stopReason: turn.interrupted ? 'cancelled' : 'ERROR',
+        isError: !turn.interrupted,
+        numTurns: null,
+        durationMs: Date.now() - turn.startedAt,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+        completedAt: Date.now(),
+      });
+    }
   }
 
-  /**
-   * `attempt` is 0 for the user's original request and increments on each
-   * silent retry of a transient failure (see `TRANSIENT_ERROR_PATTERN`) —
-   * `drain()` and `scheduleRetry()` are the only two callers, and both always
-   * pass the same `text`, so the whole retry chain is one logical turn from
-   * the outside: one `user_prompt`, one eventual `turn_complete`.
-   *
-   * `conversationResetTried` guards a separate, one-shot escape hatch: some
-   * `--conversation <id>` gets permanently wedged server-side and returns a
-   * transient-*looking* error (see `TRANSIENT_ERROR_PATTERN`) on every turn
-   * forever, not just this one — confirmed live by replaying a turn against
-   * such a conversation twice outside PocketAgent: both replays finished in
-   * a few seconds with the model's answer already in `result.response`, yet
-   * `result.status` was still `ERROR`/`"context canceled"` and
-   * `result.duration_seconds` (600+, climbing by wall-clock between the two
-   * replays rather than by either replay's own runtime) pointed at a
-   * deadline attached to the conversation itself, not to any one process.
-   * Retrying that conversation, however many times, can never succeed. Once
-   * the normal retry budget above is exhausted *and* this attempt was
-   * continuing an existing conversation, `completeTurn` drops
-   * `_agentSessionId`, discards the child bound to it, and spends this one
-   * extra attempt on a brand-new conversation instead of surfacing the error
-   * — set here (not left to default) precisely so that fresh attempt can
-   * never trigger a second reset if it also happens to fail.
-   */
-  private runTurn(text: string, attempt = 0, conversationResetTried = false): Promise<void> {
+  private waitRetryBackoff(backoffMs: number): Promise<boolean> {
     return new Promise((resolve) => {
-      const child = this.ensureChild();
-      if (!child) {
-        // `ensureChild` already surfaced why as a notice.
-        resolve();
-        return;
-      }
-
-      const turn: ActiveTurn = {
-        text,
-        attempt,
-        conversationResetTried,
-        resumedConversation: this.childResumedConversation,
-        startedAt: Date.now(),
-        settled: false,
-        resultErrorShown: false,
-        pendingRetryText: null,
-        pendingWedgedReset: false,
-        lastStep: null,
-        resolve,
+      const timer = setTimeout(() => {
+        this.cancelPendingRetry = null;
+        resolve(true);
+      }, backoffMs);
+      timer.unref?.();
+      this.cancelPendingRetry = () => {
+        clearTimeout(timer);
+        this.cancelPendingRetry = null;
+        resolve(false);
       };
-      this.activeTurn = turn;
-
-      // The only frame agy's stream input accepts for a prompt: its own
-      // validator rejects a message with no `event` field ("stream input
-      // message is missing the \"event\" field") and a `user` event with no
-      // `message` field.
-      const frame = JSON.stringify({
-        event: 'user',
-        message: { role: 'user', content: [{ type: 'text', text }] },
-      });
-      try {
-        child.stdin.write(`${frame}\n`);
-      } catch (err) {
-        // A write to a pipe whose far end has already gone. Settle through
-        // the same path a death mid-turn takes, so the prompt surfaces an
-        // error rather than vanishing.
-        this.settleTurn(turn, `agy is not accepting input: ${errText(err)}`);
-      }
     });
-  }
-
-  /**
-   * Run one `/slash` prompt as its own `--print` invocation.
-   *
-   * agy answers its own slash commands inside the CLI rather than through the
-   * model, and refuses them on the stream-json input path outright: "/x is
-   * answered by the CLI itself and is unavailable with --input-format
-   * stream-json; run it as its own --print /x invocation". This is that
-   * invocation — the same one-shot shape `fetchInitialCommands` already uses
-   * for `/help`, but against the session's own conversation and with its
-   * events surfaced, so typing `/model` in a chat still works.
-   *
-   * No retry budget and no `ActiveTurn`: a slash command resolves locally and
-   * instantly (observed `duration_seconds: 0`), so there is no transient
-   * backend failure for `TRANSIENT_ERROR_PATTERN` to be recognizing, and
-   * nothing here may touch `this.child` — the long-lived process and its
-   * background tasks have to survive a slash command, and `interrupt()`
-   * must not mistake this for the conversation's own child.
-   */
-  private runSlashTurn(text: string): Promise<void> {
-    return new Promise((resolve) => {
-      const args = [...this.baseArgs(), '-p', text];
-      if (this._agentSessionId) args.push('--conversation', this._agentSessionId);
-      if (this._desiredModel) args.push('--model', this._desiredModel);
-
-      const bin = this.spec.executablePath ?? 'agy';
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        child = spawn(bin, args, { cwd: this.spec.cwd, env: this.spec.env });
-      } catch (err) {
-        this.emitEvent({ kind: 'notice', level: 'error', text: `Failed to run agy: ${errText(err)}` });
-        resolve();
-        return;
-      }
-
-      let stderrTail = '';
-      let done = false;
-      const settle = (notice: string | null): void => {
-        if (done) return;
-        done = true;
-        if (notice) this.emitEvent({ kind: 'notice', level: 'error', text: notice });
-        resolve();
-      };
-
-      const rl = readline.createInterface({ input: child.stdout });
-      rl.on('line', (line) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        this._lastActivityAt = Date.now();
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(trimmed);
-        } catch {
-          return;
-        }
-        for (const event of normalizeAgyMessageSafe(parsed)) {
-          if (event.kind === 'session_started' && event.agentSessionId) {
-            this._agentSessionId = event.agentSessionId;
-          }
-          this.emitEvent(event);
-        }
-      });
-      child.stderr.on('data', (chunk: Buffer) => {
-        stderrTail = (stderrTail + chunk.toString()).slice(-4000);
-      });
-      child.on('error', (err) => settle(`agy failed to start: ${err.message}`));
-      child.on('close', (code, signal) => {
-        if (signal || this.closed) {
-          settle(null);
-          return;
-        }
-        settle(code !== 0 && code !== null ? stderrTail.trim() || `agy exited with code ${code}` : null);
-      });
-    });
-  }
-
-  /**
-   * Rewrite a `turn_complete`'s stats from conversation totals to this turn's
-   * own share. See `cumulative` for why they are totals at all.
-   *
-   * `durationMs` is measured here rather than derived from
-   * `result.duration_seconds`, because agy's own figure is wall-clock for the
-   * whole conversation and a subtraction of it would silently include the
-   * time the user spent reading the previous answer.
-   */
-  private makeStatsPerTurn(event: Extract<AgentEvent, { kind: 'turn_complete' }>, turn: ActiveTurn | null): void {
-    if (turn) event.durationMs = Date.now() - turn.startedAt;
-
-    // A value *below* the running total means the counter restarted — a new
-    // conversation after a wedged-conversation reset, or a replacement child
-    // that reports only its own work — in which case what arrived is already
-    // this turn's figure rather than a total.
-    const share = (reported: number | null, total: number): [number | null, number] => {
-      if (reported === null) return [null, total];
-      if (reported < total) return [reported, reported];
-      return [reported - total, reported];
-    };
-
-    [event.inputTokens, this.cumulative.inputTokens] = share(event.inputTokens, this.cumulative.inputTokens);
-    [event.outputTokens, this.cumulative.outputTokens] = share(event.outputTokens, this.cumulative.outputTokens);
-    [event.numTurns, this.cumulative.numTurns] = share(event.numTurns, this.cumulative.numTurns);
-  }
-
-  private flushPendingSubagents(content: string, isError: boolean): void {
-    for (const toolUseId of this.pendingSubagents) {
-      this.emitEvent({
-        kind: 'tool_result',
-        id: `agy_sub_end_${toolUseId}`,
-        toolUseId,
-        content,
-        truncated: false,
-        isError,
-      });
-    }
-    this.pendingSubagents.clear();
   }
 
   async interrupt(): Promise<void> {
@@ -1216,57 +955,188 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
       return;
     }
-    // Only a turn actually in flight is interruptible. The child now outlives
-    // the turn that spawned it, so killing it while idle would destroy
-    // background tasks nobody asked to stop — and would read as "interrupt
-    // silently broke my dev server".
-    if (!this.child || !this.activeTurn) return;
-    this.child.kill('SIGINT');
+    if (!this.child || !this._agentSessionId || (!this.activeTurn && !this._busy)) return;
+    if (this.activeTurn) {
+      this.activeTurn.interrupted = true;
+    }
+
+    // Cancel any parked permission requests and close their transcript cards cleanly.
+    for (const [id, entry] of [...this.pending]) {
+      this.pending.delete(id);
+      try {
+        this.writeJson({
+          jsonrpc: '2.0',
+          id: entry.rpcId,
+          result: { outcome: { outcome: 'cancelled' } },
+        });
+      } catch {
+        /* pipe already closed */
+      }
+      this.emitEvent({
+        kind: 'permission_resolved',
+        id,
+        decision: 'deny',
+        message: 'Interrupted.',
+      });
+    }
+    this.emit('permission', this.pendingPermissions());
+
+    try {
+      this.writeJson({
+        jsonrpc: '2.0',
+        method: 'session/cancel',
+        params: { sessionId: this._agentSessionId },
+      });
+    } catch {
+      /* pipe already closed */
+    }
+    this.inFlightToolCalls.clear();
+    this.clearIdleFlush();
+    this.updateBusy();
     this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
   }
 
-  // ---- Approvals -------------------------------------------------------------
-  //
-  // Headless agy has no synchronous approval channel (see agents/agy.ts), so
-  // there is never anything pending here. These exist only so AgySession is
-  // structurally interchangeable with StructuredSession wherever the manager
-  // and the WebSocket layer narrow on `transport === 'structured'`.
+  // ---- Approvals ------------------------------------------------------------
+
+  /**
+   * Handle an incoming ACP `session/request_permission` request.
+   *
+   * Parks indefinitely until a human answers via `resolvePermission` — there is
+   * no timeout by design, preserving PocketAgent's core invariant.
+   */
+  private handlePermissionRequest(rpcId: string | number, params: unknown): void {
+    const p = isRecord(params) ? params : {};
+    const toolCall = isRecord(p.toolCall) ? p.toolCall : {};
+    const toolName = typeof toolCall.name === 'string' && toolCall.name ? toolCall.name : 'tool';
+    const input = isRecord(toolCall.rawInput)
+      ? toolCall.rawInput
+      : isRecord(toolCall.args)
+        ? toolCall.args
+        : {};
+
+    let filePath = extractAgyPath(input);
+    if (!filePath && Array.isArray(toolCall.locations)) {
+      for (const loc of toolCall.locations) {
+        if (isRecord(loc) && typeof loc.path === 'string' && loc.path) {
+          filePath = loc.path;
+          break;
+        }
+      }
+    }
+
+    const rawOptions = Array.isArray(p.options) ? p.options : [];
+    const options: AcpPermissionOption[] = [];
+    for (const raw of rawOptions) {
+      if (isRecord(raw) && typeof raw.optionId === 'string' && raw.optionId) {
+        options.push({
+          optionId: raw.optionId,
+          ...(typeof raw.name === 'string' ? { name: raw.name } : {}),
+          ...(typeof raw.kind === 'string' ? { kind: raw.kind } : {}),
+        });
+      }
+    }
+
+    const toolTitle = typeof toolCall.title === 'string' && toolCall.title.trim() ? toolCall.title.trim() : null;
+    const id = crypto.randomBytes(8).toString('base64url');
+    const event: PermissionRequestEvent = {
+      kind: 'permission_request',
+      id,
+      toolName,
+      input,
+      title: toolTitle ? `Allow: ${toolTitle}?` : `Allow: ${summarizeAgyTool(toolName, input)}?`,
+      displayName: null,
+      filePath,
+      reason: null,
+      canAllowForSession: options.some((o) => o.kind === 'allow_always'),
+      questions: null,
+    };
+
+    this.pending.set(id, { event, rpcId, options });
+    this.updateBusy();
+    this.emitEvent(event);
+    this.emit('permission', this.pendingPermissions());
+  }
 
   pendingPermissions(): PermissionRequestEvent[] {
-    return [];
+    return [...this.pending.values()].map((entry) => entry.event);
   }
 
-  resolvePermission(): boolean {
-    return false;
+  /** Answer a pending approval. Returns false if the id is unknown or stale. */
+  resolvePermission(id: string, decision: PermissionDecision, message?: string): boolean {
+    const entry = this.pending.get(id);
+    if (!entry) return false;
+    this.pending.delete(id);
+    this._lastActivityAt = Date.now();
+    this.updateBusy();
+
+    const outcome = selectAcpPermissionOutcome(entry.options, decision);
+    try {
+      this.writeJson({
+        jsonrpc: '2.0',
+        id: entry.rpcId,
+        result: { outcome },
+      });
+    } catch {
+      /* child already exited */
+    }
+
+    this.emitEvent({
+      kind: 'permission_resolved',
+      id,
+      decision,
+      message: message ?? null,
+    });
+    this.emit('permission', this.pendingPermissions());
+    return true;
   }
 
-  // ---- Teardown ----------------------------------------------------------------
+  private clearPendingPermissions(): void {
+    if (this.pending.size === 0) return;
+    this.pending.clear();
+    this.emit('permission', []);
+  }
+
+  // ---- Teardown -------------------------------------------------------------
 
   terminate(graceMs?: number): void {
     if (!this.isAlive()) return;
     this.closed = true;
     this.queue.length = 0;
+    this.inFlightToolCalls.clear();
+    this.clearIdleFlush();
+    this.clearPendingPermissions();
+    this.updateBusy();
     this.setStatus('killed');
     this._endedAt = Date.now();
 
-    // Otherwise this would sit out the rest of the backoff window before the
-    // retryTimer callback notices `closed` on its own — harmless, but pointless
-    // to wait for.
     if (this.cancelPendingRetry) {
       this.cancelPendingRetry();
-      return;
+    }
+
+    for (const [id, pending] of this.pendingRpc) {
+      this.pendingRpc.delete(id);
+      pending.reject(new Error('Session terminated'));
     }
 
     const child = this.child;
     if (!child) return;
-    // agy exits cleanly (exit code 0, no error) on stdin EOF when idle —
-    // confirmed live (~700ms to close conversation and state). If we hit it with
-    // SIGTERM while idle, Go's context cancellation triggers "stream input
-    // cancelled: context canceled" with exit code 1.
-    //
-    // So on idle, close stdin and give agy a grace period to exit cleanly.
-    // Only if a turn is actively in-flight (which won't read stdin until it
-    // finishes) do we send SIGTERM immediately to abort in-flight execution.
+
+    // Best-effort ACP `session/close` before closing stdin.
+    if (this._agentSessionId) {
+      try {
+        child.stdin.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: this.nextRpcId++,
+            method: 'session/close',
+            params: { sessionId: this._agentSessionId },
+          })}\n`,
+        );
+      } catch {
+        /* already gone */
+      }
+    }
+
     try {
       child.stdin.end();
     } catch {
@@ -1301,11 +1171,41 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   dispose(): void {
     this.closed = true;
     this.queue.length = 0;
+    this.clearIdleFlush();
+    this.clearPendingPermissions();
     this.removeAllListeners();
   }
 
   /** No-op: idle hints are a terminal-only heuristic. */
   pollIdleHint(): void {}
+}
+
+function selectAcpPermissionOutcome(
+  options: AcpPermissionOption[],
+  decision: PermissionDecision,
+): { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } {
+  if (decision === 'deny') {
+    const opt =
+      options.find((o) => o.kind === 'reject_once') ??
+      options.find((o) => o.kind?.startsWith('reject')) ??
+      options.find((o) => o.optionId === 'deny');
+    return opt ? { outcome: 'selected', optionId: opt.optionId } : { outcome: 'cancelled' };
+  }
+
+  if (decision === 'allow_session') {
+    const opt =
+      options.find((o) => o.kind === 'allow_always') ??
+      options.find((o) => o.kind === 'allow_once') ??
+      options.find((o) => o.kind?.startsWith('allow')) ??
+      options.find((o) => o.optionId === 'allow');
+    return opt ? { outcome: 'selected', optionId: opt.optionId } : { outcome: 'cancelled' };
+  }
+
+  const opt =
+    options.find((o) => o.kind === 'allow_once') ??
+    options.find((o) => o.kind?.startsWith('allow')) ??
+    options.find((o) => o.optionId === 'allow');
+  return opt ? { outcome: 'selected', optionId: opt.optionId } : { outcome: 'cancelled' };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1314,27 +1214,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Does this prompt name one of agy's own slash commands?
- *
- * The trailing `(\s|$)` is load-bearing: it requires the command word to end,
- * so an absolute path typed as a prompt ("/data/homes/x — please review
- * this") is *not* mistaken for one. Without it every such prompt would be
- * routed to a one-shot `-p` process and silently lose the background-task
- * guarantee this class exists to provide, which is the same class of bug as
- * the one it replaced.
- */
-function isSlashCommand(text: string): boolean {
-  return /^\s*\/[A-Za-z][A-Za-z0-9_-]*(\s|$)/.test(text);
-}
-
-/** Never let one malformed agy payload kill the pump loop. */
-function normalizeAgyMessageSafe(message: unknown): AgentEvent[] {
-  try {
-    return normalizeAgyMessage(message);
-  } catch {
-    return [];
-  }
 }

@@ -368,6 +368,9 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                         routed to you for approval. Only turn this on for a session you trust
                         completely, e.g. one running in a throwaway directory.
                       </p>
+                      {selected?.providerDisclosure && (
+                        <p className="warn-note">{selected.providerDisclosure}</p>
+                      )}
                     </div>
                   )
                 )}

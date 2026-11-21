@@ -127,6 +127,10 @@ export interface StructuredSessionEvents {
   exit: [exitCode: number | null, exitSignal: number | null];
   /** Raised when an approval starts or stops waiting, for push notifications. */
   permission: [pending: PermissionRequestEvent[]];
+  /** Raised when the backend pushes a live session title (e.g. ACP `session_info_update`). */
+  title: [title: string];
+  /** Raised when `busy` transitions true -> false, so RunQueue wakes immediately after background work. */
+  idle: [];
 }
 
 interface PendingPermission {
