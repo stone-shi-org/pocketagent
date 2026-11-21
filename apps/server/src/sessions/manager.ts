@@ -35,7 +35,7 @@ import { usageProbeCwd } from '../usage/probe-cwd.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
 import { AgySession } from './agy-session.js';
-import { readAgySettingsAutoApprove } from '../agents/agy.js';
+import { formatAgySettingsAutoApproveNotice, readAgySettingsAutoApprove } from '../agents/agy.js';
 import { OpencodeSession } from './opencode-session.js';
 import { OpencodeServerManager } from './opencode-server.js';
 import { CodexSession } from './codex-session.js';
@@ -709,6 +709,11 @@ export class SessionManager {
         this.notifyTreeIdle(session.spec.cwd);
       }
     });
+    if (session.transport === 'structured') {
+      session.on('idle', () => {
+        this.notifyTreeIdle(session.spec.cwd);
+      });
+    }
     session.on('exit', () => {
       this.persist(session);
       // A dead session holds nothing, so its tree may now be free.
@@ -1286,16 +1291,17 @@ export class SessionManager {
     skipPermissions?: boolean;
   }): Promise<AgySession> {
     // `agy acp` in `default` mode still respects `~/.gemini/antigravity-cli/settings.json`.
-    // If the host's settings.json sets `toolPermission: "always-proceed"` (or
-    // `"proceed-in-sandbox"`), agy will auto-approve commands even without
-    // `--dangerously-skip-permissions`. Disclose it honestly as bypassed
-    // (`skipPermissionsEnabled: true`) and emit a warning naming the file/key
-    // so a bypassed session is never shown as supervised.
+    // If the host's settings.json sets a non-supervised `toolPermission` (anything
+    // other than `request-review` / `strict` / unset), agy may auto-approve commands
+    // on its own. Keep `spec.skipPermissions` strictly equal to what the caller
+    // requested so we NEVER escalate `agy`'s argv with `--dangerously-skip-permissions`
+    // (e.g. stripping sandbox limits from `proceed-in-sandbox`), and record
+    // `bypassedBySettings` separately for honest disclosure (`skipPermissionsEnabled`
+    // and the persisted `skip_permissions` flag) plus a startup warning.
     const settingsCheck = readAgySettingsAutoApprove({ homeDir: args.env.HOME });
     const bypassedBySettings = !args.skipPermissions && settingsCheck.autoApproves;
-    const effectiveSkipPermissions = args.skipPermissions === true || bypassedBySettings;
     const settingsAutoApproveNotice = bypassedBySettings
-      ? `agy's ${settingsCheck.settingsPath} sets toolPermission: "${settingsCheck.toolPermission}", so agy auto-approves commands on its own. Change toolPermission to "request-review" or "strict" (or remove it) to enable PocketAgent's approval gate.`
+      ? formatAgySettingsAutoApproveNotice(settingsCheck)
       : undefined;
 
     const session = new AgySession({
@@ -1314,7 +1320,8 @@ export class SessionManager {
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
       plannerChatId: args.plannerChatId ?? null,
-      skipPermissions: effectiveSkipPermissions,
+      skipPermissions: args.skipPermissions === true,
+      bypassedBySettings,
       ...(settingsAutoApproveNotice ? { settingsAutoApproveNotice } : {}),
     });
 
@@ -2135,7 +2142,8 @@ export class SessionManager {
       // happening right now, not just what was chosen at creation.
       skipPermissionsEnabled:
         session.spec.skipPermissions === true ||
-        (session.transport === 'structured' && session.globalBypassActive),
+        (session.transport === 'structured' && session.globalBypassActive) ||
+        (session instanceof AgySession && session.bypassedBySettings),
       // Read off the adapter rather than persisted with the session: it is a
       // property of *how this agent runs*, not of a choice made at creation,
       // so it must follow the adapter's current configuration. Nothing is
@@ -2240,7 +2248,10 @@ export class SessionManager {
         session.externalId,
         session.transport,
         session.agentSessionId,
-        session.spec.skipPermissions === true ? 1 : 0,
+        session.spec.skipPermissions === true ||
+        (session instanceof AgySession && session.bypassedBySettings)
+          ? 1
+          : 0,
         session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
         session.plannerChatId ?? null,
       );
@@ -2255,7 +2266,7 @@ export class SessionManager {
         `UPDATE sessions
             SET status = ?, pid = ?, cols = ?, rows = ?, exit_code = ?, exit_signal = ?,
                 started_at = ?, ended_at = ?, last_activity_at = ?, external_id = ?,
-                agent_session_id = ?, title = ?
+                agent_session_id = ?, title = ?, skip_permissions = ?
           WHERE id = ?`,
       )
       .run(
@@ -2275,6 +2286,10 @@ export class SessionManager {
         // title once one was found rather than reverting to the generic
         // creation-time name.
         this.displayTitle(session),
+        session.spec.skipPermissions === true ||
+          (session instanceof AgySession && session.bypassedBySettings)
+          ? 1
+          : 0,
         session.id,
       );
   }

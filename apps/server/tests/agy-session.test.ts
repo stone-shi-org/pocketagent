@@ -80,12 +80,17 @@ describe('AgySession (ACP)', () => {
     });
   });
 
-  it('passes --add-dir <cwd> and only passes --dangerously-skip-permissions when skipPermissions is true', async () => {
+  it('passes --add-dir <cwd> and only passes --dangerously-skip-permissions when skipPermissions is true (never for bypassedBySettings)', async () => {
     const argvFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-argv-')), 'argv.jsonl');
     const env = { ...(process.env as Record<string, string>), AGY_FIXTURE_ARGV_FILE: argvFile };
 
     session = new AgySession(makeSpec({ env, skipPermissions: false }));
     await session.start();
+    session.terminate();
+
+    session = new AgySession(makeSpec({ env, skipPermissions: false, bypassedBySettings: true }));
+    await session.start();
+    expect(session.bypassedBySettings).toBe(true);
     session.terminate();
 
     session = new AgySession(makeSpec({ env, skipPermissions: true }));
@@ -97,9 +102,10 @@ describe('AgySession (ACP)', () => {
       .split('\n')
       .map((l) => JSON.parse(l) as string[]);
 
-    expect(lines).toHaveLength(2);
+    expect(lines).toHaveLength(3);
     expect(lines[0]).toEqual(['acp', '--add-dir', process.cwd()]);
-    expect(lines[1]).toEqual(['acp', '--add-dir', process.cwd(), '--dangerously-skip-permissions']);
+    expect(lines[1]).toEqual(['acp', '--add-dir', process.cwd()]);
+    expect(lines[2]).toEqual(['acp', '--add-dir', process.cwd(), '--dangerously-skip-permissions']);
   });
 
   it('resumes an existing conversation via ACP session/resume when resumeAgentSessionId is provided', async () => {
@@ -272,6 +278,8 @@ describe('AgySession (ACP)', () => {
     session = new AgySession(makeSpec({ env }));
     await session.start();
     const events = collect(session);
+    let idleEmitted = 0;
+    session.on('idle', () => idleEmitted++);
 
     session.prompt('BACKGROUND_TASK');
     await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
@@ -281,17 +289,37 @@ describe('AgySession (ACP)', () => {
     // so RunQueue and restart drain do not treat the checkout as idle.
     expect(fs.existsSync(taskFile)).toBe(false);
     expect(session.busy).toBe(true);
+    expect(idleEmitted).toBe(0);
 
     // Background task survives and completes while the ACP process stays up.
     await waitFor(() => fs.existsSync(taskFile), { timeout: 5_000 });
     expect(fs.readFileSync(taskFile, 'utf8')).toBe('FINISHED');
 
-    // Reactive tool_result and follow-up text arrive while idle, and `busy` clears once settled.
+    // Reactive tool_result and follow-up text arrive while idle, and `busy` clears + emits 'idle'.
     await waitFor(() => events.some((e) => e.kind === 'tool_result'));
     await waitFor(() => events.some((e) => e.kind === 'text' && e.text === 'Background task finished.'), {
       timeout: 3_000,
     });
     await waitFor(() => session?.busy === false, { timeout: 3_000 });
+    expect(idleEmitted).toBe(1);
+  });
+
+  it('clears in-flight tool calls on turn error and prunes non-execute calls at end_turn so busy never gets stuck', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    // 1. Execute tool call with no terminal update followed by an errored turn -> busy must be false.
+    session.prompt('DANGLING_TOOL_ERROR');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    await waitFor(() => session?.busy === false);
+    expect(session.busy).toBe(false);
+
+    // 2. Non-execute tool call (kind: "read") with no terminal update followed by normal end_turn -> busy must be false.
+    session.prompt('DANGLING_READ_END_TURN');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+    await waitFor(() => session?.busy === false);
+    expect(session.busy).toBe(false);
   });
 
   it('interrupt() cancels parked permissions with permission_resolved so transcript cards close cleanly', async () => {
@@ -467,7 +495,7 @@ describe('AgySession (ACP)', () => {
 });
 
 describe('readAgySettingsAutoApprove', () => {
-  it('detects auto-approving toolPermission policies in settings.json', () => {
+  it('fails closed on non-supervised toolPermission policies in settings.json', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-settings-'));
     const file = path.join(dir, 'settings.json');
 
@@ -481,12 +509,21 @@ describe('readAgySettingsAutoApprove', () => {
     fs.writeFileSync(file, JSON.stringify({ toolPermission: 'proceed-in-sandbox' }));
     expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(true);
 
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'custom' }));
+    expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(true);
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'unknown-future-policy' }));
+    expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(true);
+
     fs.writeFileSync(file, JSON.stringify({ toolPermission: 'request-review' }));
     expect(readAgySettingsAutoApprove({ settingsPath: file })).toEqual({
       autoApproves: false,
       toolPermission: 'request-review',
       settingsPath: file,
     });
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'strict' }));
+    expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(false);
 
     fs.writeFileSync(file, JSON.stringify({}));
     expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(false);

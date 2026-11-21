@@ -51,11 +51,13 @@ export function agyFileTokenStorageEnv(
 
 /**
  * Values of `toolPermission` in `~/.gemini/antigravity-cli/settings.json`
- * that cause `agy acp` in `default` mode to auto-approve terminal commands
- * without sending `session/request_permission` (confirmed live against
- * agy 1.5.14: `session/set_mode(default)` does not override `settings.json`).
+ * known to ask for approval before running terminal commands. Anything else
+ * (`always-proceed`, `proceed-in-sandbox`, `custom`, or any future/unknown
+ * value) fails closed and is disclosed as potentially auto-approving so a
+ * bypassed session is never shown as supervised. Confirmed live against
+ * agy 1.5.14: `session/set_mode(default)` does not override `settings.json`.
  */
-const AGY_AUTO_APPROVE_POLICIES = new Set(['always-proceed', 'proceed-in-sandbox']);
+const AGY_SUPERVISED_POLICIES = new Set(['request-review', 'strict']);
 
 export interface AgySettingsAutoApproveInfo {
   autoApproves: boolean;
@@ -64,9 +66,20 @@ export interface AgySettingsAutoApproveInfo {
 }
 
 /**
+ * Format the startup warning shown when agy's `settings.json` carries a
+ * non-supervised `toolPermission` value.
+ */
+export function formatAgySettingsAutoApproveNotice(info: AgySettingsAutoApproveInfo): string {
+  const value = info.toolPermission ?? 'unknown';
+  return `agy's ${info.settingsPath} sets toolPermission: "${value}", so agy may auto-approve commands on its own without PocketAgent's approval gate. Change toolPermission to "request-review" or "strict" (or remove it) to require PocketAgent approval.`;
+}
+
+/**
  * Read agy's `settings.json` read-only to detect whether host-level
- * `toolPermission` will auto-approve commands even when PocketAgent starts
- * `agy acp` without `--dangerously-skip-permissions`. Never throws.
+ * `toolPermission` may auto-approve commands even when PocketAgent starts
+ * `agy acp` without `--dangerously-skip-permissions`. Fails closed for any
+ * configured value other than known supervised modes (`request-review`,
+ * `strict`). Never throws.
  */
 export function readAgySettingsAutoApprove(opts: {
   settingsPath?: string;
@@ -87,7 +100,7 @@ export function readAgySettingsAutoApprove(opts: {
     }
     const normalized = tp.trim().toLowerCase();
     return {
-      autoApproves: AGY_AUTO_APPROVE_POLICIES.has(normalized),
+      autoApproves: !AGY_SUPERVISED_POLICIES.has(normalized),
       toolPermission: tp.trim(),
       settingsPath,
     };

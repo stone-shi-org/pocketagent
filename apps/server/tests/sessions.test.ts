@@ -397,38 +397,52 @@ describe('agy adapter: structured, forced skip-permissions', () => {
     expect(info?.skipPermissionsEnabled).toBe(false);
   });
 
-  it('discloses bypass and warns when agy settings.json has toolPermission: "always-proceed"', async () => {
+  it('discloses bypass and warns without escalating argv when agy settings.json has toolPermission: "proceed-in-sandbox"', async () => {
     const settingsDir = path.join(fakeHome, '.gemini', 'antigravity-cli');
     fs.mkdirSync(settingsDir, { recursive: true });
     fs.writeFileSync(
       path.join(settingsDir, 'settings.json'),
-      JSON.stringify({ toolPermission: 'always-proceed' }),
+      JSON.stringify({ toolPermission: 'proceed-in-sandbox' }),
     );
+    const argvFile = path.join(fakeHome, 'argv.jsonl');
+    process.env.AGY_FIXTURE_ARGV_FILE = argvFile;
 
-    const created = await t.app.inject({
-      method: 'POST',
-      url: '/api/sessions',
-      headers: headers(t),
-      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
-    });
-    expect(created.statusCode).toBe(201);
-    const body = created.json();
-    // Never silently bypassed: skipPermissionsEnabled is true and a startup warning names settings.json.
-    expect(body.skipPermissionsEnabled).toBe(true);
-    expect(body.providerDisclosure).toContain('auto-approves file edits');
+    try {
+      const created = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(t),
+        payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+      });
+      expect(created.statusCode).toBe(201);
+      const body = created.json();
+      // Disclosed honestly as bypassed in both API response and SQLite row...
+      expect(body.skipPermissionsEnabled).toBe(true);
+      expect(body.providerDisclosure).toContain('auto-approves file edits');
+      const row = t.db
+        .prepare('SELECT skip_permissions FROM sessions WHERE id = ?')
+        .get(body.id) as { skip_permissions: number };
+      expect(row.skip_permissions).toBe(1);
 
-    const session = t.context.sessions.getOrThrow(body.id as string);
-    if (session.transport !== 'structured') throw new Error('expected structured session');
-    const events = session.buffer.replayAfter(0).events.map((e) => e.event);
-    expect(
-      events.some(
-        (e) =>
-          e.kind === 'notice' &&
-          e.level === 'warn' &&
-          e.text.includes('settings.json') &&
-          e.text.includes('always-proceed'),
-      ),
-    ).toBe(true);
+      // ...WITHOUT adding `--dangerously-skip-permissions` to agy's argv!
+      const spawnedArgs = JSON.parse(fs.readFileSync(argvFile, 'utf8').trim()) as string[];
+      expect(spawnedArgs).not.toContain('--dangerously-skip-permissions');
+
+      const session = t.context.sessions.getOrThrow(body.id as string);
+      if (session.transport !== 'structured') throw new Error('expected structured session');
+      const events = session.buffer.replayAfter(0).events.map((e) => e.event);
+      expect(
+        events.some(
+          (e) =>
+            e.kind === 'notice' &&
+            e.level === 'warn' &&
+            e.text.includes('settings.json') &&
+            e.text.includes('proceed-in-sandbox'),
+        ),
+      ).toBe(true);
+    } finally {
+      delete process.env.AGY_FIXTURE_ARGV_FILE;
+    }
   });
 });
 

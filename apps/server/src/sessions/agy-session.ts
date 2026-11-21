@@ -10,6 +10,7 @@ import type {
   SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
+import { formatAgySettingsAutoApproveNotice, readAgySettingsAutoApprove } from '../agents/agy.js';
 import {
   extractAgyPath,
   isAgyQuotaError,
@@ -37,14 +38,22 @@ export interface AgySessionSpec {
   model?: string;
   /**
    * Explicit, off-by-default opt-in to `--dangerously-skip-permissions`.
-   * When false/absent, `agy acp` routes approval requests over ACP
-   * `session/request_permission` into the browser approval sheet.
+   * Controls the CLI flag ONLY. When false/absent, `agy acp` is spawned
+   * without `--dangerously-skip-permissions`.
    */
   skipPermissions?: boolean;
   /**
+   * True when host-level `~/.gemini/antigravity-cli/settings.json` sets a
+   * non-supervised `toolPermission` value while `skipPermissions` was false.
+   * Kept separate from `skipPermissions` so disclosure (`skipPermissionsEnabled`
+   * and persisted `skip_permissions`) is honest WITHOUT escalating agy's argv
+   * to `--dangerously-skip-permissions` (which would strip sandbox bounds from
+   * `proceed-in-sandbox`, etc.).
+   */
+  bypassedBySettings?: boolean;
+  /**
    * Optional warning notice emitted at session start when agy's host-level
-   * `settings.json` has `toolPermission: "always-proceed"` (or similar),
-   * causing agy to auto-approve commands even without the CLI flag.
+   * `settings.json` sets a non-supervised `toolPermission` value.
    */
   settingsAutoApproveNotice?: string;
   /**
@@ -135,13 +144,17 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private cancelPendingRetry: (() => void) | null = null;
   /**
    * Tool calls started via `tool_call` that have not yet reached a terminal
-   * `tool_call_update` (`completed` / `failed` / `cancelled`). Because `agy acp`
-   * resolves `session/prompt` with `end_turn` while a background `run_command`
-   * is still running, tracking in-flight tool calls keeps `busy` honest so
+   * `tool_call_update` (`completed` / `failed` / `cancelled`), mapped to their
+   * ACP `kind` (`execute`, `edit`, `read`, …). Because `agy acp` resolves
+   * `session/prompt` with `end_turn` while a background `run_command` is still
+   * running, tracking in-flight `execute` calls keeps `busy` honest so
    * `RunQueue`, `POST /api/admin/restart` drain, and `interrupt()` all know agy
-   * is still actively working in the checkout.
+   * is still actively working in the checkout. Non-`execute` calls are pruned
+   * at `end_turn`, and all entries are cleared on turn error/retry so a missing
+   * terminal update can never strand `busy === true`.
    */
-  private readonly inFlightToolCalls = new Set<string>();
+  private readonly inFlightToolCalls = new Map<string, string | null>();
+  private _bypassedBySettings = false;
 
   private _desiredModel: string | null = null;
   private _status: SessionStatus = 'starting';
@@ -180,6 +193,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._agentSessionId = spec.resumeAgentSessionId ?? null;
     this._desiredModel = spec.model ?? null;
+    this._bypassedBySettings = spec.bypassedBySettings === true;
   }
 
   // ---- Shared session surface ---------------------------------------------
@@ -237,6 +251,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   get globalBypassActive(): boolean {
     return false;
   }
+  /** True when host `settings.json` may auto-approve commands without `--dangerously-skip-permissions`. */
+  get bypassedBySettings(): boolean {
+    return this._bypassedBySettings;
+  }
   get derivedTitle(): string | null {
     return this._derivedTitle;
   }
@@ -271,9 +289,22 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    * or resume the session. Kills the spawned child and throws if the process
    * cannot start, hangs past `handshakeTimeoutMs`, or fails handshake.
    */
-  private async spawnAndHandshake(): Promise<void> {
+  private async spawnAndHandshake(isRespawn = false): Promise<void> {
     if (this.child) {
       this.killChildNow(this.child);
+    }
+
+    if (isRespawn && !this.spec.skipPermissions) {
+      const check = readAgySettingsAutoApprove({ homeDir: this.spec.env.HOME });
+      const prev = this._bypassedBySettings;
+      this._bypassedBySettings = check.autoApproves;
+      if (check.autoApproves && !prev) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: formatAgySettingsAutoApproveNotice(check),
+        });
+      }
     }
 
     const args = ['acp', '--add-dir', this.spec.cwd];
@@ -418,6 +449,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (this._busy === busy) return;
     this._busy = busy;
     this._busySince = busy ? Date.now() : null;
+    if (!busy) {
+      this.emit('idle');
+    }
   }
 
   /**
@@ -599,7 +633,8 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     // `run_command` outlives `session/prompt`'s `end_turn`.
     if (kind === 'tool_call') {
       const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
-      if (callId) this.inFlightToolCalls.add(callId);
+      const callKind = typeof update.kind === 'string' ? update.kind : null;
+      if (callId) this.inFlightToolCalls.set(callId, callKind);
       this.flushStreamedThought();
       this.flushStreamedText();
       this.updateBusy();
@@ -758,7 +793,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (!this.child || !this._agentSessionId) {
       if (this.child) this.killChildNow(this.child);
       try {
-        await this.spawnAndHandshake();
+        await this.spawnAndHandshake(true);
       } catch (err) {
         this.emitEvent({ kind: 'notice', level: 'error', text: `Failed to run agy: ${errText(err)}` });
         this.emitEvent({
@@ -803,6 +838,12 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       })) as Record<string, unknown> | null;
 
       if (this.activeTurn === turn) this.activeTurn = null;
+      // Only command-type calls (`kind: "execute"`) can genuinely outlive
+      // `end_turn` as background tasks; prune everything else so a missing
+      // terminal update on a read/edit/search tool can never strand `busy`.
+      for (const [callId, callKind] of [...this.inFlightToolCalls]) {
+        if (callKind !== 'execute') this.inFlightToolCalls.delete(callId);
+      }
       this.flushStreamedThought();
       this.flushStreamedText();
 
@@ -835,6 +876,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       });
     } catch (err) {
       if (this.activeTurn === turn) this.activeTurn = null;
+      // Clear any in-flight tool calls on error/retry so stale ids from a
+      // failed attempt can never strand `busy === true`.
+      this.inFlightToolCalls.clear();
       if (this.closed) return;
 
       const errorText = errText(err);

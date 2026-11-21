@@ -235,6 +235,48 @@ function runAcpServer() {
       return;
     }
 
+    if (text === 'DANGLING_TOOL_ERROR') {
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: `call_dangle_err_${turnCounter}`,
+        name: 'run_command',
+        rawInput: { CommandLine: 'echo fail' },
+        status: 'in_progress',
+        kind: 'execute',
+        title: 'echo fail',
+      });
+      // No terminal tool_call_update — turn fails outright.
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        error: { code: -32000, message: 'tool execution aborted' },
+      });
+      return;
+    }
+
+    if (text === 'DANGLING_READ_END_TURN') {
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: `call_dangle_read_${turnCounter}`,
+        name: 'read_file',
+        rawInput: { Path: '/tmp/foo.txt' },
+        status: 'in_progress',
+        kind: 'read',
+        title: 'File foo.txt',
+      });
+      // Non-execute tool with no terminal update, followed by normal end_turn.
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'done reading' },
+      });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } },
+      });
+      return;
+    }
+
     if (text === 'QUOTA') {
       send({
         jsonrpc: '2.0',

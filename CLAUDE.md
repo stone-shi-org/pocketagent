@@ -4150,11 +4150,13 @@ These are load-bearing. Several were bugs first.
      — no timeout. Two upstream `agy` policies are enforced/disclosed in code rather than left
      silent:
      - `agy acp`'s `default` mode still honours `~/.gemini/antigravity-cli/settings.json` (and
-       `session/set_mode(default)` does not override it). At spawn, `SessionManager.startAgy` reads
-       `settings.json` read-only via `readAgySettingsAutoApprove`: if `toolPermission` is
-       `"always-proceed"` or `"proceed-in-sandbox"`, the session is disclosed as bypassed
-       (`skipPermissionsEnabled: true`) and emits a startup warning naming the file and key, so a
-       bypassed session is never shown as supervised.
+       `session/set_mode(default)` does not override it). At spawn (and on respawn),
+       `readAgySettingsAutoApprove` reads `settings.json` read-only and fails closed: any
+       configured `toolPermission` other than known supervised values (`"request-review"`,
+       `"strict"`, or unset) sets `bypassedBySettings` for honest disclosure
+       (`skipPermissionsEnabled: true`, persisted `skip_permissions = 1`, and a startup warning
+       naming the file and key) **without** adding `--dangerously-skip-permissions` to `agy`'s
+       argv (preserving e.g. `proceed-in-sandbox` bounds).
      - `agy` auto-approves file edits inside the project workspace in all modes (only terminal
        commands and non-workspace file access prompt). `createAgyAdapter` sets `providerDisclosure`
        so this is shown persistently on the session and in the new-session, cron, and webhook
@@ -4164,11 +4166,13 @@ These are load-bearing. Several were bugs first.
   2. **Background tasks survive turns and keep `busy` honest:** `agy acp` resolves `session/prompt`
      with `end_turn` while a background `run_command` is still running, keeps the task alive because
      the process stays up, and pushes reactive `session/update` notifications asynchronously when it
-     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`) and idle reactive
-     streaming (`idleFlushTimer`) in `updateBusy()`, so `busy` stays `true` until all known tool
-     calls finish and reactive output settles — protecting `RunQueue` (`busyTreeRoots`),
-     `POST /api/admin/restart` drain (`midTurnSessions`), and allowing `interrupt()` to cancel
-     reactive work and parked permissions (emitting `permission_resolved`).
+     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`, pruning non-`execute`
+     calls at `end_turn` and clearing all entries on turn error/retry so stale ids cannot strand
+     `busy`) and idle reactive streaming (`idleFlushTimer`) in `updateBusy()`. When `busy` flips
+     `true -> false`, `AgySession` emits `'idle'`, which `SessionManager` maps to `notifyTreeIdle`
+     so `RunQueue` wakes immediately after background work drains. `POST /api/admin/restart` drain
+     (`midTurnSessions`) sees the session as busy while background work runs, and `interrupt()`
+     cancels reactive work and parked permissions (emitting `permission_resolved`).
   3. **Bounded handshake and no leaked children:** `initialize` and `session/new` / `session/resume`
      are bounded by `handshakeTimeoutMs` (default 15s), and any failed or timed-out handshake
      immediately kills the spawned child process.
