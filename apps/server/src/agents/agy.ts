@@ -71,7 +71,7 @@ export interface AgySettingsAutoApproveInfo {
  */
 export function formatAgySettingsAutoApproveNotice(info: AgySettingsAutoApproveInfo): string {
   const value = info.toolPermission ?? 'unknown';
-  return `agy's ${info.settingsPath} sets toolPermission: "${value}", so agy may auto-approve commands on its own without PocketAgent's approval gate. Change toolPermission to "request-review" or "strict" (or remove it) to require PocketAgent approval.`;
+  return `agy's ${info.settingsPath} sets toolPermission: "${value}", so agy may auto-approve commands on its own without PocketAgent's approval gate. Change toolPermission to "request-review" (gates terminal commands) or "strict" (gates all tools including file edits) to require PocketAgent approval.`;
 }
 
 /**
@@ -110,7 +110,29 @@ export function readAgySettingsAutoApprove(opts: {
 }
 
 export const AGY_EDIT_APPROVAL_DISCLOSURE =
-  'Antigravity CLI (agy) auto-approves file edits inside the project folder; terminal commands ask for approval unless skip-permissions or ~/.gemini/antigravity-cli/settings.json toolPermission overrides it.';
+  'Antigravity CLI (agy) auto-approves file edits inside the project folder under default and request-review policies; terminal commands ask for approval unless skip-permissions or ~/.gemini/antigravity-cli/settings.json overrides it. Set toolPermission: "strict" to require approval for file edits too.';
+
+/**
+ * Compute `agy`'s approval disclosure dynamically from host `settings.json`.
+ *
+ * Confirmed live against `agy acp` v1.5.14:
+ *   - unset / `request-review` (even with `agentMode: ""`): in-workspace
+ *     `write_file` is auto-approved without `session/request_permission`, while
+ *     `run_command` prompts.
+ *   - `strict`: in-workspace `write_file` DOES send `session/request_permission`
+ *     (and allow rules are ignored), so the "auto-approves file edits" note is
+ *     not applicable and returns `null`.
+ */
+export function resolveAgyApprovalDisclosure(opts: {
+  settingsPath?: string;
+  homeDir?: string;
+} = {}): string | null {
+  const info = readAgySettingsAutoApprove(opts);
+  if (info.toolPermission?.toLowerCase() === 'strict') {
+    return null;
+  }
+  return AGY_EDIT_APPROVAL_DISCLOSURE;
+}
 
 export function createAgyAdapter(bin: string): AgentAdapter {
   return {
@@ -120,7 +142,7 @@ export function createAgyAdapter(bin: string): AgentAdapter {
     transports: ['structured'],
     defaultTransport: 'structured',
     supportsSkipPermissions: true,
-    providerDisclosure: AGY_EDIT_APPROVAL_DISCLOSURE,
+    approvalDisclosure: () => resolveAgyApprovalDisclosure(),
     structuredKind: 'agy-cli',
 
     buildCommand() {

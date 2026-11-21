@@ -64,6 +64,12 @@ export const DrainBlocker = z.object({
   cwd: z.string().nullable(),
   /** Epoch ms the turn started, when known. Lets the UI say "busy for 3m". */
   since: z.number().int().nullable(),
+  /**
+   * Extra human-readable context explaining what is holding this blocker open
+   * (e.g. "Background command: pnpm dev" when an idle `agy acp` session still
+   * has a background command running). Optional for older servers/clients.
+   */
+  detail: z.string().nullable().optional(),
 });
 export type DrainBlocker = z.infer<typeof DrainBlocker>;
 

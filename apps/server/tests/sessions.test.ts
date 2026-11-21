@@ -418,7 +418,8 @@ describe('agy adapter: structured, forced skip-permissions', () => {
       const body = created.json();
       // Disclosed honestly as bypassed in both API response and SQLite row...
       expect(body.skipPermissionsEnabled).toBe(true);
-      expect(body.providerDisclosure).toContain('auto-approves file edits');
+      expect(body.providerDisclosure).toBeNull();
+      expect(body.approvalDisclosure).toContain('auto-approves file edits');
       const row = t.db
         .prepare('SELECT skip_permissions FROM sessions WHERE id = ?')
         .get(body.id) as { skip_permissions: number };
@@ -442,6 +443,130 @@ describe('agy adapter: structured, forced skip-permissions', () => {
       ).toBe(true);
     } finally {
       delete process.env.AGY_FIXTURE_ARGV_FILE;
+    }
+  });
+
+  it('keeps persisted skip_permissions sticky at 1 after respawning under request-review (PA-183)', async () => {
+    const settingsDir = path.join(fakeHome, '.gemini', 'antigravity-cli');
+    const settingsPath = path.join(settingsDir, 'settings.json');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ toolPermission: 'always-proceed' }));
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as string;
+    expect(created.json().skipPermissionsEnabled).toBe(true);
+
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected structured session');
+
+    // Trigger a between-turn child exit, then tighten settings.json to request-review.
+    session.prompt('CRASH_BETWEEN_TURNS');
+    await waitFor(() =>
+      session.buffer
+        .replayAfter(0)
+        .events.some((e) => e.event.kind === 'notice' && e.event.text.includes('stopped between turns')),
+    );
+    fs.writeFileSync(settingsPath, JSON.stringify({ toolPermission: 'request-review' }));
+
+    // Next turn respawns agy acp and re-reads settings.json.
+    session.prompt('after tighten');
+    await waitFor(
+      () =>
+        session.buffer.replayAfter(0).events.filter((e) => e.event.kind === 'turn_complete').length === 2,
+    );
+
+    // Live badge follows current state (now supervised)...
+    expect(t.context.sessions.toInfo(session).skipPermissionsEnabled).toBe(false);
+    // ...but the persisted SQLite record and historical rowToInfo stay sticky at 1!
+    t.context.sessions.persist(session);
+    const row = t.db
+      .prepare('SELECT skip_permissions FROM sessions WHERE id = ?')
+      .get(id) as { skip_permissions: number };
+    expect(row.skip_permissions).toBe(1);
+
+    // Terminating and evicting from memory reads via rowToInfo, which must still report bypassed.
+    session.terminate();
+    await waitFor(() => !session.isAlive());
+    (t.context.sessions as unknown as { live: Map<string, unknown> }).live.delete(id);
+    const historyRes = await t.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${id}`,
+      headers: headers(t),
+    });
+    expect(historyRes.statusCode).toBe(200);
+    expect(historyRes.json().skipPermissionsEnabled).toBe(true);
+  });
+
+  it('omits agy approvalDisclosure when host settings.json sets toolPermission: "strict" (PA-183)', async () => {
+    const settingsDir = path.join(fakeHome, '.gemini', 'antigravity-cli');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(settingsDir, 'settings.json'),
+      JSON.stringify({ toolPermission: 'strict' }),
+    );
+
+    const agentsRes = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agyAgent = (agentsRes.json().agents as Array<{ id: string; providerDisclosure: string | null; approvalDisclosure?: string | null }>).find(
+      (a) => a.id === 'agy',
+    );
+    expect(agyAgent?.providerDisclosure).toBeNull();
+    expect(agyAgent?.approvalDisclosure).toBeNull();
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().providerDisclosure).toBeNull();
+    expect(created.json().approvalDisclosure).toBeNull();
+  });
+
+  it('surfaces in-flight background command titles on SessionInfo and drain-state blockers (PA-183)', async () => {
+    const taskFile = path.join(fakeHome, 'bg-drain.done');
+    process.env.AGY_FIXTURE_BACKGROUND_TASK_FILE = taskFile;
+    try {
+      const created = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(t),
+        payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+      });
+      const id = created.json().id as string;
+      const session = t.context.sessions.getOrThrow(id);
+      if (session.transport !== 'structured') throw new Error('expected structured session');
+
+      session.prompt('BACKGROUND_TASK');
+      await waitFor(() =>
+        session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+      );
+
+      const info = t.context.sessions.toInfo(session);
+      expect(info.busy).toBe(true);
+      expect(info.backgroundCommands).toEqual(['sleep 1 && echo bg']);
+
+      const drain = await t.app.inject({
+        method: 'GET',
+        url: '/api/admin/drain-state',
+        headers: headers(t),
+      });
+      const blocker = (drain.json().blockers as Array<{ id: string; detail?: string | null }>).find(
+        (b) => b.id === id,
+      );
+      expect(blocker?.detail).toBe('Background command: sleep 1 && echo bg');
+
+      await session.interrupt();
+      expect(t.context.sessions.toInfo(session).busy).toBe(false);
+      expect(t.context.sessions.toInfo(session).backgroundCommands).toBeUndefined();
+    } finally {
+      delete process.env.AGY_FIXTURE_BACKGROUND_TASK_FILE;
     }
   });
 });

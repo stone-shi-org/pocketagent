@@ -139,6 +139,23 @@ export const SessionInfo = z.object({
    */
   providerDisclosure: z.string().nullable(),
   /**
+   * A standing disclosure about this agent's approval/gating behaviour (e.g.,
+   * `agy` auto-approving in-workspace file edits under default/request-review
+   * policies), or null when every tool is gated normally. Kept separate from
+   * `providerDisclosure` so "where your data goes" and "what gets auto-approved"
+   * are not conflated in the UI or MCP catalog. Optional so older servers'
+   * frames still parse; absent means null.
+   */
+  approvalDisclosure: z.string().nullable().optional(),
+  /**
+   * Titles of in-flight background commands keeping an otherwise-idle session
+   * busy after its turn finished (e.g. `agy acp` background `run_command`).
+   * Surfaced on the session page so a person can see what is holding the
+   * working tree and interrupt it knowingly. Optional; absent or empty when
+   * no background command is holding the session.
+   */
+  backgroundCommands: z.array(z.string()).optional(),
+  /**
    * PA-169: true when this session was started with the Hub's `/mcp`
    * attached, so its agent can start work on other machines. Shown on every
    * visit, like `skipPermissionsEnabled`. Optional so an older server's frame
@@ -358,6 +375,11 @@ export const AgentInfo = z.object({
    * See `SessionInfo.providerDisclosure`.
    */
   providerDisclosure: z.string().nullable(),
+  /**
+   * A standing disclosure about this agent's approval/gating behaviour, or
+   * null. See `SessionInfo.approvalDisclosure`.
+   */
+  approvalDisclosure: z.string().nullable().optional(),
   /**
    * When the last explicit "Refresh" (Settings' "Coding Agents" section,
    * `POST /api/agents/refresh`) ran for this agent — distinct from

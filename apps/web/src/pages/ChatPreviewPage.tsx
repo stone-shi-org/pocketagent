@@ -214,6 +214,11 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
           {chosen.providerDisclosure}
         </div>
       )}
+      {chosen?.approvalDisclosure && (
+        <div className="approval-disclosure-banner" role="status">
+          {chosen.approvalDisclosure}
+        </div>
+      )}
 
       {!missing && agentOptions.length > 1 && (
         <div className="resume-as-row">

@@ -98,6 +98,16 @@ export interface AgentAdapter {
   providerDisclosure?: string;
 
   /**
+   * A standing disclosure about this adapter's approval/gating behaviour
+   * (distinct from `providerDisclosure`, which is reserved for third-party
+   * provider data-routing disclosures). Accepts either a static string or a
+   * dynamic function evaluated per request so host-level CLI policy changes
+   * (e.g. `agy` `settings.json` `toolPermission: "strict"`) take effect
+   * without restarting the server.
+   */
+  approvalDisclosure?: string | (() => string | null);
+
+  /**
    * True when this adapter may only be driven by a human who is present.
    *
    * Blocks it from the unattended entry points — scheduled jobs and inbound

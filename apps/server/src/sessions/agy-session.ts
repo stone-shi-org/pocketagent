@@ -145,16 +145,25 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   /**
    * Tool calls started via `tool_call` that have not yet reached a terminal
    * `tool_call_update` (`completed` / `failed` / `cancelled`), mapped to their
-   * ACP `kind` (`execute`, `edit`, `read`, …). Because `agy acp` resolves
-   * `session/prompt` with `end_turn` while a background `run_command` is still
-   * running, tracking in-flight `execute` calls keeps `busy` honest so
-   * `RunQueue`, `POST /api/admin/restart` drain, and `interrupt()` all know agy
-   * is still actively working in the checkout. Non-`execute` calls are pruned
-   * at `end_turn`, and all entries are cleared on turn error/retry so a missing
-   * terminal update can never strand `busy === true`.
+   * ACP `kind` (`execute`, `edit`, `read`, …) and human-readable `title`.
+   * Because `agy acp` resolves `session/prompt` with `end_turn` while a
+   * background `run_command` is still running, tracking in-flight `execute`
+   * calls keeps `busy` honest and lets the UI and drain-state blockers name
+   * which background command is holding the checkout so a human can interrupt
+   * it knowingly. Non-`execute` calls are pruned at `end_turn`, and all entries
+   * are cleared on turn error/retry so a missing terminal update can never
+   * strand `busy === true`.
    */
-  private readonly inFlightToolCalls = new Map<string, string | null>();
+  private readonly inFlightToolCalls = new Map<string, { kind: string | null; title: string | null }>();
+  private lastNotifiedBackgroundCommands = '';
   private _bypassedBySettings = false;
+  /**
+   * Sticky latch: once this session has ever run bypassed via `settings.json`,
+   * stays `true` for the session's lifetime so persisted `sessions.skip_permissions`
+   * never flips back from `1 -> 0` if the operator changes `toolPermission`
+   * mid-session (PA-183).
+   */
+  private _everBypassedBySettings = false;
 
   private _desiredModel: string | null = null;
   private _status: SessionStatus = 'starting';
@@ -194,6 +203,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this._agentSessionId = spec.resumeAgentSessionId ?? null;
     this._desiredModel = spec.model ?? null;
     this._bypassedBySettings = spec.bypassedBySettings === true;
+    this._everBypassedBySettings = this._bypassedBySettings;
   }
 
   // ---- Shared session surface ---------------------------------------------
@@ -251,9 +261,28 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   get globalBypassActive(): boolean {
     return false;
   }
-  /** True when host `settings.json` may auto-approve commands without `--dangerously-skip-permissions`. */
+  /** True when host `settings.json` may currently auto-approve commands without `--dangerously-skip-permissions`. */
   get bypassedBySettings(): boolean {
     return this._bypassedBySettings;
+  }
+  /** Sticky: true if this session has ever run bypassed via host `settings.json`. */
+  get everBypassedBySettings(): boolean {
+    return this._everBypassedBySettings;
+  }
+  /**
+   * Titles of in-flight `execute` tool calls keeping this session busy after a
+   * turn has ended (e.g. a dev server or watcher running in the background).
+   * Empty while a prompt turn is active or when idle.
+   */
+  get backgroundCommands(): string[] {
+    if (this.closed || this.activeTurn !== null) return [];
+    const titles: string[] = [];
+    for (const entry of this.inFlightToolCalls.values()) {
+      if (entry.kind === 'execute') {
+        titles.push(entry.title ?? 'background command');
+      }
+    }
+    return titles;
   }
   get derivedTitle(): string | null {
     return this._derivedTitle;
@@ -298,12 +327,18 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       const check = readAgySettingsAutoApprove({ homeDir: this.spec.env.HOME });
       const prev = this._bypassedBySettings;
       this._bypassedBySettings = check.autoApproves;
+      if (check.autoApproves) {
+        this._everBypassedBySettings = true;
+      }
       if (check.autoApproves && !prev) {
         this.emitEvent({
           kind: 'notice',
           level: 'warn',
           text: formatAgySettingsAutoApproveNotice(check),
         });
+      }
+      if (this._bypassedBySettings !== prev && this._status === 'running') {
+        this.emit('status', this._status);
       }
     }
 
@@ -437,6 +472,15 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    */
   applyGlobalSkipPermissions(_enabled: boolean): Promise<void> {
     return Promise.resolve();
+  }
+
+  private emitBackgroundCommandsIfChanged(): void {
+    const key = this.backgroundCommands.join('\0');
+    if (key === this.lastNotifiedBackgroundCommands) return;
+    this.lastNotifiedBackgroundCommands = key;
+    if (!this.closed && this._status === 'running') {
+      this.emit('status', this._status);
+    }
   }
 
   private setStatus(status: SessionStatus): void {
@@ -630,21 +674,45 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     }
 
     // Track in-flight tool calls so `busy` stays honest when a background
-    // `run_command` outlives `session/prompt`'s `end_turn`.
+    // `run_command` outlives `session/prompt`'s `end_turn` and the UI / drain
+    // blockers can name which background command is holding the session.
     if (kind === 'tool_call') {
       const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
       const callKind = typeof update.kind === 'string' ? update.kind : null;
-      if (callId) this.inFlightToolCalls.set(callId, callKind);
+      const rawTitle =
+        typeof update.title === 'string' && update.title.trim() ? update.title.trim() : null;
+      const toolName = typeof update.name === 'string' && update.name ? update.name : null;
+      const rawInput = isRecord(update.rawInput)
+        ? update.rawInput
+        : isRecord(update.args)
+          ? update.args
+          : {};
+      const callTitle = rawTitle ?? (toolName ? summarizeAgyTool(toolName, rawInput) : null);
+      if (callId) this.inFlightToolCalls.set(callId, { kind: callKind, title: callTitle });
       this.flushStreamedThought();
       this.flushStreamedText();
+      if (!this.activeTurn) this.emitBackgroundCommandsIfChanged();
       this.updateBusy();
     } else if (kind === 'tool_call_update') {
       const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
       const status = typeof update.status === 'string' ? update.status : '';
-      if (callId && (status === 'completed' || status === 'failed' || status === 'cancelled')) {
-        this.inFlightToolCalls.delete(callId);
-        if (!this.activeTurn) this.scheduleIdleFlush();
-        this.updateBusy();
+      if (callId) {
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          this.inFlightToolCalls.delete(callId);
+          if (!this.activeTurn) {
+            this.scheduleIdleFlush();
+            this.emitBackgroundCommandsIfChanged();
+          }
+          this.updateBusy();
+        } else {
+          const existing = this.inFlightToolCalls.get(callId);
+          const nextTitle =
+            typeof update.title === 'string' && update.title.trim() ? update.title.trim() : null;
+          if (existing && nextTitle && !existing.title) {
+            existing.title = nextTitle;
+            if (!this.activeTurn) this.emitBackgroundCommandsIfChanged();
+          }
+        }
       }
     }
 
@@ -722,6 +790,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.child = null;
     this.clearIdleFlush();
     this.inFlightToolCalls.clear();
+    this.emitBackgroundCommandsIfChanged();
 
     // Clear any parked permission sheets so the browser never keeps stale approvals.
     this.clearPendingPermissions();
@@ -818,6 +887,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       interrupted: false,
     };
     this.activeTurn = turn;
+    this.emitBackgroundCommandsIfChanged();
 
     const contentBlocks: unknown[] = [];
     if (prompt.image) {
@@ -841,9 +911,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       // Only command-type calls (`kind: "execute"`) can genuinely outlive
       // `end_turn` as background tasks; prune everything else so a missing
       // terminal update on a read/edit/search tool can never strand `busy`.
-      for (const [callId, callKind] of [...this.inFlightToolCalls]) {
-        if (callKind !== 'execute') this.inFlightToolCalls.delete(callId);
+      for (const [callId, entry] of [...this.inFlightToolCalls]) {
+        if (entry.kind !== 'execute') this.inFlightToolCalls.delete(callId);
       }
+      this.emitBackgroundCommandsIfChanged();
       this.flushStreamedThought();
       this.flushStreamedText();
 
@@ -879,6 +950,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       // Clear any in-flight tool calls on error/retry so stale ids from a
       // failed attempt can never strand `busy === true`.
       this.inFlightToolCalls.clear();
+      this.emitBackgroundCommandsIfChanged();
       if (this.closed) return;
 
       const errorText = errText(err);
@@ -992,6 +1064,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     }
     this.inFlightToolCalls.clear();
     this.clearIdleFlush();
+    this.emitBackgroundCommandsIfChanged();
     this.updateBusy();
     this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
   }

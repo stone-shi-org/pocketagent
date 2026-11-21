@@ -4,7 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
-import { readAgySettingsAutoApprove } from '../src/agents/agy.js';
+import {
+  formatAgySettingsAutoApproveNotice,
+  readAgySettingsAutoApprove,
+  resolveAgyApprovalDisclosure,
+} from '../src/agents/agy.js';
 import { AgySession, type AgySessionSpec } from '../src/sessions/agy-session.js';
 import { waitFor } from './helpers.js';
 
@@ -289,6 +293,7 @@ describe('AgySession (ACP)', () => {
     // so RunQueue and restart drain do not treat the checkout as idle.
     expect(fs.existsSync(taskFile)).toBe(false);
     expect(session.busy).toBe(true);
+    expect(session.backgroundCommands).toEqual(['sleep 1 && echo bg']);
     expect(idleEmitted).toBe(0);
 
     // Background task survives and completes while the ACP process stays up.
@@ -301,6 +306,7 @@ describe('AgySession (ACP)', () => {
       timeout: 3_000,
     });
     await waitFor(() => session?.busy === false, { timeout: 3_000 });
+    expect(session.backgroundCommands).toEqual([]);
     expect(idleEmitted).toBe(1);
   });
 
@@ -529,5 +535,31 @@ describe('readAgySettingsAutoApprove', () => {
     expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(false);
 
     expect(readAgySettingsAutoApprove({ settingsPath: path.join(dir, 'missing.json') }).autoApproves).toBe(false);
+  });
+
+  it('computes approvalDisclosure dynamically based on toolPermission (null only under strict)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-disclosure-'));
+    const file = path.join(dir, 'settings.json');
+
+    expect(resolveAgyApprovalDisclosure({ settingsPath: path.join(dir, 'missing.json') })).toContain(
+      'auto-approves file edits',
+    );
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'request-review' }));
+    expect(resolveAgyApprovalDisclosure({ settingsPath: file })).toContain('auto-approves file edits');
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'always-proceed' }));
+    expect(resolveAgyApprovalDisclosure({ settingsPath: file })).toContain('auto-approves file edits');
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'strict' }));
+    expect(resolveAgyApprovalDisclosure({ settingsPath: file })).toBeNull();
+
+    const notice = formatAgySettingsAutoApproveNotice({
+      autoApproves: true,
+      toolPermission: 'always-proceed',
+      settingsPath: file,
+    });
+    expect(notice).toContain('"request-review"');
+    expect(notice).toContain('"strict"');
   });
 });

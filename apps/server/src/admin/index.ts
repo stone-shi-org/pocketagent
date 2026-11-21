@@ -107,6 +107,10 @@ export class AdminService {
     const blockers: DrainBlocker[] = [];
 
     for (const session of this.opts.sessions.midTurnSessions()) {
+      const detail =
+        session.backgroundCommands && session.backgroundCommands.length > 0
+          ? `Background command: ${session.backgroundCommands.join(', ')}`
+          : null;
       blockers.push({
         kind: 'session',
         id: session.id,
@@ -115,6 +119,7 @@ export class AdminService {
         agentDisplayName: session.agentDisplayName,
         cwd: session.cwd,
         since: session.busySince,
+        ...(detail ? { detail } : {}),
       });
     }
 

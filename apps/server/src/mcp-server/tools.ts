@@ -140,6 +140,10 @@ function sessionView(info: SessionInfo, deps: McpToolDeps): Record<string, unkno
     lastActivityAt: info.lastActivityAt,
     skipPermissionsEnabled: info.skipPermissionsEnabled,
     providerDisclosure: info.providerDisclosure ?? null,
+    approvalDisclosure: info.approvalDisclosure ?? null,
+    ...(info.backgroundCommands && info.backgroundCommands.length > 0
+      ? { backgroundCommands: info.backgroundCommands }
+      : {}),
     startedByMcpClient: owner?.client_label ?? null,
   };
 }
@@ -162,6 +166,7 @@ function agentView(agent: AgentInfo): Record<string, unknown> {
     defaultModel: agent.defaultModel,
     models: (agent.staticModels.length > 0 ? agent.staticModels : agent.cachedModels).map((m) => m.value ?? m),
     providerDisclosure: agent.providerDisclosure,
+    approvalDisclosure: agent.approvalDisclosure ?? null,
   };
 }
 

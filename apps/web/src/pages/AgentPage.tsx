@@ -981,6 +981,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
             tooltip={session.providerDisclosure}
           />
         )}
+        {session?.approvalDisclosure && (
+          <TopbarDisclosureBadge
+            variant="warn"
+            icon="info"
+            label="Edits auto-approved"
+            tooltip={session.approvalDisclosure}
+          />
+        )}
         <div className="row" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
           <ConnectionBadge state={connection} />
           <StatusBadge status={status} />
@@ -999,6 +1007,29 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
         <div className="provider-banner" role="status">
           Fleet MCP is attached: this session’s agent can list the Hub’s hosts and start work on them. Approvals
           on those hosts still wait for a person there.
+        </div>
+      )}
+
+      {/* PA-183: when a background command (e.g. dev server or watcher) outlives
+          end_turn, name it explicitly and offer a direct Interrupt control so a
+          human can release the working tree knowingly rather than staring at an
+          unexplained busy dot. */}
+      {alive && session?.backgroundCommands && session.backgroundCommands.length > 0 && (
+        <div className="notice notice--queued" role="status">
+          <span>
+            Background command running:{' '}
+            <code>{session.backgroundCommands.join(', ')}</code>. This session stays busy until it
+            finishes or is interrupted.
+          </span>
+          <span className="notice-actions">
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => connRef.current?.sendInterrupt()}
+            >
+              Interrupt
+            </button>
+          </span>
         </div>
       )}
 

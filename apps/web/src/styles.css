@@ -424,6 +424,21 @@ input[type='number']::-webkit-outer-spin-button {
   margin: 0 12px 8px;
 }
 
+/* Standing approval/gating disclosure (PA-183), e.g. agy auto-approving
+   in-workspace file edits under default/request-review policies. Distinct
+   from `.provider-banner` ("where your data goes") and `.skip-permissions-banner`
+   ("all approvals bypassed"). */
+.approval-disclosure-banner {
+  background: #eef4fc;
+  border: 1px solid #c5daf4;
+  color: #1f4f85;
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  margin: 0 12px 8px;
+}
+
 /* "Continue as <agent> · Change", directly above the composer on a finished
    chat. Sits with the composer rather than in the header because it describes
    what the *next message* will do, not what this session was. */

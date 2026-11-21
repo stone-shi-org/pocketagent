@@ -150,6 +150,7 @@ export class AgentRegistry {
       forcesSkipPermissions: a.forcesSkipPermissions ?? false,
       staticModels: a.staticModels ?? [],
       providerDisclosure: a.providerDisclosure ?? null,
+      approvalDisclosure: resolveApprovalDisclosure(a),
       binOverridden: isExplicitPath(a.bin),
     }));
   }
@@ -181,6 +182,15 @@ export interface RegistryOptions {
   opencodeBin: string;
   codexBin: string;
   piBin: string;
+}
+
+/** Resolve static or dynamic `approvalDisclosure` from an adapter. */
+export function resolveApprovalDisclosure(adapter: AgentAdapter | undefined): string | null {
+  if (!adapter?.approvalDisclosure) return null;
+  if (typeof adapter.approvalDisclosure === 'function') {
+    return adapter.approvalDisclosure() ?? null;
+  }
+  return adapter.approvalDisclosure;
 }
 
 export function createDefaultRegistry(options: RegistryOptions): AgentRegistry {

@@ -205,6 +205,12 @@ export function HostAdminSection({ onApiError }: Props): JSX.Element {
                         ? ''
                         : ` · since ${new Date(blocker.since).toLocaleTimeString()}`}
                     </span>
+                    {blocker.detail && (
+                      <>
+                        <br />
+                        <span className="planner-row-meta">{blocker.detail}</span>
+                      </>
+                    )}
                     {blocker.cwd !== null && (
                       <>
                         <br />

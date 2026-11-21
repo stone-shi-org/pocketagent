@@ -26,7 +26,7 @@ import {
 } from '../db/index.js';
 import type { AgentAdapter } from '../agents/types.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import { resolveExecutable } from '../agents/registry.js';
+import { resolveApprovalDisclosure, resolveExecutable } from '../agents/registry.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import type { AdoptionService } from '../adopt/index.js';
@@ -110,6 +110,11 @@ export interface MidTurnSession {
   busySince: number;
   /** True when the turn is parked on a decision only a human can make. */
   awaitingApproval: boolean;
+  /**
+   * Titles of in-flight background commands keeping an otherwise-idle session
+   * busy after its turn ended (e.g. `agy acp` background `run_command`).
+   */
+  backgroundCommands?: string[];
 }
 
 export class SessionError extends Error {
@@ -684,6 +689,7 @@ export class SessionManager {
     const busy: MidTurnSession[] = [];
     for (const session of this.live.values()) {
       if (!isMidTurn(session)) continue;
+      const bgCommands = session instanceof AgySession ? session.backgroundCommands : [];
       busy.push({
         id: session.id,
         title: this.displayTitle(session),
@@ -692,6 +698,7 @@ export class SessionManager {
         busySince: session.busySince,
         awaitingApproval:
           session.transport === 'structured' && session.pendingPermissions().length > 0,
+        ...(bgCommands.length > 0 ? { backgroundCommands: bgCommands } : {}),
       });
     }
     return busy;
@@ -2154,6 +2161,10 @@ export class SessionManager {
       // start work on other machines.
       fleetMcpAttached: 'fleetMcpAttached' in session && session.fleetMcpAttached === true,
       providerDisclosure: this.opts.agents.get(session.spec.agent)?.providerDisclosure ?? null,
+      approvalDisclosure: resolveApprovalDisclosure(this.opts.agents.get(session.spec.agent)),
+      ...(session instanceof AgySession && session.backgroundCommands.length > 0
+        ? { backgroundCommands: session.backgroundCommands }
+        : {}),
       pendingApprovalsCount:
         session.transport === 'structured' &&
         'pendingPermissions' in session &&
@@ -2208,6 +2219,7 @@ export class SessionManager {
       plannerChatId: row.planner_chat_id ?? null,
       skipPermissionsEnabled: row.skip_permissions === 1,
       providerDisclosure: this.opts.agents.get(row.agent)?.providerDisclosure ?? null,
+      approvalDisclosure: resolveApprovalDisclosure(this.opts.agents.get(row.agent)),
       pendingApprovalsCount: 0,
       // History rows have no live listener — a finished session's voice mode
       // is definitionally off, and the toggle is in-memory only besides.
@@ -2249,7 +2261,7 @@ export class SessionManager {
         session.transport,
         session.agentSessionId,
         session.spec.skipPermissions === true ||
-        (session instanceof AgySession && session.bypassedBySettings)
+        (session instanceof AgySession && session.everBypassedBySettings)
           ? 1
           : 0,
         session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
@@ -2266,7 +2278,7 @@ export class SessionManager {
         `UPDATE sessions
             SET status = ?, pid = ?, cols = ?, rows = ?, exit_code = ?, exit_signal = ?,
                 started_at = ?, ended_at = ?, last_activity_at = ?, external_id = ?,
-                agent_session_id = ?, title = ?, skip_permissions = ?
+                agent_session_id = ?, title = ?, skip_permissions = MAX(skip_permissions, ?)
           WHERE id = ?`,
       )
       .run(
@@ -2286,8 +2298,12 @@ export class SessionManager {
         // title once one was found rather than reverting to the generic
         // creation-time name.
         this.displayTitle(session),
+        // Sticky record (PA-183): once a session has ever run bypassed (either
+        // via explicit `skipPermissions` or host `settings.json`), `skip_permissions`
+        // must stay 1 in SQLite so history never makes earlier bypassed turns
+        // look supervised if `toolPermission` is tightened mid-session.
         session.spec.skipPermissions === true ||
-          (session instanceof AgySession && session.bypassedBySettings)
+          (session instanceof AgySession && session.everBypassedBySettings)
           ? 1
           : 0,
         session.id,

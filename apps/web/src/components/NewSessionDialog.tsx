@@ -371,6 +371,9 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                       {selected?.providerDisclosure && (
                         <p className="warn-note">{selected.providerDisclosure}</p>
                       )}
+                      {selected?.approvalDisclosure && (
+                        <p className="warn-note">{selected.approvalDisclosure}</p>
+                      )}
                     </div>
                   )
                 )}

@@ -771,6 +771,11 @@ export function CronJobEditorPage({
             {selectedAgent.providerDisclosure}
           </div>
         )}
+        {selectedAgent?.approvalDisclosure && (
+          <div className="warn-callout" role="note">
+            {selectedAgent.approvalDisclosure}
+          </div>
+        )}
         {skipPermissions && (
           <div className="warn-callout" role="alert">
             This job will run with every tool approval bypassed. It will edit files and run

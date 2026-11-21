@@ -4156,23 +4156,46 @@ These are load-bearing. Several were bugs first.
        `"strict"`, or unset) sets `bypassedBySettings` for honest disclosure
        (`skipPermissionsEnabled: true`, persisted `skip_permissions = 1`, and a startup warning
        naming the file and key) **without** adding `--dangerously-skip-permissions` to `agy`'s
-       argv (preserving e.g. `proceed-in-sandbox` bounds).
-     - `agy` auto-approves file edits inside the project workspace in all modes (only terminal
-       commands and non-workspace file access prompt). `createAgyAdapter` sets `providerDisclosure`
-       so this is shown persistently on the session and in the new-session, cron, and webhook
-       editors.
+       argv (preserving e.g. `proceed-in-sandbox` bounds). Persisted `sessions.skip_permissions`
+       is **sticky** (PA-183): `AgySession.everBypassedBySettings` latches `true` and
+       `SessionManager.persist()` uses `MAX(skip_permissions, ?)` so tightening `toolPermission`
+       mid-session may clear the live badge on respawn without rewriting historical bypass to
+       supervised.
+     - Confirmed live against `agy acp` v1.5.14 (PA-183): both unset `toolPermission` and
+       `"request-review"` (even with `"agentMode": ""`) auto-approve in-workspace file edits
+       without sending `session/request_permission` (gating terminal commands and non-workspace
+       file access), whereas `"strict"` gates in-workspace file edits and every other tool
+       action (and ignores allow rules). `createAgyAdapter` therefore exposes a dynamic
+       `approvalDisclosure` (separate from `providerDisclosure`, which stays reserved for
+       third-party provider data-routing disclosures) via `resolveAgyApprovalDisclosure()`:
+       present under default/`request-review`/non-supervised policies and `null` under `"strict"`.
+     - **Known limitation (project configs & allowlists, PA-183):** `agy` CLI has no
+       workspace-local `settings.json`; shared project configs live in
+       `~/.gemini/config/projects/<id>.json` and were verified live not to override `agy acp`
+       `toolPermission` as of `agy` v1.5.14. However, `agy`'s own fine-grained
+       `permissions.allow` rules in `~/.gemini/antigravity-cli/settings.json` and Permission
+       Grants can auto-approve matching commands or tools under `request-review` without
+       PocketAgent seeing a `session/request_permission` prompt (`strict` ignores allow rules).
      - `--dangerously-skip-permissions` is spawn-time only so `applyGlobalSkipPermissions` is a
        no-op (same posture as terminal sessions).
   2. **Background tasks survive turns and keep `busy` honest:** `agy acp` resolves `session/prompt`
      with `end_turn` while a background `run_command` is still running, keeps the task alive because
      the process stays up, and pushes reactive `session/update` notifications asynchronously when it
-     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`, pruning non-`execute`
-     calls at `end_turn` and clearing all entries on turn error/retry so stale ids cannot strand
-     `busy`) and idle reactive streaming (`idleFlushTimer`) in `updateBusy()`. When `busy` flips
-     `true -> false`, `AgySession` emits `'idle'`, which `SessionManager` maps to `notifyTreeIdle`
-     so `RunQueue` wakes immediately after background work drains. `POST /api/admin/restart` drain
-     (`midTurnSessions`) sees the session as busy while background work runs, and `interrupt()`
-     cancels reactive work and parked permissions (emitting `permission_resolved`).
+     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`, storing `kind` and
+     `title`, pruning non-`execute` calls at `end_turn` and clearing all entries on turn error/retry
+     so stale ids cannot strand `busy`) and idle reactive streaming (`idleFlushTimer`) in
+     `updateBusy()`. When `busy` flips `true -> false`, `AgySession` emits `'idle'`, which
+     `SessionManager` maps to `notifyTreeIdle` so `RunQueue` wakes immediately after background work
+     drains. `POST /api/admin/restart` drain (`midTurnSessions`) sees the session as busy while
+     background work runs, and `interrupt()` cancels reactive work and parked permissions (emitting
+     `permission_resolved`).
+     - **Known limitation & decision (long-running background commands, PA-183):** A dev server or
+       file watcher started in the background never finishes, so it intentionally keeps `busy`
+       true (blocking `RunQueue` on that working tree and `POST /api/admin/restart` until `force`)
+       — we never add a timeout that releases an active checkout. Instead, `AgySession.backgroundCommands`
+       surfaces the in-flight `execute` command title(s) on `SessionInfo.backgroundCommands` (shown
+       on `AgentPage` with a direct Interrupt button) and on `DrainBlocker.detail`, so a human can
+       see what is holding the session and interrupt it knowingly.
   3. **Bounded handshake and no leaked children:** `initialize` and `session/new` / `session/resume`
      are bounded by `handshakeTimeoutMs` (default 15s), and any failed or timed-out handshake
      immediately kills the spawned child process.

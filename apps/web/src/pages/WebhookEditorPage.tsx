@@ -2676,6 +2676,11 @@ export function WebhookEditorPage({
               {selectedAgent.providerDisclosure}
             </div>
           )}
+          {selectedAgent?.approvalDisclosure && (
+            <div className="warn-callout" role="note">
+              {selectedAgent.approvalDisclosure}
+            </div>
+          )}
           {skipPermissions && (
             // Stronger than the cron editor's warning, and the difference is
             // material: a cron job's prompt is written by the operator, this one

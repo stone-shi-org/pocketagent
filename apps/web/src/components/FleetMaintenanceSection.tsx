@@ -511,7 +511,8 @@ export function FleetMaintenanceSection({ hosts, onApiError }: Props): JSX.Eleme
                           {outcome.blockers.map((blocker) => (
                             <li key={`${blocker.kind}:${blocker.id}`}>
                               <strong>{blocker.title}</strong> ({blocker.kind === 'session' ? 'Session' : 'Pocket Agent chat'}
-                              {blocker.reason === 'awaiting_approval' ? ' · waiting for approval' : ' · mid-turn'})
+                              {blocker.reason === 'awaiting_approval' ? ' · waiting for approval' : ' · mid-turn'}
+                              {blocker.detail ? ` · ${blocker.detail}` : ''})
                               {host !== null && (
                                 <>
                                   {' — '}
