@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { AgentAdapter } from './types.js';
 import { resolveExecutable } from './registry.js';
 import { normalizeAgyModelList } from '../sessions/normalize.js';
@@ -46,6 +49,56 @@ export function agyFileTokenStorageEnv(
   };
 }
 
+/**
+ * Values of `toolPermission` in `~/.gemini/antigravity-cli/settings.json`
+ * that cause `agy acp` in `default` mode to auto-approve terminal commands
+ * without sending `session/request_permission` (confirmed live against
+ * agy 1.5.14: `session/set_mode(default)` does not override `settings.json`).
+ */
+const AGY_AUTO_APPROVE_POLICIES = new Set(['always-proceed', 'proceed-in-sandbox']);
+
+export interface AgySettingsAutoApproveInfo {
+  autoApproves: boolean;
+  toolPermission: string | null;
+  settingsPath: string;
+}
+
+/**
+ * Read agy's `settings.json` read-only to detect whether host-level
+ * `toolPermission` will auto-approve commands even when PocketAgent starts
+ * `agy acp` without `--dangerously-skip-permissions`. Never throws.
+ */
+export function readAgySettingsAutoApprove(opts: {
+  settingsPath?: string;
+  homeDir?: string;
+} = {}): AgySettingsAutoApproveInfo {
+  const settingsPath =
+    opts.settingsPath ??
+    path.join(opts.homeDir || os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+  try {
+    const raw = fs.readFileSync(settingsPath, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { autoApproves: false, toolPermission: null, settingsPath };
+    }
+    const tp = (parsed as Record<string, unknown>).toolPermission;
+    if (typeof tp !== 'string' || !tp.trim()) {
+      return { autoApproves: false, toolPermission: null, settingsPath };
+    }
+    const normalized = tp.trim().toLowerCase();
+    return {
+      autoApproves: AGY_AUTO_APPROVE_POLICIES.has(normalized),
+      toolPermission: tp.trim(),
+      settingsPath,
+    };
+  } catch {
+    return { autoApproves: false, toolPermission: null, settingsPath };
+  }
+}
+
+export const AGY_EDIT_APPROVAL_DISCLOSURE =
+  'Antigravity CLI (agy) auto-approves file edits inside the project folder; terminal commands ask for approval unless skip-permissions or ~/.gemini/antigravity-cli/settings.json toolPermission overrides it.';
+
 export function createAgyAdapter(bin: string): AgentAdapter {
   return {
     id: 'agy',
@@ -54,6 +107,7 @@ export function createAgyAdapter(bin: string): AgentAdapter {
     transports: ['structured'],
     defaultTransport: 'structured',
     supportsSkipPermissions: true,
+    providerDisclosure: AGY_EDIT_APPROVAL_DISCLOSURE,
     structuredKind: 'agy-cli',
 
     buildCommand() {

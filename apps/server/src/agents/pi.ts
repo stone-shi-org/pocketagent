@@ -5,9 +5,8 @@ import { resolveExecutable } from './registry.js';
  * `pi` (`@earendil-works/pi-coding-agent`), driven through its `--mode rpc`
  * JSON protocol over stdin/stdout.
  *
- * `forcesSkipPermissions` is `true` for the same class of reason as `agy`,
- * but a stronger version of it: agy's headless mode merely has no approval
- * channel *in that mode* — pi has none anywhere, by explicit design. Its own
+ * `forcesSkipPermissions` is `true` because pi has no approval gate anywhere,
+ * by explicit design. Its own
  * security docs are direct about this: "It is not a sandbox and it does not
  * restrict what the model can ask tools to do" and "Pi does not include a
  * built-in sandbox." The `--approve`/`-a` flag some `pi --help` output

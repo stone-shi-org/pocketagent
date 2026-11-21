@@ -22,6 +22,9 @@ const skipPermissions = args.includes('--dangerously-skip-permissions');
 if (process.env.AGY_FIXTURE_ARGV_FILE) {
   fs.appendFileSync(process.env.AGY_FIXTURE_ARGV_FILE, JSON.stringify(args) + '\n');
 }
+if (process.env.AGY_FIXTURE_PID_FILE) {
+  fs.writeFileSync(process.env.AGY_FIXTURE_PID_FILE, String(process.pid));
+}
 
 // Keep `agy models` working for any tests that probe the model catalog directly.
 if (args[0] === 'models') {
@@ -125,6 +128,9 @@ function runAcpServer() {
     const { id, method, params = {} } = msg;
 
     if (method === 'initialize') {
+      if (process.env.AGY_FIXTURE_HANG_INIT === '1') {
+        return; // Simulate a wedged CLI that never responds to initialize.
+      }
       send({
         jsonrpc: '2.0',
         id,
@@ -142,6 +148,14 @@ function runAcpServer() {
     }
 
     if (method === 'session/new' || method === 'session/resume') {
+      if (process.env.AGY_FIXTURE_FAIL_SESSION_NEW === '1') {
+        send({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32000, message: 'simulated session/new failure' },
+        });
+        return;
+      }
       sessionId = method === 'session/resume' && params.sessionId ? params.sessionId : crypto.randomUUID();
       if (process.env.AGY_FIXTURE_RPC_LOG) {
         fs.appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({ method, sessionId }) + '\n');

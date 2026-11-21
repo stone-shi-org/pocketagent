@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
@@ -297,13 +298,26 @@ describe('session HTTP routes', () => {
 describe('agy adapter: structured, forced skip-permissions', () => {
   let t: TestApp;
 
+  let origHome: string | undefined;
+  let fakeHome: string;
+
   beforeEach(async () => {
+    // Isolate HOME so the test machine's own `~/.gemini/antigravity-cli/settings.json`
+    // (which may set `toolPermission: "always-proceed"`) never leaks into these tests.
+    origHome = process.env.HOME;
+    fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-agy-home-'));
+    process.env.HOME = fakeHome;
     // Points the adapter at a fixture script instead of the real CLI: real
     // agy costs real inference and network access, which a test suite must
     // not depend on. See tests/fixtures/fake-agy.mjs.
     t = await createTestApp({ POCKETAGENT_AGY_BIN: AGY_FIXTURE });
   });
-  afterEach(() => t.cleanup());
+  afterEach(async () => {
+    await t.cleanup();
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  });
 
   it('reports supportsSkipPermissions and no longer forces skip-permissions for agy', async () => {
     const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
@@ -381,6 +395,40 @@ describe('agy adapter: structured, forced skip-permissions', () => {
 
     const info = t.context.sessions.find(id);
     expect(info?.skipPermissionsEnabled).toBe(false);
+  });
+
+  it('discloses bypass and warns when agy settings.json has toolPermission: "always-proceed"', async () => {
+    const settingsDir = path.join(fakeHome, '.gemini', 'antigravity-cli');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(settingsDir, 'settings.json'),
+      JSON.stringify({ toolPermission: 'always-proceed' }),
+    );
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    // Never silently bypassed: skipPermissionsEnabled is true and a startup warning names settings.json.
+    expect(body.skipPermissionsEnabled).toBe(true);
+    expect(body.providerDisclosure).toContain('auto-approves file edits');
+
+    const session = t.context.sessions.getOrThrow(body.id as string);
+    if (session.transport !== 'structured') throw new Error('expected structured session');
+    const events = session.buffer.replayAfter(0).events.map((e) => e.event);
+    expect(
+      events.some(
+        (e) =>
+          e.kind === 'notice' &&
+          e.level === 'warn' &&
+          e.text.includes('settings.json') &&
+          e.text.includes('always-proceed'),
+      ),
+    ).toBe(true);
   });
 });
 

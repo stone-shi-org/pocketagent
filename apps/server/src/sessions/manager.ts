@@ -35,6 +35,7 @@ import { usageProbeCwd } from '../usage/probe-cwd.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
 import { AgySession } from './agy-session.js';
+import { readAgySettingsAutoApprove } from '../agents/agy.js';
 import { OpencodeSession } from './opencode-session.js';
 import { OpencodeServerManager } from './opencode-server.js';
 import { CodexSession } from './codex-session.js';
@@ -1284,6 +1285,19 @@ export class SessionManager {
     plannerChatId?: string | null;
     skipPermissions?: boolean;
   }): Promise<AgySession> {
+    // `agy acp` in `default` mode still respects `~/.gemini/antigravity-cli/settings.json`.
+    // If the host's settings.json sets `toolPermission: "always-proceed"` (or
+    // `"proceed-in-sandbox"`), agy will auto-approve commands even without
+    // `--dangerously-skip-permissions`. Disclose it honestly as bypassed
+    // (`skipPermissionsEnabled: true`) and emit a warning naming the file/key
+    // so a bypassed session is never shown as supervised.
+    const settingsCheck = readAgySettingsAutoApprove({ homeDir: args.env.HOME });
+    const bypassedBySettings = !args.skipPermissions && settingsCheck.autoApproves;
+    const effectiveSkipPermissions = args.skipPermissions === true || bypassedBySettings;
+    const settingsAutoApproveNotice = bypassedBySettings
+      ? `agy's ${settingsCheck.settingsPath} sets toolPermission: "${settingsCheck.toolPermission}", so agy auto-approves commands on its own. Change toolPermission to "request-review" or "strict" (or remove it) to enable PocketAgent's approval gate.`
+      : undefined;
+
     const session = new AgySession({
       id: args.id,
       title: args.title,
@@ -1300,7 +1314,8 @@ export class SessionManager {
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
       plannerChatId: args.plannerChatId ?? null,
-      skipPermissions: args.skipPermissions === true,
+      skipPermissions: effectiveSkipPermissions,
+      ...(settingsAutoApproveNotice ? { settingsAutoApproveNotice } : {}),
     });
 
     this.insertRow(session, args.createdAt);

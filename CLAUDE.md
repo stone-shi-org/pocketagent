@@ -4143,26 +4143,43 @@ These are load-bearing. Several were bugs first.
   speaking newline-delimited JSON-RPC 2.0 on one child process that outlives every turn (replacing
   the older `--input-format stream-json` headless print-mode driver in PA-181). Four properties are
   load-bearing:
-  1. **Real approval gate (off by default):** `--dangerously-skip-permissions` is passed *only* when
-     `spec.skipPermissions` is true (`agents/agy.ts` no longer sets `forcesSkipPermissions`). When
-     off, `agy acp` sends server-initiated `session/request_permission` requests that park
-     indefinitely in `AgySession.pending` until answered via `resolvePermission` — no timeout. Note
-     that `agy acp`'s `default` mode still honours `~/.gemini/antigravity-cli/settings.json` (if the
-     host sets `"toolPermission": "always-proceed"`, agy auto-approves tools even without the CLI
-     flag), and `--dangerously-skip-permissions` is spawn-time only so `applyGlobalSkipPermissions`
-     is a no-op (same posture as terminal sessions).
-  2. **Background tasks survive turns:** `agy acp` resolves `session/prompt` with `end_turn` while
-     a background `run_command` is still running, keeps the task alive because the process stays up,
-     and pushes reactive `session/update` notifications asynchronously when it finishes — so
-     `AgySession` keeps forwarding `session/update` notifications while idle between turns.
-  3. **Live session API:** `session/new` / `session/resume` provide the conversation UUID (matching
-     `~/.gemini/antigravity-cli/brain/<id>/`) and model catalog, `available_commands_update`
-     advertises slash commands, `session/set_model` switches models live without respawning,
-     `session_info_update` pushes AI-generated titles live (also persisted to `annotations/<id>.pbtxt`
-     and `conversation_summaries.db`), and `session/prompt` returns per-turn token usage directly.
-  4. **Workspace binding:** `--add-dir <cwd>` is still required so agy binds to the session's
-     directory rather than its default scratch project. Asserted in `apps/server/tests/agy-session.test.ts`
-     against a long-lived fake ACP stdio server fixture.
+  1. **Real approval gate (off by default) and honest disclosure:** `--dangerously-skip-permissions`
+     is passed *only* when `spec.skipPermissions` is true (`agents/agy.ts` no longer sets
+     `forcesSkipPermissions`). When off, `agy acp` sends server-initiated `session/request_permission`
+     requests that park indefinitely in `AgySession.pending` until answered via `resolvePermission`
+     — no timeout. Two upstream `agy` policies are enforced/disclosed in code rather than left
+     silent:
+     - `agy acp`'s `default` mode still honours `~/.gemini/antigravity-cli/settings.json` (and
+       `session/set_mode(default)` does not override it). At spawn, `SessionManager.startAgy` reads
+       `settings.json` read-only via `readAgySettingsAutoApprove`: if `toolPermission` is
+       `"always-proceed"` or `"proceed-in-sandbox"`, the session is disclosed as bypassed
+       (`skipPermissionsEnabled: true`) and emits a startup warning naming the file and key, so a
+       bypassed session is never shown as supervised.
+     - `agy` auto-approves file edits inside the project workspace in all modes (only terminal
+       commands and non-workspace file access prompt). `createAgyAdapter` sets `providerDisclosure`
+       so this is shown persistently on the session and in the new-session, cron, and webhook
+       editors.
+     - `--dangerously-skip-permissions` is spawn-time only so `applyGlobalSkipPermissions` is a
+       no-op (same posture as terminal sessions).
+  2. **Background tasks survive turns and keep `busy` honest:** `agy acp` resolves `session/prompt`
+     with `end_turn` while a background `run_command` is still running, keeps the task alive because
+     the process stays up, and pushes reactive `session/update` notifications asynchronously when it
+     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`) and idle reactive
+     streaming (`idleFlushTimer`) in `updateBusy()`, so `busy` stays `true` until all known tool
+     calls finish and reactive output settles — protecting `RunQueue` (`busyTreeRoots`),
+     `POST /api/admin/restart` drain (`midTurnSessions`), and allowing `interrupt()` to cancel
+     reactive work and parked permissions (emitting `permission_resolved`).
+  3. **Bounded handshake and no leaked children:** `initialize` and `session/new` / `session/resume`
+     are bounded by `handshakeTimeoutMs` (default 15s), and any failed or timed-out handshake
+     immediately kills the spawned child process.
+  4. **Live session API & workspace binding:** `session/new` / `session/resume` provide the
+     conversation UUID (matching `~/.gemini/antigravity-cli/brain/<id>/`) and model catalog,
+     `available_commands_update` advertises slash commands, `session/set_model` switches models
+     live without respawning, `session_info_update` pushes AI-generated titles live (also persisted
+     to `annotations/<id>.pbtxt` and `conversation_summaries.db`), `session/prompt` returns
+     per-turn token usage directly, and `--add-dir <cwd>` binds agy to the session's directory.
+     Asserted in `apps/server/tests/agy-session.test.ts` against a long-lived fake ACP stdio
+     server fixture.
 - **`cols`/`rows` are `nonnegative()`, not `positive()`** — a structured session has no
   character grid and reports 0. Requiring a positive value silently invalidated every
   `attached` frame for structured sessions.

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
+import { readAgySettingsAutoApprove } from '../src/agents/agy.js';
 import { AgySession, type AgySessionSpec } from '../src/sessions/agy-session.js';
 import { waitFor } from './helpers.js';
 
@@ -261,7 +262,7 @@ describe('AgySession (ACP)', () => {
     expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'ran echo approved' });
   });
 
-  it('keeps a background task alive after end_turn and forwards idle reactive updates', async () => {
+  it('keeps a background task alive after end_turn, stays busy until it completes, and forwards idle reactive updates', async () => {
     const taskFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-bg-')), 'task.done');
     const env = {
       ...(process.env as Record<string, string>),
@@ -274,19 +275,103 @@ describe('AgySession (ACP)', () => {
 
     session.prompt('BACKGROUND_TASK');
     await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
-    await waitFor(() => session?.busy === false);
 
-    // Turn resolved before background task finished (matching real agy acp v1.5.14).
+    // Turn resolved before background task finished (matching real agy acp v1.5.14),
+    // and `busy` MUST stay true while the in-flight background tool call is still running
+    // so RunQueue and restart drain do not treat the checkout as idle.
     expect(fs.existsSync(taskFile)).toBe(false);
+    expect(session.busy).toBe(true);
 
     // Background task survives and completes while the ACP process stays up.
     await waitFor(() => fs.existsSync(taskFile), { timeout: 5_000 });
     expect(fs.readFileSync(taskFile, 'utf8')).toBe('FINISHED');
 
-    // Reactive tool_result and follow-up text arrive while idle.
+    // Reactive tool_result and follow-up text arrive while idle, and `busy` clears once settled.
     await waitFor(() => events.some((e) => e.kind === 'tool_result'));
     await waitFor(() => events.some((e) => e.kind === 'text' && e.text === 'Background task finished.'), {
       timeout: 3_000,
+    });
+    await waitFor(() => session?.busy === false, { timeout: 3_000 });
+  });
+
+  it('interrupt() cancels parked permissions with permission_resolved so transcript cards close cleanly', async () => {
+    session = new AgySession(makeSpec({ skipPermissions: false }));
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('NEED_APPROVAL');
+    await waitFor(() => session!.pendingPermissions().length === 1);
+    const reqId = session.pendingPermissions()[0]!.id;
+
+    await session.interrupt();
+    expect(session.pendingPermissions()).toEqual([]);
+    expect(events).toContainEqual({
+      kind: 'permission_resolved',
+      id: reqId,
+      decision: 'deny',
+      message: 'Interrupted.',
+    });
+  });
+
+  it('bounds the startup handshake and kills the child on timeout or handshake failure', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hang-'));
+    const hangPidFile = path.join(dir, 'hang.pid');
+    const hung = new AgySession(
+      makeSpec({
+        handshakeTimeoutMs: 250,
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_HANG_INIT: '1',
+          AGY_FIXTURE_PID_FILE: hangPidFile,
+        },
+      }),
+    );
+    await expect(hung.start()).rejects.toThrow(/Timed out waiting for agy ACP initialize/);
+    const hangPid = Number(fs.readFileSync(hangPidFile, 'utf8').trim());
+    await waitFor(() => {
+      try {
+        process.kill(hangPid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+
+    const failPidFile = path.join(dir, 'fail.pid');
+    const failed = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_FAIL_SESSION_NEW: '1',
+          AGY_FIXTURE_PID_FILE: failPidFile,
+        },
+      }),
+    );
+    await expect(failed.start()).rejects.toThrow(/simulated session\/new failure/);
+    const failPid = Number(fs.readFileSync(failPidFile, 'utf8').trim());
+    await waitFor(() => {
+      try {
+        process.kill(failPid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+  });
+
+  it('emits settingsAutoApproveNotice at start() when provided', async () => {
+    session = new AgySession(
+      makeSpec({
+        skipPermissions: true,
+        settingsAutoApproveNotice: 'settings.json sets toolPermission: "always-proceed"',
+      }),
+    );
+    const events = collect(session);
+    await session.start();
+    expect(events).toContainEqual({
+      kind: 'notice',
+      level: 'warn',
+      text: 'settings.json sets toolPermission: "always-proceed"',
     });
   });
 
@@ -378,5 +463,34 @@ describe('AgySession (ACP)', () => {
       const text = fs.readFileSync(rpcLog, 'utf8');
       return text.includes('session/close');
     });
+  });
+});
+
+describe('readAgySettingsAutoApprove', () => {
+  it('detects auto-approving toolPermission policies in settings.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-settings-'));
+    const file = path.join(dir, 'settings.json');
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'always-proceed' }));
+    expect(readAgySettingsAutoApprove({ settingsPath: file })).toEqual({
+      autoApproves: true,
+      toolPermission: 'always-proceed',
+      settingsPath: file,
+    });
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'proceed-in-sandbox' }));
+    expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(true);
+
+    fs.writeFileSync(file, JSON.stringify({ toolPermission: 'request-review' }));
+    expect(readAgySettingsAutoApprove({ settingsPath: file })).toEqual({
+      autoApproves: false,
+      toolPermission: 'request-review',
+      settingsPath: file,
+    });
+
+    fs.writeFileSync(file, JSON.stringify({}));
+    expect(readAgySettingsAutoApprove({ settingsPath: file }).autoApproves).toBe(false);
+
+    expect(readAgySettingsAutoApprove({ settingsPath: path.join(dir, 'missing.json') }).autoApproves).toBe(false);
   });
 });

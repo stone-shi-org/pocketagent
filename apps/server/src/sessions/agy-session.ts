@@ -42,6 +42,17 @@ export interface AgySessionSpec {
    */
   skipPermissions?: boolean;
   /**
+   * Optional warning notice emitted at session start when agy's host-level
+   * `settings.json` has `toolPermission: "always-proceed"` (or similar),
+   * causing agy to auto-approve commands even without the CLI flag.
+   */
+  settingsAutoApproveNotice?: string;
+  /**
+   * Optional bound (ms) for the ACP `initialize` + `session/new|resume`
+   * handshake. Defaults to 15_000ms.
+   */
+  handshakeTimeoutMs?: number;
+  /**
    * PA-75: the Pocket Agent chat that created this session via
    * `start_subagent_session`, or null for human/trigger sessions.
    */
@@ -122,6 +133,15 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private closed = false;
   private activeTurn: ActiveTurn | null = null;
   private cancelPendingRetry: (() => void) | null = null;
+  /**
+   * Tool calls started via `tool_call` that have not yet reached a terminal
+   * `tool_call_update` (`completed` / `failed` / `cancelled`). Because `agy acp`
+   * resolves `session/prompt` with `end_turn` while a background `run_command`
+   * is still running, tracking in-flight tool calls keeps `busy` honest so
+   * `RunQueue`, `POST /api/admin/restart` drain, and `interrupt()` all know agy
+   * is still actively working in the checkout.
+   */
+  private readonly inFlightToolCalls = new Set<string>();
 
   private _desiredModel: string | null = null;
   private _status: SessionStatus = 'starting';
@@ -145,6 +165,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private thoughtSeq = 0;
   private idleFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
+  private static readonly DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
   private static readonly MAX_TURN_RETRIES = 2;
   private static readonly RETRY_BACKOFF_MS = [1000, 3000];
   private static readonly TRANSIENT_ERROR_PATTERN =
@@ -235,14 +256,26 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     await this.spawnAndHandshake();
     if (!this.closed) {
       this.setStatus('running');
+      if (this.spec.settingsAutoApproveNotice) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: this.spec.settingsAutoApproveNotice,
+        });
+      }
     }
   }
 
   /**
-   * Spawn `agy acp`, perform the ACP `initialize` handshake, and open or
-   * resume the session. Throws if the process cannot start or fails handshake.
+   * Spawn `agy acp`, perform the bounded ACP `initialize` handshake, and open
+   * or resume the session. Kills the spawned child and throws if the process
+   * cannot start, hangs past `handshakeTimeoutMs`, or fails handshake.
    */
   private async spawnAndHandshake(): Promise<void> {
+    if (this.child) {
+      this.killChildNow(this.child);
+    }
+
     const args = ['acp', '--add-dir', this.spec.cwd];
     if (this.spec.skipPermissions) {
       args.push('--dangerously-skip-permissions');
@@ -261,22 +294,36 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     child.on('error', (err) => this.onChildClose(child, null, null, `agy failed to start: ${err.message}`));
     child.on('close', (code, signal) => this.onChildClose(child, code, signal, null));
 
-    await this.rpc('initialize', {
-      protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-      clientInfo: { name: 'pocketagent', version: '1.0.0' },
-    });
+    const handshakeTimeoutMs =
+      this.spec.handshakeTimeoutMs ?? AgySession.DEFAULT_HANDSHAKE_TIMEOUT_MS;
 
-    const isResume = this._agentSessionId !== null;
-    const sessionRes = (await this.rpc(
-      isResume ? 'session/resume' : 'session/new',
-      isResume
-        ? { sessionId: this._agentSessionId, cwd: this.spec.cwd, mcpServers: [] }
-        : { cwd: this.spec.cwd, mcpServers: [] },
-    )) as Record<string, unknown> | null;
+    let sessionRes: Record<string, unknown> | null;
+    try {
+      await this.rpcWithTimeout(
+        'initialize',
+        {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+          clientInfo: { name: 'pocketagent', version: '1.0.0' },
+        },
+        handshakeTimeoutMs,
+      );
+
+      const isResume = this._agentSessionId !== null;
+      sessionRes = (await this.rpcWithTimeout(
+        isResume ? 'session/resume' : 'session/new',
+        isResume
+          ? { sessionId: this._agentSessionId, cwd: this.spec.cwd, mcpServers: [] }
+          : { cwd: this.spec.cwd, mcpServers: [] },
+        handshakeTimeoutMs,
+      )) as Record<string, unknown> | null;
+    } catch (err) {
+      this.killChildNow(child);
+      throw err;
+    }
 
     const sessionId =
       isRecord(sessionRes) && typeof sessionRes.sessionId === 'string'
@@ -373,6 +420,46 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this._busySince = busy ? Date.now() : null;
   }
 
+  /**
+   * Recompute `busy` from every active signal: a draining prompt queue, an
+   * active prompt RPC, an in-flight background tool call, a parked permission
+   * request, or reactive idle output still streaming.
+   */
+  private updateBusy(): void {
+    const busy =
+      !this.closed &&
+      (this.draining ||
+        this.activeTurn !== null ||
+        this.inFlightToolCalls.size > 0 ||
+        this.pending.size > 0 ||
+        this.idleFlushTimer !== null);
+    this.setBusy(busy);
+  }
+
+  private killChildNow(child: ChildProcessWithoutNullStreams): void {
+    if (this.child === child) {
+      this.child = null;
+    }
+    try {
+      child.stdin.end();
+    } catch {
+      /* already gone */
+    }
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      /* already gone */
+    }
+    const killer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }, 1000);
+    killer.unref?.();
+  }
+
   private emitEvent(event: AgentEvent): void {
     const entry = this.buffer.append(event);
     this.emit('event', entry.seq, entry.event);
@@ -396,6 +483,40 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       try {
         this.writeJson({ jsonrpc: '2.0', id, method, params });
       } catch (err) {
+        this.pendingRpc.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  private rpcWithTimeout(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.child) {
+        reject(new Error('agy ACP process is not running'));
+        return;
+      }
+      const id = this.nextRpcId++;
+      const timer = setTimeout(() => {
+        if (this.pendingRpc.delete(id)) {
+          reject(new Error(`Timed out waiting for agy ACP ${method} after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingRpc.set(id, {
+        method,
+        resolve: (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
+      try {
+        this.writeJson({ jsonrpc: '2.0', id, method, params });
+      } catch (err) {
+        clearTimeout(timer);
         this.pendingRpc.delete(id);
         reject(err instanceof Error ? err : new Error(String(err)));
       }
@@ -474,11 +595,22 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       return;
     }
 
-    // Flush any accumulated thought/prose before a tool call so the transcript
-    // preserves chronological order instead of dropping streaming text.
+    // Track in-flight tool calls so `busy` stays honest when a background
+    // `run_command` outlives `session/prompt`'s `end_turn`.
     if (kind === 'tool_call') {
+      const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+      if (callId) this.inFlightToolCalls.add(callId);
       this.flushStreamedThought();
       this.flushStreamedText();
+      this.updateBusy();
+    } else if (kind === 'tool_call_update') {
+      const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+      const status = typeof update.status === 'string' ? update.status : '';
+      if (callId && (status === 'completed' || status === 'failed' || status === 'cancelled')) {
+        this.inFlightToolCalls.delete(callId);
+        if (!this.activeTurn) this.scheduleIdleFlush();
+        this.updateBusy();
+      }
     }
 
     const messageId = `agy_msg_${this.id}_${this.messageSeq}`;
@@ -494,6 +626,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     for (const event of events) {
       if (event.kind === 'thinking_delta') {
         this.streamedThought += event.text;
+        if (!this.activeTurn) {
+          this.scheduleIdleFlush();
+        }
       } else if (event.kind === 'text_delta') {
         this.flushStreamedThought();
         this.streamedText += event.text;
@@ -513,8 +648,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         this.flushStreamedThought();
         this.flushStreamedText();
       }
+      this.updateBusy();
     }, 500);
     this.idleFlushTimer.unref?.();
+    this.updateBusy();
   }
 
   private clearIdleFlush(): void {
@@ -549,9 +686,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (child !== this.child) return;
     this.child = null;
     this.clearIdleFlush();
+    this.inFlightToolCalls.clear();
 
     // Clear any parked permission sheets so the browser never keeps stale approvals.
     this.clearPendingPermissions();
+    this.updateBusy();
 
     const reason =
       startError ??
@@ -608,15 +747,16 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       }
     } finally {
       this.draining = false;
-      if (!this.closed) this.setBusy(false);
+      this.updateBusy();
     }
   }
 
   private async runTurn(prompt: QueuedPrompt, attempt: number): Promise<void> {
     if (this.closed) return;
 
-    // Respawn and resume if the child died between turns.
+    // Respawn and resume if the child died between turns (or has no session id).
     if (!this.child || !this._agentSessionId) {
+      if (this.child) this.killChildNow(this.child);
       try {
         await this.spawnAndHandshake();
       } catch (err) {
@@ -771,10 +911,12 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
       return;
     }
-    if (!this.child || !this.activeTurn || !this._agentSessionId) return;
-    this.activeTurn.interrupted = true;
+    if (!this.child || !this._agentSessionId || (!this.activeTurn && !this._busy)) return;
+    if (this.activeTurn) {
+      this.activeTurn.interrupted = true;
+    }
 
-    // Cancel any parked permission requests so the server can unwind cleanly.
+    // Cancel any parked permission requests and close their transcript cards cleanly.
     for (const [id, entry] of [...this.pending]) {
       this.pending.delete(id);
       try {
@@ -786,6 +928,12 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       } catch {
         /* pipe already closed */
       }
+      this.emitEvent({
+        kind: 'permission_resolved',
+        id,
+        decision: 'deny',
+        message: 'Interrupted.',
+      });
     }
     this.emit('permission', this.pendingPermissions());
 
@@ -798,6 +946,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     } catch {
       /* pipe already closed */
     }
+    this.inFlightToolCalls.clear();
+    this.clearIdleFlush();
+    this.updateBusy();
     this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
   }
 
@@ -857,6 +1008,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     };
 
     this.pending.set(id, { event, rpcId, options });
+    this.updateBusy();
     this.emitEvent(event);
     this.emit('permission', this.pendingPermissions());
   }
@@ -871,6 +1023,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (!entry) return false;
     this.pending.delete(id);
     this._lastActivityAt = Date.now();
+    this.updateBusy();
 
     const outcome = selectAcpPermissionOutcome(entry.options, decision);
     try {
@@ -905,8 +1058,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (!this.isAlive()) return;
     this.closed = true;
     this.queue.length = 0;
+    this.inFlightToolCalls.clear();
     this.clearIdleFlush();
     this.clearPendingPermissions();
+    this.updateBusy();
     this.setStatus('killed');
     this._endedAt = Date.now();
 
