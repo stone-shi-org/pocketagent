@@ -955,7 +955,7 @@ export class SessionManager {
     // reflects reality instead of needing a second source of truth.
     //
     // `forcesSkipPermissions` overrides all of that unconditionally: an
-    // adapter that sets it (only `agy`, so far — see `agents/agy.ts`) has no
+    // adapter that sets it (e.g. `pi` — see `agents/pi.ts`) has no
     // synchronous approval channel at all in its structured mode, so there is
     // no "off" state to honour an opt-out into. This is the one case where
     // `skipPermissions` is not actually a choice made per session.
@@ -1043,6 +1043,7 @@ export class SessionManager {
             : {}),
           ...(model !== undefined ? { model } : {}),
           ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
+          skipPermissions,
         });
       }
 
@@ -1265,11 +1266,9 @@ export class SessionManager {
   }
 
   /**
-   * Structured, but via `AgySession` instead of the Claude Agent SDK — see
-   * that class for why it is a distinct code path rather than a flag on
-   * `startStructured`. `skipPermissions` is not a parameter here: it is
-   * always `true`, enforced in `create()` via `adapter.forcesSkipPermissions`
-   * before this is ever called.
+   * Structured, but via `AgySession` (`agy acp`) instead of the Claude Agent
+   * SDK — see that class for why it is a distinct code path rather than a flag
+   * on `startStructured`.
    */
   private async startAgy(args: {
     id: string;
@@ -1283,6 +1282,7 @@ export class SessionManager {
     resumeAgentSessionId?: string;
     model?: string;
     plannerChatId?: string | null;
+    skipPermissions?: boolean;
   }): Promise<AgySession> {
     const session = new AgySession({
       id: args.id,
@@ -1300,15 +1300,21 @@ export class SessionManager {
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
       plannerChatId: args.plannerChatId ?? null,
-      skipPermissions: true,
+      skipPermissions: args.skipPermissions === true,
     });
 
     this.insertRow(session, args.createdAt);
     this.live.set(args.id, session);
     this.wire(session);
-    // Pick up agy's own AI-generated title (from `annotations/<id>.pbtxt` or
-    // `conversation_summaries.db`) on each completed turn, and once on
-    // `session_started` when resuming an existing conversation.
+    // `agy acp` pushes titles live via `session_info_update`; persist them
+    // immediately and keep `refreshDerivedTitle` as a fallback for resumed
+    // sessions and on-disk annotations.
+    session.on('title', (rawTitle) => {
+      const clamped = clampTitle(rawTitle);
+      if (!clamped || clamped === session.derivedTitle) return;
+      session.setDerivedTitle(clamped);
+      this.persist(session);
+    });
     session.on('event', (_seq, event) => {
       if (event.kind === 'session_started') {
         this.persist(session);

@@ -6,7 +6,8 @@ import {
   extractOpencodePath,
   extractPath,
   extractPiPath,
-  normalizeAgyMessage,
+  normalizeAgyAcpModels,
+  normalizeAgyAcpUpdate,
   normalizeAgyModelList,
   normalizeCodexEvent,
   normalizeCodexModels,
@@ -679,407 +680,154 @@ describe('extractPath', () => {
 });
 
 /**
- * These payloads mirror `agy --output-format stream-json` (v1.1.12), captured
- * from a live headless run — same discipline as `normalizeSdkMessage` above:
- * tested without spawning the CLI.
+ * These payloads mirror `agy acp` (v1.5.14) `session/update` notifications,
+ * captured from a live ACP run — tested without spawning the CLI.
  */
-describe('normalizeAgyMessage: init', () => {
-  it('maps init to session_started', () => {
-    const events = normalizeAgyMessage({
-      event: 'init',
-      conversation_id: 'conv-1',
-      init: {
-        cwd: '/tmp/work',
-        tools: ['run_command', 'view_file'],
-        permission_mode: 'always-proceed',
-      },
-    });
-    expect(events).toEqual([
-      {
-        kind: 'session_started',
-        agentSessionId: 'conv-1',
-        model: null,
-        cwd: '/tmp/work',
-        tools: ['run_command', 'view_file'],
-        permissionMode: 'always-proceed',
-      },
-    ]);
+describe('normalizeAgyAcpUpdate', () => {
+  it('maps agent_message_chunk to text_delta', () => {
+    expect(
+      normalizeAgyAcpUpdate(
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello' } },
+        { messageId: 'm1' },
+      ),
+    ).toEqual([{ kind: 'text_delta', id: 'm1', text: 'hello' }]);
   });
-});
 
-describe('normalizeAgyMessage: step_update', () => {
-  it('maps an ACTIVE tool step to tool_use', () => {
-    const events = normalizeAgyMessage({
-      event: 'step_update',
-      step_update: {
-        conversation_id: 'conv-1',
-        step_index: 3,
-        state: 'ACTIVE',
-        step_type: 'tool',
-        tool_name: 'run_command',
-        tool_info: { name: 'run_command', parameters: { CommandLine: 'pwd' } },
-      },
-    });
-    expect(events).toEqual([
+  it('maps agent_thought_chunk to thinking_delta', () => {
+    expect(
+      normalizeAgyAcpUpdate(
+        { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'reasoning' } },
+        { thoughtId: 't1' },
+      ),
+    ).toEqual([{ kind: 'thinking_delta', id: 't1', text: 'reasoning' }]);
+  });
+
+  it('maps tool_call to tool_use using rawInput and locations fallback', () => {
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call_1',
+        name: 'write_file',
+        status: 'in_progress',
+        kind: 'edit',
+        title: 'File hello.txt',
+        locations: [{ path: '/tmp/hello.txt' }],
+        rawInput: { Path: '/tmp/hello.txt', Content: 'hi' },
+      }),
+    ).toEqual([
       {
         kind: 'tool_use',
-        id: 'agy_conv-1_3',
-        name: 'run_command',
-        input: { CommandLine: 'pwd' },
-        summary: 'Run pwd',
-        filePath: null,
+        id: 'call_1',
+        name: 'write_file',
+        input: { Path: '/tmp/hello.txt', Content: 'hi' },
+        summary: 'Write hello.txt',
+        filePath: '/tmp/hello.txt',
       },
     ]);
   });
 
-  it('maps a DONE tool step to tool_result', () => {
-    const events = normalizeAgyMessage({
-      event: 'step_update',
-      step_update: {
-        conversation_id: 'conv-1',
-        step_index: 3,
-        state: 'DONE',
-        step_type: 'tool',
-        tool_name: 'run_command',
-        tool_info: { name: 'run_command', parameters: { CommandLine: 'pwd' }, output: '/tmp\n' },
-      },
-    });
-    expect(events).toEqual([
+  it('maps completed and failed tool_call_update to tool_result, ignoring intermediate statuses', () => {
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        status: 'pending',
+      }),
+    ).toEqual([]);
+
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        status: 'in_progress',
+      }),
+    ).toEqual([]);
+
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        status: 'completed',
+        rawOutput: { output: 'spike-ok\n' },
+      }),
+    ).toEqual([
       {
         kind: 'tool_result',
-        id: 'agy_tr_conv-1_3',
-        toolUseId: 'agy_conv-1_3',
-        content: '/tmp\n',
+        id: 'agy_tr_call_1',
+        toolUseId: 'call_1',
+        content: 'spike-ok\n',
         truncated: false,
         isError: false,
       },
     ]);
-  });
 
-  it('marks a DONE tool step with a TOOL_ERROR as an error result', () => {
-    const events = normalizeAgyMessage({
-      event: 'step_update',
-      step_update: {
-        conversation_id: 'conv-1',
-        step_index: 6,
-        state: 'DONE',
-        step_type: 'tool',
-        tool_name: 'run_command',
-        tool_info: {
-          name: 'run_command',
-          parameters: {},
-          error: { type: 'TOOL_ERROR', message: 'context canceled' },
-        },
-      },
-    });
-    expect(events[0]).toMatchObject({ kind: 'tool_result', content: 'context canceled', isError: true });
-  });
-
-  it('maps an agent_response step with text_delta to text_delta', () => {
-    const events = normalizeAgyMessage({
-      event: 'step_update',
-      step_update: {
-        conversation_id: 'conv-1',
-        step_index: 17,
-        state: 'ACTIVE',
-        step_type: 'agent_response',
-        text_delta: 'hello',
-      },
-    });
-    expect(events).toEqual([{ kind: 'text_delta', id: 'agy_conv-1_17', text: 'hello' }]);
-  });
-
-  it('drops an agent_response step with no text_delta, a silent planning step', () => {
     expect(
-      normalizeAgyMessage({
-        event: 'step_update',
-        step_update: {
-          conversation_id: 'conv-1',
-          step_index: 2,
-          state: 'DONE',
-          step_type: 'agent_response',
-          usage: { input_tokens: 100 },
-        },
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_2',
+        status: 'failed',
+        rawOutput: { error: 'permission denied' },
       }),
-    ).toEqual([]);
-  });
-
-  it('ignores user_input and checkpoint steps, which are internal bookkeeping', () => {
-    expect(
-      normalizeAgyMessage({
-        event: 'step_update',
-        step_update: { conversation_id: 'c', step_index: 0, state: 'DONE', step_type: 'user_input' },
-      }),
-    ).toEqual([]);
-    expect(
-      normalizeAgyMessage({
-        event: 'step_update',
-        step_update: { conversation_id: 'c', step_index: 4, state: 'DONE', step_type: 'checkpoint' },
-      }),
-    ).toEqual([]);
-  });
-
-  /**
-   * `invoke_subagent` — captured by running `agy --output-format stream-json`
-   * directly (bypassing normalization) and checking the file it was asked to
-   * write actually existed: a real sub-agent ran, but nothing in the event
-   * stream said so at all before this. It is not a `step_type: 'tool'` like
-   * every other tool call; it gets its own step type with a payload shaped
-   * nothing like `tool_info`.
-   */
-  describe('subagent steps (invoke_subagent)', () => {
-    it('maps an ACTIVE subagent step to tool_use', () => {
-      const events = normalizeAgyMessage({
-        event: 'step_update',
-        step_update: {
-          conversation_id: 'conv-1',
-          step_index: 3,
-          state: 'ACTIVE',
-          step_type: 'subagent',
-          tool_name: 'invoke_subagent',
-          subagent_info: {
-            subagents: [
-              {
-                type_name: 'self',
-                role: 'File Writer',
-                initial_prompt: 'Write 1, 2, 3 to out.txt',
-                conversation_id: 'sub-1',
-                log_uri: 'file:///tmp/sub-1/transcript.jsonl',
-              },
-            ],
-          },
-        },
-      });
-      expect(events).toEqual([
-        {
-          kind: 'tool_use',
-          id: 'agy_sub_sub-1',
-          name: 'invoke_subagent',
-          input: { role: 'File Writer', prompt: 'Write 1, 2, 3 to out.txt' },
-          summary: 'Subagent: File Writer',
-          filePath: null,
-        },
-      ]);
-    });
-
-    it('ignores a DONE subagent step — it is a premature dispatch acknowledgment, not real completion', () => {
-      // Confirmed live against a real ~15s background sub-agent: this step's
-      // own DONE fires within about a second of ACTIVE, long before the
-      // sub-agent's actual work finished. `AgySession.pendingSubagents`
-      // resolves the fleet-view chip against the turn's own `result` line
-      // instead — see its doc comment — so this normalizer must not
-      // synthesize a (misleadingly early) tool_result here.
-      const events = normalizeAgyMessage({
-        event: 'step_update',
-        step_update: {
-          conversation_id: 'conv-1',
-          step_index: 3,
-          state: 'DONE',
-          step_type: 'subagent',
-          tool_name: 'invoke_subagent',
-          subagent_info: {
-            subagents: [
-              {
-                type_name: 'self',
-                role: 'File Writer',
-                initial_prompt: 'Write 1, 2, 3 to out.txt',
-                conversation_id: 'sub-1',
-                log_uri: 'file:///tmp/sub-1/transcript.jsonl',
-              },
-            ],
-          },
-        },
-      });
-      expect(events).toEqual([]);
-    });
-
-    it('emits one event per subagent when a call dispatches more than one', () => {
-      const events = normalizeAgyMessage({
-        event: 'step_update',
-        step_update: {
-          conversation_id: 'conv-1',
-          step_index: 5,
-          state: 'ACTIVE',
-          step_type: 'subagent',
-          tool_name: 'invoke_subagent',
-          subagent_info: {
-            subagents: [
-              { role: 'Worker A', initial_prompt: 'do A', conversation_id: 'sub-a' },
-              { role: 'Worker B', initial_prompt: 'do B', conversation_id: 'sub-b' },
-            ],
-          },
-        },
-      });
-      expect(events.map((e) => (e.kind === 'tool_use' ? e.id : null))).toEqual([
-        'agy_sub_sub-a',
-        'agy_sub_sub-b',
-      ]);
-    });
-
-    it('is robust to a missing or empty subagents array', () => {
-      expect(
-        normalizeAgyMessage({
-          event: 'step_update',
-          step_update: { conversation_id: 'c', step_index: 1, state: 'ACTIVE', step_type: 'subagent' },
-        }),
-      ).toEqual([]);
-    });
-  });
-});
-
-describe('normalizeAgyMessage: result', () => {
-  it('carries status and token usage for the status chip', () => {
-    const events = normalizeAgyMessage({
-      event: 'result',
-      result: {
-        conversation_id: 'conv-1',
-        status: 'SUCCESS',
-        response: 'hello\n',
-        duration_seconds: 13.696213968,
-        num_turns: 1,
-        usage: { input_tokens: 34619, output_tokens: 1710 },
-      },
-    });
-    expect(events).toEqual([
+    ).toEqual([
       {
-        kind: 'turn_complete',
-        stopReason: 'SUCCESS',
-        isError: false,
-        numTurns: 1,
-        durationMs: 13696,
-        costUsd: null,
-        inputTokens: 34619,
-        outputTokens: 1710,
-        completedAt: expect.any(Number),
+        kind: 'tool_result',
+        id: 'agy_tr_call_2',
+        toolUseId: 'call_2',
+        content: 'permission denied',
+        truncated: false,
+        isError: true,
       },
     ]);
   });
 
-  it('treats any non-SUCCESS status as an error', () => {
-    const events = normalizeAgyMessage({
-      event: 'result',
-      result: { conversation_id: 'conv-1', status: 'FAILED', usage: {} },
-    });
-    expect(events[0]).toMatchObject({ isError: true, stopReason: 'FAILED' });
-  });
-
-  it('surfaces result.error as a notice ahead of the turn_complete, instead of dropping it', () => {
-    const events = normalizeAgyMessage({
-      event: 'result',
-      result: {
-        conversation_id: 'conv-1',
-        status: 'ERROR',
-        response: '',
-        error: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
-        usage: {},
-      },
-    });
-    expect(events).toEqual([
-      {
-        kind: 'rate_limit',
-        provider: 'agy',
-        resetsAt: null,
-        limitType: null,
-        resetsAtLabel: null,
-      },
-      {
-        kind: 'notice',
-        level: 'error',
-        text: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
-      },
-      expect.objectContaining({ kind: 'turn_complete', isError: true, stopReason: 'ERROR' }),
-    ]);
-  });
-
-  it('recognizes agy\'s current individual-quota failure wording', () => {
-    const events = normalizeAgyMessage({
-      event: 'result',
-      result: {
-        status: 'ERROR',
-        error: 'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 28m33s.',
-        usage: {},
-      },
-    });
-    expect(events[0]).toMatchObject({ kind: 'rate_limit', provider: 'agy' });
-  });
-
-  it('does not add a notice for a non-SUCCESS status with no error text', () => {
-    const events = normalizeAgyMessage({
-      event: 'result',
-      result: { conversation_id: 'conv-1', status: 'FAILED', usage: {} },
-    });
-    expect(events).toHaveLength(1);
-  });
-
-  it('does not emit an error notice for stream input cancelled teardown error', () => {
-    const events = normalizeAgyMessage({
-      event: 'result',
-      result: {
-        conversation_id: 'conv-1',
-        status: 'ERROR',
-        error: 'stream input cancelled: context canceled',
-        usage: {},
-      },
-    });
-    // The notice is suppressed, only the turn_complete event is emitted.
-    expect(events.some((e) => e.kind === 'notice')).toBe(false);
-    expect(events).toEqual([
-      expect.objectContaining({ kind: 'turn_complete', isError: true, stopReason: 'ERROR' }),
-    ]);
-  });
-});
-
-describe('normalizeAgyMessage: command_result', () => {
-  it('maps /help to commands_available', () => {
-    const events = normalizeAgyMessage({
-      event: 'command_result',
-      command: {
-        name: 'help',
-        data: {
-          commands: [
-            { name: 'agents', description: 'List available custom agents' },
-            { name: 'usage', aliases: ['quota'], description: 'View model quota usage' },
-          ],
-        },
-      },
-    });
-    expect(events).toEqual([
+  it('maps available_commands_update to commands_available', () => {
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [
+          { name: 'goal', description: 'Run until finished' },
+          { name: 'plan', description: 'Plan first' },
+        ],
+      }),
+    ).toEqual([
       {
         kind: 'commands_available',
         commands: [
-          { name: 'agents', description: 'List available custom agents', argumentHint: '', aliases: [] },
-          { name: 'usage', description: 'View model quota usage', argumentHint: '', aliases: ['quota'] },
+          { name: 'goal', description: 'Run until finished', argumentHint: '', aliases: [] },
+          { name: 'plan', description: 'Plan first', argumentHint: '', aliases: [] },
         ],
       },
     ]);
   });
 
-  it('ignores every other command name, since its data means something else entirely', () => {
-    // e.g. /agents lists subagents, /model lists models — neither is a
-    // SlashCommandInfo[] and must not be misread as one.
-    expect(
-      normalizeAgyMessage({ event: 'command_result', command: { name: 'agents', data: { agents: [] } } }),
-    ).toEqual([]);
-  });
-
-  it('tolerates a missing command or data', () => {
-    expect(normalizeAgyMessage({ event: 'command_result' })).toEqual([]);
-    expect(normalizeAgyMessage({ event: 'command_result', command: { name: 'help' } })).toEqual([]);
+  it('returns [] for unknown or session-level updates and malformed input', () => {
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'session_info_update', title: 'X' })).toEqual([]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'usage_update', used: 100, size: 1000 })).toEqual([]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'unknown_future_kind' })).toEqual([]);
+    expect(normalizeAgyAcpUpdate(null)).toEqual([]);
+    expect(normalizeAgyAcpUpdate('nonsense')).toEqual([]);
   });
 });
 
-describe('normalizeAgyMessage: robustness', () => {
-  it('returns nothing for unknown event types instead of throwing', () => {
-    expect(normalizeAgyMessage({ event: 'heartbeat' })).toEqual([]);
+describe('normalizeAgyAcpModels', () => {
+  it('maps ACP session/new models.availableModels into ModelInfo[]', () => {
+    expect(
+      normalizeAgyAcpModels({
+        currentModelId: 'auto',
+        availableModels: [
+          { modelId: 'auto', name: 'Gemini Pro Next' },
+          { modelId: 'gemini-flash-next', name: 'Gemini Flash Next' },
+        ],
+      }),
+    ).toEqual([
+      { value: 'auto', displayName: 'Gemini Pro Next', description: '', supportsEffort: false, supportedEffortLevels: [] },
+      { value: 'gemini-flash-next', displayName: 'Gemini Flash Next', description: '', supportsEffort: false, supportedEffortLevels: [] },
+    ]);
   });
 
-  it('tolerates malformed input', () => {
-    expect(normalizeAgyMessage(null)).toEqual([]);
-    expect(normalizeAgyMessage('nonsense')).toEqual([]);
-    expect(normalizeAgyMessage({ event: 'step_update' })).toEqual([]);
-    expect(normalizeAgyMessage({ event: 'init' })).toEqual([
-      { kind: 'session_started', agentSessionId: null, model: null, cwd: '', tools: [], permissionMode: null },
-    ]);
+  it('returns [] for missing or malformed input', () => {
+    expect(normalizeAgyAcpModels(null)).toEqual([]);
+    expect(normalizeAgyAcpModels({})).toEqual([]);
   });
 });
 

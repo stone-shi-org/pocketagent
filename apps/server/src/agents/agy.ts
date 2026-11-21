@@ -3,24 +3,19 @@ import { resolveExecutable } from './registry.js';
 import { normalizeAgyModelList } from '../sessions/normalize.js';
 
 /**
- * Google's Antigravity CLI (`agy`), driven only over the `structured`
- * transport via its headless `--output-format stream-json` mode.
+ * Google's Antigravity CLI (`agy`), driven over the `structured` transport via
+ * its Agent Client Protocol stdio server (`agy acp`).
  *
  * There is deliberately no `terminal` entry in `transports`: `agy`'s
  * interactive TUI works fine over a PTY, but this adapter exists specifically
- * to get the native tool-card UI, and print mode is the only surface that
- * emits machine-readable events.
+ * to get the native tool-card UI and button-driven approval sheet.
  *
- * That same print mode is why `forcesSkipPermissions` is `true` and not just
- * `supportsSkipPermissions`: probing the real CLI (v1.1.12) shows every
- * headless run reports `"permission_mode":"always-proceed"` — with or without
- * `--dangerously-skip-permissions`, and regardless of `--mode` — because print
- * mode has no stdin channel to pause on. There is no synchronous approval
- * gate to wire `canUseTool` into, so unlike Claude's adapter this can never
- * offer the normal off-by-default behaviour; every session this starts is
- * bypassed from birth, and the client must say so permanently rather than
- * offer a checkbox that implies an off state which does not exist. See
- * `AgySession` for the long-lived subprocess model this implies.
+ * Over ACP, `agy` supports a real approval gate via `session/request_permission`
+ * when started without `--dangerously-skip-permissions`, so `supportsSkipPermissions`
+ * is a genuine per-session opt-in (off by default) rather than forced. Note that
+ * `agy acp`'s `default` mode still respects `~/.gemini/antigravity-cli/settings.json`
+ * (`toolPermission: "always-proceed"` auto-approves tools even without the CLI flag).
+ * See `AgySession` for the long-lived ACP subprocess model.
  */
 /**
  * Force `agy`'s `CompositeTokenStorage` onto its file-based token store
@@ -55,11 +50,10 @@ export function createAgyAdapter(bin: string): AgentAdapter {
   return {
     id: 'agy',
     displayName: 'Antigravity CLI',
-    description: 'Google Antigravity CLI (agy), structured — no approval gate in this mode',
+    description: 'Google Antigravity CLI (agy), structured via ACP',
     transports: ['structured'],
     defaultTransport: 'structured',
     supportsSkipPermissions: true,
-    forcesSkipPermissions: true,
     structuredKind: 'agy-cli',
 
     buildCommand() {

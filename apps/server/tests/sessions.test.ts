@@ -104,13 +104,15 @@ describe('skip-permissions opt-in, off by default', () => {
     expect(adapter.buildCommand({ ...opts, skipPermissions: true }).args).toEqual(['-i']);
   });
 
-  it('agy declares forcesSkipPermissions — it has no off state, unlike claude/shell', () => {
-    expect(createAgyAdapter('agy').forcesSkipPermissions).toBe(true);
+  it('agy supports the real skipPermissions toggle over ACP — it is no longer forced', () => {
+    const adapter = createAgyAdapter('agy');
+    expect(adapter.supportsSkipPermissions).toBe(true);
+    expect(adapter.forcesSkipPermissions).toBeUndefined();
     expect(createClaudeAdapter('claude').forcesSkipPermissions).toBeUndefined();
     expect(createShellAdapter('/bin/bash').forcesSkipPermissions).toBeUndefined();
   });
 
-  it('opencode supports the real toggle, unlike agy — it has a genuine approval gate', () => {
+  it('opencode supports the real toggle — it has a genuine approval gate', () => {
     const adapter = createOpencodeAdapter('opencode');
     expect(adapter.supportsSkipPermissions).toBe(true);
     expect(adapter.forcesSkipPermissions).toBeUndefined();
@@ -122,7 +124,7 @@ describe('skip-permissions opt-in, off by default', () => {
     expect(adapter.forcesSkipPermissions).toBeUndefined();
   });
 
-  it('pi forces it like agy, but for a stronger reason — no approval concept exists anywhere', () => {
+  it('pi forces skipPermissions — no approval concept exists anywhere', () => {
     const adapter = createPiAdapter('pi');
     expect(adapter.forcesSkipPermissions).toBe(true);
   });
@@ -303,10 +305,15 @@ describe('agy adapter: structured, forced skip-permissions', () => {
   });
   afterEach(() => t.cleanup());
 
-  it('reports forcesSkipPermissions only for agy', async () => {
+  it('reports supportsSkipPermissions and no longer forces skip-permissions for agy', async () => {
     const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
-    const agents = res.json().agents as { id: string; forcesSkipPermissions: boolean }[];
-    expect(agents.find((a) => a.id === 'agy')?.forcesSkipPermissions).toBe(true);
+    const agents = res.json().agents as {
+      id: string;
+      supportsSkipPermissions: boolean;
+      forcesSkipPermissions: boolean;
+    }[];
+    expect(agents.find((a) => a.id === 'agy')?.supportsSkipPermissions).toBe(true);
+    expect(agents.find((a) => a.id === 'agy')?.forcesSkipPermissions).toBe(false);
     expect(agents.find((a) => a.id === 'claude')?.forcesSkipPermissions).toBe(false);
     expect(agents.find((a) => a.id === 'shell')?.forcesSkipPermissions).toBe(false);
   });
@@ -319,7 +326,7 @@ describe('agy adapter: structured, forced skip-permissions', () => {
     expect(agents.find((a) => a.id === 'agy')?.available).toBe(false);
   });
 
-  it('creates a structured session that is bypassed even without asking, and cannot be created over terminal', async () => {
+  it('creates a structured session with approvals on by default, respects skipPermissions opt-in, and rejects terminal', async () => {
     const created = await t.app.inject({
       method: 'POST',
       url: '/api/sessions',
@@ -330,8 +337,16 @@ describe('agy adapter: structured, forced skip-permissions', () => {
     const body = created.json();
     expect(body.agent).toBe('agy');
     expect(body.transport).toBe('structured');
-    // Never asked for skipPermissions — forced true regardless, unlike claude.
-    expect(body.skipPermissionsEnabled).toBe(true);
+    expect(body.skipPermissionsEnabled).toBe(false);
+
+    const bypassed = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24, skipPermissions: true },
+    });
+    expect(bypassed.statusCode).toBe(201);
+    expect(bypassed.json().skipPermissionsEnabled).toBe(true);
 
     const rejected = await t.app.inject({
       method: 'POST',
@@ -343,7 +358,7 @@ describe('agy adapter: structured, forced skip-permissions', () => {
     expect(rejected.json().error.code).toBe('unsupported_transport');
   });
 
-  it('runs a real turn through the manager, spawning the fixture per prompt', async () => {
+  it('runs a real turn through the manager over ACP', async () => {
     const created = await t.app.inject({
       method: 'POST',
       url: '/api/sessions',
@@ -365,7 +380,7 @@ describe('agy adapter: structured, forced skip-permissions', () => {
     expect(kinds).toContain('turn_complete');
 
     const info = t.context.sessions.find(id);
-    expect(info?.skipPermissionsEnabled).toBe(true);
+    expect(info?.skipPermissionsEnabled).toBe(false);
   });
 });
 
@@ -1133,15 +1148,13 @@ describe('session title clamping & agy derived titles (PA-163)', () => {
       expect(t.context.sessions.toInfo(fresh).title).not.toBe('Fresh Agy Conversation Title');
 
       // Real agy writes `<conversationId>.pbtxt` once the conversation starts;
-      // write the fixture file as soon as `session_started` reports the minted UUID.
-      fresh.on('event', (_seq, event) => {
-        if (event.kind === 'session_started' && event.agentSessionId) {
-          fs.writeFileSync(
-            path.join(annotationsDir, `${event.agentSessionId}.pbtxt`),
-            'title:"Fresh Agy Conversation Title"',
-          );
-        }
-      });
+      // under ACP, `agentSessionId` is already minted during `start()`.
+      if (fresh.agentSessionId) {
+        fs.writeFileSync(
+          path.join(annotationsDir, `${fresh.agentSessionId}.pbtxt`),
+          'title:"Fresh Agy Conversation Title"',
+        );
+      }
 
       fresh.prompt('hello agy');
       await waitFor(() =>
