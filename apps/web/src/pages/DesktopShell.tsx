@@ -1251,6 +1251,8 @@ export function DesktopShell({
             <Suspense fallback={<PageFallback />}>
               <AgentsFleetPage
                 onOpen={(sessionId) => nav.openOn(here, { name: 'terminal', sessionId })}
+                onOpenPlannerChat={(chatId) => nav.openOn(here, { name: 'planner-chat', chatId })}
+                onOpenWebhook={(webhookId) => nav.openOn(here, { name: 'webhook', webhookId })}
                 onApiError={onApiError}
               />
             </Suspense>

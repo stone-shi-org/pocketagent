@@ -5,7 +5,7 @@ import { ProjectService } from '../src/projects/index.js';
 import { ConversationStore } from '../src/conversations/index.js';
 import { CHAT_READ_MARKS_EPOCH_KEY, openDatabase, readSetting, writeSetting, type Db } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
-import { isUnread, markChatRead, readChatReadAt, readChatReadMarks } from '../src/chats/read-marks.js';
+import { isUnread, markChatRead, readChatReadAt, readChatReadMarks, sessionAttention } from '../src/chats/read-marks.js';
 import { sanitizeAiTitle, buildTitleMessages, TITLE_SYSTEM_PROMPT } from '../src/planner/chat-title.js';
 import { authHeaders, createTestApp, makeWorkspace, type TestApp } from './helpers.js';
 
@@ -135,6 +135,24 @@ describe('ProjectService chat attention (PA-165)', () => {
   it('carries the same facts onto a shell row', () => {
     const [row] = service.shells([makeSession({ id: 'sh', agent: 'shell', transport: 'terminal' })]);
     expect(row).toMatchObject({ unread: false, awaitingApproval: false });
+  });
+
+  it('sessionAttention matches ProjectService unread/approval semantics for GET /api/sessions (PA-182)', () => {
+    const readMarks = readChatReadMarks(db, 'session');
+    const unreadSess = makeSession({ id: 's-u', lastTurnEndedAt: 5_000 });
+    expect(sessionAttention(unreadSess, readMarks)).toEqual({ awaitingApproval: false, unread: true });
+
+    markChatRead(db, 'session', 's-u', 6_000);
+    expect(sessionAttention(unreadSess, readChatReadMarks(db, 'session'))).toEqual({
+      awaitingApproval: false,
+      unread: false,
+    });
+
+    const approvalSess = makeSession({ id: 's-a', lastTurnEndedAt: 5_000, pendingApprovalsCount: 2 });
+    expect(sessionAttention(approvalSess, readMarks)).toEqual({ awaitingApproval: true, unread: false });
+
+    const terminalSess = makeSession({ id: 's-t', transport: 'terminal', lastTurnEndedAt: 5_000 });
+    expect(sessionAttention(terminalSess, readMarks)).toEqual({ awaitingApproval: false, unread: false });
   });
 });
 

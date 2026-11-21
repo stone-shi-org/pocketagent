@@ -5005,6 +5005,18 @@ button.chat-rate-limit-badge {
   align-items: center;
   gap: 12px;
 }
+.fleet-project-filter select {
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+}
+.fleet-project-filter select:hover {
+  border-color: var(--border-strong);
+}
 .fleet-running-only-toggle {
   display: inline-flex;
   align-items: center;
@@ -5043,6 +5055,125 @@ button.chat-rate-limit-badge {
   text-align: center;
 }
 
+/* PA-182: 3-column Kanban board (`Pending`, `In Progress`, `Idle / Ready`)
+   with compact collapsible project sub-groups inside each lane. Stacks to a
+   single column on narrow viewports so phones never horizontally scroll. */
+.fleet-kanban {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 960px) {
+  .fleet-kanban {
+    grid-template-columns: 1fr;
+  }
+}
+
+.fleet-lane {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 12px;
+  min-width: 0;
+}
+.fleet-lane-head {
+  padding: 2px 4px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.fleet-lane-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-lane-title-row h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.fleet-lane-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.fleet-lane-dot--pending { background: var(--warn); }
+.fleet-lane-dot--progress { background: var(--accent); }
+.fleet-lane-dot--idle { background: var(--ok); }
+.fleet-lane-hint {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.fleet-lane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fleet-lane-empty {
+  padding: 20px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+}
+
+.fleet-subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fleet-subgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-subgroup-head:hover {
+  background: rgb(0 0 0 / 4%);
+}
+.fleet-subgroup-caret,
+.fleet-subgroup-icon {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+.fleet-subgroup-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-subgroup-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+.fleet-subgroup-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .fleet-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -5050,10 +5181,10 @@ button.chat-rate-limit-badge {
   align-items: start;
 }
 
-/* One group per kind of session — agents, then terminals (PA-22). A heading
-   plus a hint line rather than a tab bar or a filter: both groups are usually
-   small and a person watching the fleet wants to see everything at once, just
-   not told that a tmux pane is an agent. */
+/* Terminal sessions stay in a dedicated section below the Kanban board (PA-22 / PA-182). */
+.fleet-terminals-section {
+  margin-top: 26px;
+}
 .fleet-section + .fleet-section {
   margin-top: 26px;
 }
@@ -5113,13 +5244,32 @@ button.chat-rate-limit-badge {
   width: 100%;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 14px;
   box-shadow: var(--shadow-sm);
   transition: box-shadow 150ms ease, border-color 150ms ease;
+}
+.agent-card--approval {
+  border-color: rgb(178 106 0 / 45%);
+  box-shadow: inset 3px 0 0 var(--warn), var(--shadow-sm);
+}
+.agent-card--unread {
+  border-color: rgb(31 168 85 / 40%);
+  box-shadow: inset 3px 0 0 var(--ok), var(--shadow-sm);
+}
+.agent-card--queued {
+  border-style: dashed;
 }
 .agent-card:hover {
   box-shadow: var(--shadow-md);
   border-color: var(--border-strong);
+}
+.agent-card--approval:hover {
+  box-shadow: inset 3px 0 0 var(--warn), var(--shadow-md);
+  border-color: rgb(178 106 0 / 65%);
+}
+.agent-card--unread:hover {
+  box-shadow: inset 3px 0 0 var(--ok), var(--shadow-md);
+  border-color: rgb(31 168 85 / 60%);
 }
 /* No `transform` here (deliberately, was removed): a `transform` on this
    ancestor makes it the containing block for the confirm dialog's
@@ -5141,11 +5291,17 @@ button.chat-rate-limit-badge {
   text-align: left;
   background: none;
   border: none;
-  padding: 16px;
-  padding-right: 44px;
+  padding: 14px;
+  padding-right: 42px;
   color: inherit;
   font: inherit;
   cursor: pointer;
+}
+.agent-card-open--no-corner {
+  padding-right: 14px;
+}
+.agent-card-open:disabled {
+  cursor: default;
 }
 
 /* Overlaid on the open button's top-right corner rather than laid out in
@@ -5175,15 +5331,15 @@ button.chat-rate-limit-badge {
 
 .agent-card-head {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .agent-mascot {
   flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   color: var(--text-dim);
@@ -5231,49 +5387,132 @@ button.chat-rate-limit-badge {
   background: rgb(47 158 68 / 12%);
   border-color: rgb(47 158 68 / 28%);
 }
+.agent-mascot--pocket {
+  color: #7c3aed;
+  background: rgb(124 58 237 / 12%);
+  border-color: rgb(124 58 237 / 28%);
+}
 
-/* `min-width: 0` is what actually lets the ellipsis rules below fire — a flex
-   child otherwise refuses to shrink past its content's natural width, which
-   is exactly how a long title/path used to push past the card's own edge. */
+/* `min-width: 0` lets flex text wrap/clamp cleanly without pushing past the card edge. */
 .agent-card-title {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
+/* PA-182: 2-line clamp so full task intent is readable without blowing up card height. */
 .agent-card-title .title {
-  display: block;
-  font-size: 14.5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.agent-card-title .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 0;
+}
+.agent-card-project {
+  font-weight: 500;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
 }
-.agent-card-title .meta {
-  display: block;
-  font-size: 12px;
+.agent-card-worktree {
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
+}
+.agent-card-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 5px;
+  line-height: 17px;
+  max-width: 100%;
+  overflow: hidden;
+}
+.agent-card-branch > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-card-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding-top: 4px;
 }
 
-.agent-dot {
-  flex: 0 0 auto;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
+.agent-card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 8px;
+  margin-top: 10px;
 }
-/* Reuses `@keyframes pulse` (defined above, next to `.tool-dot`) rather than
-   a second copy of the same glow. */
-.agent-dot--busy {
-  /* Blue, the same "turn running" colour as a chat row's dot (PA-165), so
-     green means one thing everywhere: finished and not read yet. */
-  background: var(--accent);
-  animation: pulse 1.2s ease-in-out infinite;
+.agent-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
 }
-.agent-dot--idle { background: var(--idle); }
+.agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.agent-chip--warn {
+  color: var(--warn);
+  background: rgb(178 106 0 / 10%);
+  border-color: rgb(178 106 0 / 28%);
+}
+.agent-chip--danger {
+  color: var(--danger);
+  background: rgb(224 45 35 / 10%);
+  border-color: rgb(224 45 35 / 28%);
+}
+.agent-chip--queued {
+  color: var(--accent);
+  background: rgb(10 102 255 / 10%);
+  border-color: rgb(10 102 255 / 25%);
+}
+.agent-card-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
 
 /* A light panel rather than the app's one dark console surface — this is a
    glanceable preview across many cards at once, not the real terminal

@@ -23,7 +23,7 @@ import { GitStatusTracker } from '../git/status.js';
 // `findWorktreeRoot` lives in a pure path module rather than here, so the run
 // queue can roll a cwd up to its working tree without importing this service.
 import { findWorktreeRoot } from '../git/worktree-paths.js';
-import { isUnread, readChatReadMarks, type ReadMarks } from '../chats/read-marks.js';
+import { readChatReadMarks, sessionAttention, type ReadMarks } from '../chats/read-marks.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
   AUTO_HIDDEN_DIRS,
@@ -655,28 +655,8 @@ function chatFromSession(
     adoptTargetId: session.adoptTargetId,
     adoptSessionName: session.adoptSessionName ?? null,
     rateLimit: session.rateLimit,
-    ...chatAttention(session, readMarks),
+    ...sessionAttention(session, readMarks),
   };
-}
-
-/**
- * PA-165: the two facts the status dot needs beyond `live`/`busySince` — see
- * `chatDotState`. Unread only for a structured session: a terminal's output
- * never settles, so it has no "finished turn" to have not read.
- */
-function chatAttention(
-  session: SessionInfo,
-  readMarks: ReadMarks,
-): { awaitingApproval: boolean; unread: boolean } {
-  const live = !TERMINAL.has(session.status);
-  const awaitingApproval = live && session.pendingApprovalsCount > 0;
-  const unread =
-    live &&
-    session.transport === 'structured' &&
-    !awaitingApproval &&
-    session.busySince === null &&
-    isUnread(session.lastTurnEndedAt, readMarks.readAt(session.id));
-  return { awaitingApproval, unread };
 }
 
 /**

@@ -349,6 +349,8 @@ function PhoneRoute({
         <AgentsFleetPage
           onBack={() => navigate({ name: 'list' })}
           onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
+          onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
           onApiError={onApiError}
         />
       </Suspense>

@@ -192,6 +192,13 @@ export const SessionInfo = z.object({
    * lighting up). What `ChatSummary.unread` compares a read mark against.
    */
   lastTurnEndedAt: z.number().int().nullable().optional(),
+  /**
+   * PA-182: whether this live structured session finished a turn after anyone
+   * last looked at it (`POST /api/chats/read`). Same rule as `ChatSummary.unread`,
+   * exposed on `GET /api/sessions` so the Agents view shares the project tree's
+   * exact status dot state (`chatDotState`). Optional so older backends remain valid.
+   */
+  unread: z.boolean().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 

@@ -1,4 +1,4 @@
-import type { ChatReadKind } from '@pocketagent/protocol';
+import { isTerminalStatus, type ChatReadKind, type SessionInfo } from '@pocketagent/protocol';
 import { CHAT_READ_MARKS_EPOCH_KEY, readSetting, type Db } from '../db/index.js';
 
 /**
@@ -55,4 +55,26 @@ export interface ReadMarks {
     was stamped by someone watching it end. */
 export function isUnread(lastTurnEndedAt: number | null | undefined, readAt: number): boolean {
   return lastTurnEndedAt != null && lastTurnEndedAt > readAt;
+}
+
+/**
+ * PA-165 / PA-182: the two attention facts a live session's status dot needs
+ * beyond `live`/`busySince` — shared by `ProjectService` (`GET /api/projects`)
+ * and `GET /api/sessions` so the project tree and Agents board cannot disagree.
+ * Unread only for a structured session: a terminal's output never settles, so
+ * it has no "finished turn" to have not read.
+ */
+export function sessionAttention(
+  session: SessionInfo,
+  readMarks: ReadMarks,
+): { awaitingApproval: boolean; unread: boolean } {
+  const live = !isTerminalStatus(session.status);
+  const awaitingApproval = live && session.pendingApprovalsCount > 0;
+  const unread =
+    live &&
+    session.transport === 'structured' &&
+    !awaitingApproval &&
+    session.busySince === null &&
+    isUnread(session.lastTurnEndedAt, readMarks.readAt(session.id));
+  return { awaitingApproval, unread };
 }

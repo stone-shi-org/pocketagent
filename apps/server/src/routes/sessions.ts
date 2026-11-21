@@ -16,6 +16,7 @@ import { CronServiceError } from '../cron/index.js';
 import { readSessionHistory } from '../sessions/history.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { readAgentDefaults } from '../db/index.js';
+import { readChatReadMarks, sessionAttention } from '../chats/read-marks.js';
 import { deriveSetupState, refreshAgentAuthStates } from '../agents/auth-probe.js';
 import { refreshAgentVersions } from '../agents/version-probe.js';
 import { agentBinaryReport } from '../agents/install.js';
@@ -460,7 +461,15 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  app.get('/api/sessions', async () => ({ sessions: sessions.list() }));
+  app.get('/api/sessions', async () => {
+    const readMarks = readChatReadMarks(db, 'session');
+    return {
+      sessions: sessions.list().map((s) => ({
+        ...s,
+        unread: sessionAttention(s, readMarks).unread,
+      })),
+    };
+  });
 
   /** Conversations already on disk that can be resumed. */
   app.get('/api/conversations', async () => ({

@@ -1,3 +1,4 @@
+import { isCustomClaudeProviderId } from '@pocketagent/protocol';
 import type { IconName } from '../components/Icon.js';
 
 /**
@@ -16,6 +17,7 @@ const AGENT_ICONS: Record<string, IconName> = {
 };
 
 export function agentIconName(agentId: string): IconName {
+  if (isCustomClaudeProviderId(agentId)) return 'agent-claude';
   return AGENT_ICONS[agentId] ?? 'agent-generic';
 }
 
@@ -36,5 +38,6 @@ const AGENT_ACCENTS: Record<string, string> = {
 };
 
 export function agentAccentClass(agentId: string): string {
+  if (isCustomClaudeProviderId(agentId)) return 'agent-mascot--claude';
   return AGENT_ACCENTS[agentId] ?? '';
 }
