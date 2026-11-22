@@ -18,6 +18,12 @@ interface Props {
   onApiError: (error: unknown) => void;
   onInterrupted?: (chatId: string) => void;
   onAwaitingApprovalChange?: (chatId: string, awaiting: boolean) => void;
+  /**
+   * False when the parent Agents tab is hidden in the background — pauses
+   * history fetches and tears down the live SSE stream so hidden tabs never
+   * occupy browser HTTP/1.1 connection slots. Defaults to true.
+   */
+  active?: boolean;
 }
 
 /**
@@ -37,6 +43,7 @@ export function PlannerAgentCard({
   onApiError,
   onInterrupted,
   onAwaitingApprovalChange,
+  active = true,
 }: Props): JSX.Element {
   const api = useHostApi();
   const [preview, setPreview] = useState<FleetPreviewState>(emptyFleetPreview);
@@ -47,6 +54,7 @@ export function PlannerAgentCard({
   const isLive = Boolean(chat.busy || chat.awaitingApproval);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     setPreview(emptyFleetPreview());
     setFlashSeq(0);
@@ -64,16 +72,16 @@ export function PlannerAgentCard({
     return () => {
       cancelled = true;
     };
-  }, [api, chat.id]);
+  }, [active, api, chat.id]);
 
   useEffect(() => {
-    if (!isLive) return;
+    if (!active || !isLive) return;
     const unsubscribe = api.subscribePlannerChatEvents(chat.id, (event) => {
       setPreview((prev) => applyFleetEvent(prev, event));
       setFlashSeq((n) => n + 1);
     });
     return unsubscribe;
-  }, [api, chat.id, isLive]);
+  }, [active, api, chat.id, isLive]);
 
   useEffect(() => {
     onAwaitingApprovalChange?.(chat.id, preview.awaitingApproval);

@@ -27,6 +27,7 @@ describe('open tabs preference', () => {
       { name: 'terminal', sessionId: 's-1', hostId: 'local' },
       { name: 'chat', conversationId: 'c-1', hostId: 'local' },
       { name: 'planner-chat', chatId: 'p-1', hostId: 'dev02' },
+      { name: 'agents', hostId: 'local' },
       { name: 'settings', hostId: 'local' },
       // PA-178
       { name: 'browser', browserId: 'pocket-a1', hostId: 'local' },

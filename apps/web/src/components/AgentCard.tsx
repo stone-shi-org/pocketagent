@@ -46,6 +46,11 @@ interface Props {
    * out of Pending immediately without waiting for the next HTTP poll.
    */
   onAwaitingApprovalChange?: (sessionId: string, awaiting: boolean) => void;
+  /**
+   * False when the parent Agents tab is hidden in the background — tears down
+   * the peek WebSocket until the tab becomes visible again. Defaults to true.
+   */
+  active?: boolean;
 }
 
 /**
@@ -62,6 +67,7 @@ export function AgentCard({
   onApiError,
   onStopped,
   onAwaitingApprovalChange,
+  active = true,
 }: Props): JSX.Element {
   const api = useHostApi();
   const endpoint = useHostEndpoint();
@@ -74,6 +80,7 @@ export function AgentCard({
   const [flashSeq, setFlashSeq] = useState(0);
 
   useEffect(() => {
+    if (!active) return;
     setRawTail('');
     setPreview(emptyFleetPreview());
     setFlashSeq(0);
@@ -104,7 +111,7 @@ export function AgentCard({
     conn.open(session.id, undefined, { peek: true });
 
     return () => conn.close();
-  }, [endpoint, session.id]);
+  }, [active, endpoint, session.id]);
 
   useEffect(() => {
     onAwaitingApprovalChange?.(session.id, preview.awaitingApproval);

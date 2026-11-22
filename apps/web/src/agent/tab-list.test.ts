@@ -9,6 +9,7 @@ const tabB: OpenTab = { id: 't:local:b', hostId: H, route: { name: 'terminal', s
 const tabC: OpenTab = { id: 'c:local:c', hostId: H, route: { name: 'chat', conversationId: 'c' } };
 const tabP: OpenTab = { id: 'p:local:p1', hostId: H, route: { name: 'planner-chat', chatId: 'p1' } };
 const tabP2: OpenTab = { id: 'p:local:p2', hostId: H, route: { name: 'planner-chat', chatId: 'p2' } };
+const tabAgents: OpenTab = { id: 'a:agents:local', hostId: H, route: { name: 'agents' } };
 const tabS: OpenTab = { id: 's:settings:local', hostId: H, route: { name: 'settings' } };
 const tabCron: OpenTab = { id: 's:settings:local', hostId: H, route: { name: 'cron' } };
 const tabWebhooks: OpenTab = { id: 's:settings:local', hostId: H, route: { name: 'webhooks' } };
@@ -24,6 +25,9 @@ describe('tabIdFor', () => {
     expect(tabIdFor({ name: 'terminal', sessionId: 'x' }, H)).toBe('t:local:x');
     expect(tabIdFor({ name: 'chat', conversationId: 'x' }, H)).toBe('c:local:x');
     expect(tabIdFor({ name: 'planner-chat', chatId: 'x' }, H)).toBe('p:local:x');
+    // Agents Kanban view is a dedicated singleton tab per host, separate from Settings.
+    expect(tabIdFor({ name: 'agents' }, H)).toBe('a:agents:local');
+    expect(tabIdFor({ name: 'agents' }, 'dev02')).toBe('a:agents:dev02');
     // PA-178: a shared browser is its own tab, one per browser per host.
     expect(tabIdFor({ name: 'browser', browserId: 'pocket-a1' }, H)).toBe('b:local:pocket-a1');
     expect(tabIdFor({ name: 'browser', browserId: 'pocket-a1' }, 'dev02')).toBe('b:dev02:pocket-a1');
@@ -105,11 +109,31 @@ describe('tabListReducer: sync', () => {
     expect(next).toBe(tabs);
   });
 
-  it('ignores a non-tabbable route (compose/agents/list)', () => {
+  it('ignores a non-tabbable route (compose/list)', () => {
     const tabs = [tabA];
     expect(tabListReducer(tabs, { type: 'sync', route: { name: 'list' }, hostId: H })).toBe(tabs);
-    expect(tabListReducer(tabs, { type: 'sync', route: { name: 'agents' }, hostId: H })).toBe(tabs);
     expect(tabListReducer(tabs, { type: 'sync', route: { name: 'compose' }, hostId: H })).toBe(tabs);
+  });
+
+  it('opens the Agents Kanban view in its own per-host singleton tab beside chats and admin tabs', () => {
+    let tabs = tabListReducer([tabA, tabS], { type: 'sync', route: tabAgents.route, hostId: H });
+    expect(tabs).toEqual([tabA, tabS, tabAgents]);
+
+    // Syncing/opening Agents again does not duplicate the tab or disturb Settings.
+    expect(tabListReducer(tabs, { type: 'sync', route: tabAgents.route, hostId: H })).toBe(tabs);
+    expect(tabListReducer(tabs, { type: 'openPermanent', route: tabAgents.route, hostId: H })).toBe(tabs);
+
+    // Navigating to a webhook from Agents updates the Settings/admin tab without replacing Agents.
+    tabs = tabListReducer(tabs, { type: 'sync', route: tabWebhook.route, hostId: H });
+    expect(tabs).toEqual([tabA, tabWebhook, tabAgents]);
+
+    // Each host gets its own Agents tab.
+    tabs = tabListReducer(tabs, { type: 'sync', route: { name: 'agents' }, hostId: 'dev02' });
+    expect(tabs.map((t) => t.id)).toEqual(['t:local:a', 's:settings:local', 'a:agents:local', 'a:agents:dev02']);
+
+    // Closing the Agents tab removes only that host's Agents tab.
+    tabs = tabListReducer(tabs, { type: 'close', id: tabAgents.id });
+    expect(tabs.map((t) => t.id)).toEqual(['t:local:a', 's:settings:local', 'a:agents:dev02']);
   });
 
   it('appends a Pocket Agent chat opened some other way (e.g. a webhook editor link)', () => {

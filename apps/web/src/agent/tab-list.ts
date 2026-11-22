@@ -2,11 +2,12 @@ import type { Route } from '../hooks/useHashRoute.js';
 
 /**
  * A tab is a live/finished terminal session, a read-only chat preview, a
- * Pocket Agent chat (PA-36), or one of the "full screen" admin pages —
+ * Pocket Agent chat (PA-36), the per-host Agents Kanban view (`agents`), a
+ * shared browser (`browser`), or one of the "full screen" admin pages —
  * Settings, Cron, Webhooks, Pocket Agents (the `planner` route — the agent
- * *list*, not a `planner-chat`) and each one's own detail/editor sub-route
- * (PA-36 round 2, reporter: "'Setting' tab concept should also apply to
- * webhook, pocket agent, cron ... all those share one tab"). These are the
+ * *list*, not a `planner-chat`), Browsers list and each one's own detail/editor
+ * sub-route (PA-36 round 2, reporter: "'Setting' tab concept should also apply
+ * to webhook, pocket agent, cron ... all those share one tab"). These are the
  * only route kinds that open beside the sidebar rather than replacing the
  * whole workspace pane.
  */
@@ -15,6 +16,7 @@ export type TabRoute = Extract<
   | { name: 'terminal' }
   | { name: 'chat' }
   | { name: 'planner-chat' }
+  | { name: 'agents' }
   | { name: 'settings' }
   | { name: 'providers' }
   | { name: 'cron' }
@@ -54,6 +56,7 @@ export function isTabRoute(route: Route): route is TabRoute {
     route.name === 'terminal' ||
     route.name === 'chat' ||
     route.name === 'planner-chat' ||
+    route.name === 'agents' ||
     route.name === 'settings' ||
     route.name === 'providers' ||
     route.name === 'cron' ||
@@ -69,13 +72,18 @@ export function isTabRoute(route: Route): route is TabRoute {
 
 /**
  * Every admin-page route kind (`settings`/`providers`/`cron`/`cron-job`/
- * `webhooks`/`webhook`/`planner`/`planner-agent`) maps to one sentinel id per
- * host — `s:settings:<hostId>`. Within a host that gives the whole group "only
- * one tab, ever, showing whichever of the eight you're currently on" for free:
- * `openPermanent`/`sync` already dedup by id, so navigating from Cron to
- * Webhooks just updates the one existing tab's route (see `sync`'s own comment
- * on why it has to, unlike every other tab kind) rather than opening a second
- * tab.
+ * `webhooks`/`webhook`/`planner`/`planner-agent`/`browsers`) maps to one
+ * sentinel id per host — `s:settings:<hostId>`. Within a host that gives the
+ * whole group "only one tab, ever, showing whichever of the admin pages you're
+ * currently on" for free: `openPermanent`/`sync` already dedup by id, so
+ * navigating from Cron to Webhooks just updates the one existing tab's route
+ * (see `sync`'s own comment on why it has to, unlike every other tab kind)
+ * rather than opening a second tab.
+ *
+ * The Agents Kanban board (`agents`) gets its own per-host singleton id
+ * (`a:agents:<hostId>`) rather than sharing `s:settings:<hostId>`, so it stays
+ * open beside both chat tabs and admin pages (for example, opening a queued
+ * webhook from the Agents board never overwrites the board tab).
  *
  * **Every id is host-qualified since PA-67, and it has to be.** A cron job, a
  * webhook and a Pocket Agent all belong to one machine, so a single global
@@ -95,6 +103,8 @@ export function tabIdFor(route: TabRoute, hostId: string): string {
       return `c:${hostId}:${route.conversationId}`;
     case 'planner-chat':
       return `p:${hostId}:${route.chatId}`;
+    case 'agents':
+      return `a:agents:${hostId}`;
     case 'browser':
       return `b:${hostId}:${route.browserId}`;
     case 'settings':

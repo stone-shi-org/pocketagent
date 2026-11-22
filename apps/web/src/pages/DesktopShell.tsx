@@ -108,6 +108,8 @@ function storedToRoute(stored: StoredTabRoute): TabRoute {
       return { name: 'chat', conversationId: stored.conversationId };
     case 'planner-chat':
       return { name: 'planner-chat', chatId: stored.chatId };
+    case 'agents':
+      return { name: 'agents' };
     case 'settings':
       return { name: 'settings' };
     case 'providers':
@@ -139,6 +141,8 @@ function routeToStored(route: TabRoute): StoredRouteShape {
       return { name: 'chat', conversationId: route.conversationId };
     case 'planner-chat':
       return { name: 'planner-chat', chatId: route.chatId };
+    case 'agents':
+      return { name: 'agents' };
     case 'settings':
       return { name: 'settings' };
     case 'providers':
@@ -164,7 +168,7 @@ function routeToStored(route: TabRoute): StoredRouteShape {
 
 type UtilityTabRoute = Exclude<
   TabRoute,
-  { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' } | { name: 'browser' }
+  { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' } | { name: 'agents' } | { name: 'browser' }
 >;
 
 /** A type predicate, not a plain boolean check, so narrowing `tab.route` on
@@ -236,8 +240,10 @@ function utilityTabTitle(route: UtilityTabRoute): string {
  * session itself keeps running, same "remove ≠ end the process" split the
  * sidebar's own "Remove from list" action already relies on.
  *
- * Compose and the Agents fleet view are deliberately *not* tabbable: they are
- * single panes that replace whatever's showing, exactly as before.
+ * Compose is deliberately *not* tabbable: it is a single pane that replaces
+ * whatever's showing, exactly as before. The Agents Kanban view (`agents`) is
+ * a dedicated per-host singleton tab (`a:agents:<hostId>`) so it stays open
+ * beside chats and admin pages without competing for the shared admin slot.
  *
  * Settings, Cron, Webhooks and Pocket Agents (the `planner` route, plus every
  * one's own detail/editor sub-route) are tabbable, but as one *shared*
@@ -611,6 +617,15 @@ export function DesktopShell({
         hostLabel: hostLabelFor(tab.hostId),
       };
     }
+    if (tab.route.name === 'agents') {
+      return {
+        id: tab.id,
+        title: 'Agents',
+        status: null,
+        preview: tab.preview ?? false,
+        hostLabel: hostLabelFor(tab.hostId),
+      };
+    }
     if (tab.route.name === 'browser') {
       return {
         id: tab.id,
@@ -916,7 +931,7 @@ export function DesktopShell({
           <button
             type="button"
             className={route.name === 'agents' ? 'agents-nav-btn active' : 'agents-nav-btn'}
-            onClick={() => onNavigate({ name: 'agents' })}
+            onClick={() => openPermanentTab(here, { name: 'agents' })}
             aria-pressed={route.name === 'agents'}
           >
             <Icon name="agents" size={16} />
@@ -1090,6 +1105,19 @@ export function DesktopShell({
                       onApiError={onApiError}
                     />
                   </Suspense>
+                ) : tab.route.name === 'agents' ? (
+                  // Dedicated per-host singleton tab so the Kanban board stays
+                  // open beside chat and admin tabs; `active` pauses polling and
+                  // child card WS/SSE streams while hidden.
+                  <Suspense fallback={<PageFallback />}>
+                    <AgentsFleetPage
+                      active={tab.id === activeTabId}
+                      onOpen={(sessionId) => nav.openOn(tab.hostId, { name: 'terminal', sessionId })}
+                      onOpenPlannerChat={(chatId) => nav.openOn(tab.hostId, { name: 'planner-chat', chatId })}
+                      onOpenWebhook={(webhookId) => nav.openOn(tab.hostId, { name: 'webhook', webhookId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
                 ) : tab.route.name === 'settings' ? (
                   // PA-36 round 2: Settings, Providers and Models, Cron, Webhooks
                   // and Pocket Agents (the `planner` route) all share this one
@@ -1245,17 +1273,6 @@ export function DesktopShell({
               }}
               onApiError={onApiError}
             />
-          </HostProvider>
-        ) : route.name === 'agents' ? (
-          <HostProvider endpoint={nav.endpointFor(here)}>
-            <Suspense fallback={<PageFallback />}>
-              <AgentsFleetPage
-                onOpen={(sessionId) => nav.openOn(here, { name: 'terminal', sessionId })}
-                onOpenPlannerChat={(chatId) => nav.openOn(here, { name: 'planner-chat', chatId })}
-                onOpenWebhook={(webhookId) => nav.openOn(here, { name: 'webhook', webhookId })}
-                onApiError={onApiError}
-              />
-            </Suspense>
           </HostProvider>
         ) : isHubTemplateRoute(route) && directory.source === 'hub' ? (
           /* PA-70. A full pane like `compose` and the fleet view rather than a

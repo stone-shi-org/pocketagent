@@ -25,6 +25,7 @@ export type StoredRouteShape =
   | { name: 'terminal'; sessionId: string }
   | { name: 'chat'; conversationId: string }
   | { name: 'planner-chat'; chatId: string }
+  | { name: 'agents' }
   | { name: 'settings' }
   | { name: 'providers' }
   | { name: 'cron' }
@@ -56,6 +57,7 @@ function isStoredRouteShape(value: unknown): value is StoredRouteShape {
   if (entry.name === 'terminal') return typeof entry.sessionId === 'string' && entry.sessionId.length > 0;
   if (entry.name === 'chat') return typeof entry.conversationId === 'string' && entry.conversationId.length > 0;
   if (entry.name === 'planner-chat') return typeof entry.chatId === 'string' && entry.chatId.length > 0;
+  if (entry.name === 'agents') return true;
   if (entry.name === 'settings') return true;
   if (entry.name === 'providers') return true;
   if (entry.name === 'cron') return true;

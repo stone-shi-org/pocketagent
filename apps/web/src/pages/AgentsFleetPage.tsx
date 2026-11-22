@@ -35,6 +35,12 @@ interface Props {
   onOpenWebhook?: (webhookId: string) => void;
   onApiError: (error: unknown) => void;
   /**
+   * False when mounted inside an inactive desktop tab — pauses polling and
+   * child card WS/SSE connections so background Agents tabs don't consume
+   * connections while hidden. Defaults to true (phone view / active tab).
+   */
+  active?: boolean;
+  /**
    * Present only on the phone route, which has no sidebar to fall back to —
    * `DesktopShell` renders this in its right pane with the sidebar already
    * on screen, so it passes nothing here.
@@ -57,6 +63,7 @@ export function AgentsFleetPage({
   onOpenPlannerChat,
   onOpenWebhook,
   onApiError,
+  active = true,
   onBack,
 }: Props): JSX.Element {
   const api = useHostApi();
@@ -154,10 +161,11 @@ export function AgentsFleetPage({
   }, [api, onApiError]);
 
   useEffect(() => {
+    if (!active) return;
     void load();
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [active, load]);
 
   const finishedAgents = useMemo(
     () => (sessions ? finishedFleetAgents(sessions) : []),
@@ -226,6 +234,7 @@ export function AgentsFleetPage({
           session={item.session}
           project={item.project}
           provenance={item.provenance}
+          active={active}
           onOpen={onOpen}
           onApiError={onApiError}
           onStopped={() => void load()}
@@ -238,6 +247,7 @@ export function AgentsFleetPage({
         <PlannerAgentCard
           key={item.id}
           chat={item.chat}
+          active={active}
           onOpen={(chatId) => onOpenPlannerChat?.(chatId)}
           onApiError={onApiError}
           onInterrupted={() => void load()}
@@ -408,6 +418,7 @@ export function AgentsFleetPage({
                 session={session}
                 project={project}
                 provenance={provenance}
+                active={active}
                 onOpen={onOpen}
                 onApiError={onApiError}
                 onStopped={() => void load()}
