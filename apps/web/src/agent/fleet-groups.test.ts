@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { PlannerChat, ProjectInfo, QueuedRunSummary, SessionInfo } from '@pocketagent/protocol';
+import type { PlannerChat, PlannerModel, ProjectInfo, QueuedRunSummary, SessionInfo } from '@pocketagent/protocol';
 import { agentAccentClass, agentIconName } from './agent-icon.js';
 import {
   activeFleetPlannerChats,
@@ -18,6 +18,7 @@ import {
   loadFleetHideIdle,
   loadFleetRunningOnly,
   POCKET_AGENTS_GROUP_KEY,
+  resolveFleetPlannerModelLabel,
   resolveProjectContext,
   saveFleetGroupByProject,
   saveFleetHideIdle,
@@ -562,5 +563,29 @@ describe('PA-182: formatting, custom-claude icon, and storage prefs', () => {
     } finally {
       Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: orig });
     }
+  });
+
+  it('resolves Pocket Agent model references by catalog row id, bare modelId, or raw fallback', () => {
+    const models: PlannerModel[] = [
+      { id: 'pm-1', modelId: 'gpt-4o-2026', label: 'GPT-4o', createdAt: 1 } as PlannerModel,
+      { id: 'pm-2', modelId: 'claude-opus-4-6', label: 'claude-opus-4-6', createdAt: 2 } as PlannerModel,
+    ];
+    expect(resolveFleetPlannerModelLabel('pm-1', models)).toEqual({
+      label: 'GPT-4o',
+      detail: 'GPT-4o (gpt-4o-2026)',
+    });
+    expect(resolveFleetPlannerModelLabel('gpt-4o-2026', models)).toEqual({
+      label: 'GPT-4o',
+      detail: 'GPT-4o (gpt-4o-2026)',
+    });
+    expect(resolveFleetPlannerModelLabel('pm-2', models)).toEqual({
+      label: 'claude-opus-4-6',
+      detail: 'claude-opus-4-6',
+    });
+    expect(resolveFleetPlannerModelLabel('custom/unknown', models)).toEqual({
+      label: 'custom/unknown',
+      detail: 'custom/unknown',
+    });
+    expect(resolveFleetPlannerModelLabel(null, models)).toBeNull();
   });
 });

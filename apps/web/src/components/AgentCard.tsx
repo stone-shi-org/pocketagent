@@ -7,6 +7,7 @@ import {
   applyFleetEvent,
   applyFleetEvents,
   emptyFleetPreview,
+  fleetPreviewModelLabel,
   type FleetPreviewState,
 } from '../agent/fleet-preview.js';
 import {
@@ -141,6 +142,10 @@ export function AgentCard({
   const isCron = Boolean(provenance?.cronJobId);
   const isWebhook = Boolean(provenance?.webhookId);
   const mcpClient = provenance?.mcpClient ?? null;
+  const modelLabel =
+    session.transport === 'structured'
+      ? (fleetPreviewModelLabel(preview) ?? session.model ?? null)
+      : null;
 
   const timingLabel =
     dotState === 'running'
@@ -153,6 +158,7 @@ export function AgentCard({
         );
 
   const hasFooter =
+    modelLabel !== null ||
     timingLabel !== null ||
     pendingApprovals > 0 ||
     session.skipPermissionsEnabled ||
@@ -248,6 +254,11 @@ export function AgentCard({
         {hasFooter && (
           <div className="agent-card-footer">
             <div className="agent-card-badges">
+              {modelLabel && (
+                <span className="agent-chip agent-chip--model" title={`Model: ${modelLabel}`}>
+                  <span>{modelLabel}</span>
+                </span>
+              )}
               {pendingApprovals > 0 && (
                 <span className="agent-chip agent-chip--warn" title="Waiting for your approval">
                   <Icon name="shield" size={11} />

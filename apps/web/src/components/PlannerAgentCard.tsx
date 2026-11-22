@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { plannerChatDotState, type PlannerChat } from '@pocketagent/protocol';
+import { plannerChatDotState, type PlannerChat, type PlannerModel } from '@pocketagent/protocol';
 import {
   applyFleetEvent,
   applyFleetEvents,
   emptyFleetPreview,
   type FleetPreviewState,
 } from '../agent/fleet-preview.js';
-import { formatShortRelative } from '../agent/fleet-groups.js';
+import { formatShortRelative, resolveFleetPlannerModelLabel } from '../agent/fleet-groups.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { ChatStatusDot } from './ChatStatusDot.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
@@ -14,6 +14,10 @@ import { Icon } from './Icon.js';
 
 interface Props {
   chat: PlannerChat;
+  /** PA-182: Catalog for turning `lastModelId` row ids into human-readable labels. */
+  plannerModels?: readonly PlannerModel[];
+  /** PA-182: Owning Pocket Agent workspace's default model ref when `chat.lastModelId` is null. */
+  defaultModelId?: string | null;
   onOpen: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   onInterrupted?: (chatId: string) => void;
@@ -39,6 +43,8 @@ interface Props {
  */
 export function PlannerAgentCard({
   chat,
+  plannerModels = [],
+  defaultModelId = null,
   onOpen,
   onApiError,
   onInterrupted,
@@ -97,6 +103,10 @@ export function PlannerAgentCard({
   const title = chat.title?.trim() || 'Untitled chat';
   const timingLabel = formatShortRelative(chat.lastActivityAt);
   const queuedCount = chat.queuedPrompts?.length ?? 0;
+  const modelInfo = resolveFleetPlannerModelLabel(
+    preview.model ?? chat.lastModelId ?? defaultModelId,
+    plannerModels,
+  );
 
   const interrupt = useCallback(async () => {
     setInterrupting(true);
@@ -179,6 +189,11 @@ export function PlannerAgentCard({
 
         <div className="agent-card-footer">
           <div className="agent-card-badges">
+            {modelInfo && (
+              <span className="agent-chip agent-chip--model" title={`Model: ${modelInfo.detail}`}>
+                <span>{modelInfo.label}</span>
+              </span>
+            )}
             {dotState === 'approval' && (
               <span className="agent-chip agent-chip--warn" title="Waiting for your approval">
                 <Icon name="shield" size={11} />

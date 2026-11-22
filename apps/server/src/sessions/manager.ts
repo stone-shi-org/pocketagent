@@ -295,6 +295,14 @@ export class SessionManager {
    * after a restart nothing reads as unread, which is the safe direction.
    */
   private readonly lastTurnEndedAt = new Map<string, number>();
+  /**
+   * PA-182: per-session active model value/wire id and advertised model catalog
+   * for live structured sessions, so `SessionInfo.model` stays accurate even if
+   * early events roll out of the bounded `EventBuffer` or before a client's
+   * peek WebSocket replay lands.
+   */
+  private readonly currentModel = new Map<string, string>();
+  private readonly sessionModels = new Map<string, ModelInfo[]>();
   private readonly attachCounts = new Map<string, number>();
   /**
    * PA-20 Phase 2: sessions with live-listen/talk-back on right now. A plain
@@ -747,6 +755,9 @@ export class SessionManager {
     });
 
     if (session.transport === 'structured') {
+      if (session.spec.model) {
+        this.currentModel.set(session.id, session.spec.model);
+      }
       this.voiceTts?.attach(session);
       session.on('permission', (pending) => this.onPermissionChange(session.id, pending.length));
       session.on('event', (_seq, event) => {
@@ -764,6 +775,17 @@ export class SessionManager {
             this.unhideChat(event.agentSessionId);
           }
           if (event.model) {
+            // Preserve an explicit user alias if it already resolves to this
+            // wire model id (matching `transcript.ts`'s `session_started` rule).
+            const existing = this.currentModel.get(session.id);
+            const liveCatalog = this.sessionModels.get(session.id) ?? [];
+            const existingMatchesWire =
+              existing !== undefined &&
+              (existing === event.model ||
+                liveCatalog.some((m) => m.value === existing && m.resolvedModel === event.model));
+            if (!existingMatchesWire) {
+              this.currentModel.set(session.id, event.model);
+            }
             // If the model is a wire id (e.g. 'claude-opus-5[1m]'), map it back to
             // the concrete alias in this agent's cached catalog (e.g. 'opus[1m]')
             // so `agent_defaults` stores the picker alias rather than the raw wire id.
@@ -782,12 +804,14 @@ export class SessionManager {
           }
         }
         if (event.kind === 'model_changed') {
+          this.currentModel.set(session.id, event.model);
           writeAgentDefaults(this.opts.db, session.spec.agent, { model: event.model });
         }
         if (event.kind === 'effort_changed') {
           writeAgentDefaults(this.opts.db, session.spec.agent, { effort: event.effort });
         }
         if (event.kind === 'models_available') {
+          this.sessionModels.set(session.id, event.models);
           writeAgentDefaults(this.opts.db, session.spec.agent, {
             modelsJson: JSON.stringify(event.models),
           });
@@ -1819,6 +1843,8 @@ export class SessionManager {
     this.live.delete(id);
     this.voiceModeSessions.delete(id);
     this.lastTurnEndedAt.delete(id);
+    this.currentModel.delete(id);
+    this.sessionModels.delete(id);
     deleteChatReadMark(this.opts.db, 'session', id);
     const changes = this.opts.db.prepare('DELETE FROM sessions WHERE id = ?').run(id).changes;
     if (changes === 0 && !live) {
@@ -2193,7 +2219,38 @@ export class SessionManager {
           : 0,
       voiceModeEnabled: this.isVoiceModeEnabled(session.id),
       lastTurnEndedAt: this.lastTurnEndedAt.get(session.id) ?? null,
+      model: this.resolveSessionModelLabel(session),
     };
+  }
+
+  /**
+   * PA-182: resolves the human-readable current model name for a live
+   * structured session using the same precedence as `transcript.ts`'s
+   * `resolveCurrentModel`, falling back to cached `agent_defaults` when the
+   * session's own `models_available` has not landed yet.
+   */
+  private resolveSessionModelLabel(session: ManagedSession): string | null {
+    if (session.transport !== 'structured') return null;
+    let catalog = this.sessionModels.get(session.id) ?? [];
+    if (catalog.length === 0) {
+      const cached = readAgentDefaults(this.opts.db, session.spec.agent);
+      if (cached?.models_json) {
+        try {
+          catalog = JSON.parse(cached.models_json) as ModelInfo[];
+        } catch {
+          catalog = [];
+        }
+      }
+    }
+    const model = this.currentModel.get(session.id) ?? session.spec.model ?? null;
+    if (model) {
+      const match =
+        catalog.find((m) => m.value === model) ??
+        catalog.find((m) => m.value !== 'default' && m.resolvedModel === model) ??
+        catalog.find((m) => m.resolvedModel === model);
+      return match ? match.displayName : model;
+    }
+    return catalog[0]?.displayName ?? null;
   }
 
   private rowToInfo(row: SessionRow): SessionInfo {
@@ -2369,6 +2426,8 @@ export class SessionManager {
         session.dispose();
         this.live.delete(id);
         this.lastTurnEndedAt.delete(id);
+        this.currentModel.delete(id);
+        this.sessionModels.delete(id);
         // A dead session's voice mode is definitionally off — nothing is
         // listening for it anymore — and `rowToInfo` (used once it's out of
         // `live`) always reports `false` regardless, so this is pure

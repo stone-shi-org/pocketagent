@@ -1815,5 +1815,32 @@ describe('session title clamping & agy derived titles (PA-163)', () => {
         allowedAuto.session.terminate();
       }
     });
+
+    it('reports resolved current model display name on SessionInfo and updates on model switch (PA-182)', async () => {
+      const res = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(t),
+        payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24, transport: 'structured' },
+      });
+      expect(res.statusCode, res.body).toBe(201);
+      const info = res.json();
+      const live = t.context.sessions.get(info.id);
+      if (!(live instanceof AgySession)) throw new Error('expected AgySession');
+
+      // Initial model resolves from ACP availableModels catalog displayName.
+      await waitFor(() => t.context.sessions.toInfo(live).model === 'Gemini Pro Next');
+      const listRes = await t.app.inject({ method: 'GET', url: '/api/sessions', headers: headers(t) });
+      expect(listRes.statusCode).toBe(200);
+      const listed = (listRes.json().sessions as Array<{ id: string; model?: string | null }>).find(
+        (s) => s.id === info.id,
+      );
+      expect(listed?.model).toBe('Gemini Pro Next');
+
+      // Live model switch updates SessionInfo.model immediately.
+      await live.setModel('claude-sonnet-4-6');
+      expect(t.context.sessions.toInfo(live).model).toBe('Claude Sonnet 4.6');
+      live.terminate();
+    });
   });
 });

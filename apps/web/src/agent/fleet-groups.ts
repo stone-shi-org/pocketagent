@@ -4,6 +4,7 @@ import {
   plannerChatDotState,
   type ChatDotState,
   type PlannerChat,
+  type PlannerModel,
   type ProjectInfo,
   type QueuedRunSummary,
   type SessionInfo,
@@ -760,4 +761,27 @@ export function formatShortRelative(
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
   return `${Math.floor(delta / 86_400_000)}d ago`;
+}
+
+export interface FleetPlannerModelLabel {
+  /** Curated display label (`PlannerModel.label`), or raw ref if unmatched. */
+  label: string;
+  /** Hover detail including wire `modelId` when it differs from `label`. */
+  detail: string;
+}
+
+/**
+ * PA-182: resolves a Pocket Agent chat's model reference (`planner_models.id`
+ * row id or bare `modelId`) to a human-readable label for `PlannerAgentCard`.
+ */
+export function resolveFleetPlannerModelLabel(
+  modelRef: string | null | undefined,
+  models: readonly PlannerModel[],
+): FleetPlannerModelLabel | null {
+  const ref = modelRef?.trim();
+  if (!ref) return null;
+  const match = models.find((m) => m.id === ref) ?? models.find((m) => m.modelId === ref);
+  if (!match) return { label: ref, detail: ref };
+  const detail = match.label !== match.modelId ? `${match.label} (${match.modelId})` : match.label;
+  return { label: match.label, detail };
 }

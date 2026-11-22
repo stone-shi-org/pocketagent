@@ -1,6 +1,7 @@
 import { stripSpokenSummary } from '@pocketagent/protocol';
-import type { AgentEvent } from '@pocketagent/protocol';
+import type { AgentEvent, ModelInfo } from '@pocketagent/protocol';
 import { promptHeadline } from './prompt-headline.js';
+import { findMatchingModel } from './transcript.js';
 
 /**
  * A rolling preview for one structured session's fleet card: the last few
@@ -62,10 +63,28 @@ export interface FleetPreviewState {
    * `AgentCard` reads to override the server-reported `busy`.
    */
   awaitingApproval: boolean;
+  /** PA-182: current model value/wire id reported by `session_started` / `model_changed`. */
+  model: string | null;
+  /** PA-182: catalog advertised by `models_available`, for resolving human display names. */
+  models: ModelInfo[];
 }
 
 export function emptyFleetPreview(): FleetPreviewState {
-  return { lines: [], subagents: [], awaitingApproval: false };
+  return { lines: [], subagents: [], awaitingApproval: false, model: null, models: [] };
+}
+
+/**
+ * PA-182: resolves the human-readable current model label from a card's live
+ * event preview (`session_started`, `model_changed`, `models_available`).
+ * Mirrors `transcript.ts`'s `resolveCurrentModel`, falling back to the raw
+ * model string if it does not match a catalog entry yet.
+ */
+export function fleetPreviewModelLabel(preview: FleetPreviewState): string | null {
+  if (preview.model) {
+    const match = findMatchingModel(preview.models, preview.model);
+    return match ? match.displayName : preview.model;
+  }
+  return preview.models[0]?.displayName ?? null;
 }
 
 function clamp(text: string, max: number): string {
@@ -96,6 +115,26 @@ function pushLine(state: FleetPreviewState, line: string): FleetPreviewState {
  */
 export function applyFleetEvent(state: FleetPreviewState, event: AgentEvent): FleetPreviewState {
   switch (event.kind) {
+    case 'session_started': {
+      let model = state.model;
+      if (event.model) {
+        const currentMatchesWire =
+          state.model !== null &&
+          (state.model === event.model ||
+            state.models.some((m) => m.value === state.model && m.resolvedModel === event.model));
+        if (!currentMatchesWire) {
+          model = event.model;
+        }
+      }
+      return model === state.model ? state : { ...state, model };
+    }
+
+    case 'models_available':
+      return { ...state, models: event.models };
+
+    case 'model_changed':
+      return { ...state, model: event.model };
+
     case 'user_prompt':
       return pushLine(state, `> ${promptHeadline(event.text, MAX_LINE_CHARS)}`);
 

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@pocketagent/protocol';
-import { applyFleetEvent, applyFleetEvents, emptyFleetPreview } from './fleet-preview.js';
+import type { AgentEvent, ModelInfo } from '@pocketagent/protocol';
+import {
+  applyFleetEvent,
+  applyFleetEvents,
+  emptyFleetPreview,
+  fleetPreviewModelLabel,
+} from './fleet-preview.js';
 
 const subagentToolUse = (id: string, description: string, name = 'Agent'): AgentEvent => ({
   kind: 'tool_use',
@@ -204,5 +209,78 @@ describe('fleet-preview: turn_complete', () => {
       outputTokens: null,
     });
     expect(errored.lines).toEqual(['Turn ended with an error']);
+  });
+});
+
+describe('fleet-preview: current model (PA-182)', () => {
+  const catalog: ModelInfo[] = [
+    {
+      value: 'default',
+      displayName: 'Default',
+      description: 'Default',
+      resolvedModel: 'claude-opus-4-6',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high'],
+    },
+    {
+      value: 'opus',
+      displayName: 'Opus 4.6',
+      description: 'Opus',
+      resolvedModel: 'claude-opus-4-6',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high'],
+    },
+    {
+      value: 'sonnet',
+      displayName: 'Sonnet 4.6',
+      description: 'Sonnet',
+      resolvedModel: 'claude-sonnet-4-6',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high'],
+    },
+  ];
+
+  it('tracks models_available, session_started, and model_changed and resolves human display names', () => {
+    let state = emptyFleetPreview();
+    expect(fleetPreviewModelLabel(state)).toBeNull();
+
+    state = applyFleetEvent(state, { kind: 'models_available', models: catalog });
+    // Falls back to first catalog entry when no explicit model has been reported yet
+    expect(fleetPreviewModelLabel(state)).toBe('Default');
+
+    // Wire id resolves to concrete non-default displayName
+    state = applyFleetEvent(state, {
+      kind: 'session_started',
+      agentSessionId: 's-1',
+      model: 'claude-opus-4-6',
+      cwd: '/w/p',
+      tools: [],
+      permissionMode: null,
+    });
+    expect(fleetPreviewModelLabel(state)).toBe('Opus 4.6');
+
+    // Switching model updates live immediately
+    state = applyFleetEvent(state, { kind: 'model_changed', model: 'sonnet' });
+    expect(fleetPreviewModelLabel(state)).toBe('Sonnet 4.6');
+
+    // Subsequent turn's session_started with wire id preserves user's alias
+    state = applyFleetEvent(state, {
+      kind: 'session_started',
+      agentSessionId: 's-1',
+      model: 'claude-sonnet-4-6',
+      cwd: '/w/p',
+      tools: [],
+      permissionMode: null,
+    });
+    expect(state.model).toBe('sonnet');
+    expect(fleetPreviewModelLabel(state)).toBe('Sonnet 4.6');
+  });
+
+  it('falls back to raw model string when catalog is empty', () => {
+    const state = applyFleetEvent(emptyFleetPreview(), {
+      kind: 'model_changed',
+      model: 'gpt-5.4',
+    });
+    expect(fleetPreviewModelLabel(state)).toBe('gpt-5.4');
   });
 });

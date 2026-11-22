@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { PlannerChat, SessionInfo } from '@pocketagent/protocol';
+import type { PlannerChat, PlannerModel, SessionInfo } from '@pocketagent/protocol';
 import { hostEndpoint } from '../api/host.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { AgentCard } from './AgentCard.js';
@@ -106,6 +106,7 @@ describe('AgentCard (PA-182)', () => {
         session={makeSession({
           agent: 'custom-claude:deepseek',
           agentDisplayName: 'Claude (DeepSeek)',
+          model: 'DeepSeek-V3',
         })}
         onOpen={() => {}}
         onApiError={() => {}}
@@ -114,6 +115,9 @@ describe('AgentCard (PA-182)', () => {
 
     expect(html).toContain('agent-mascot--claude');
     expect(html).toContain('Claude (DeepSeek)');
+    expect(html).toContain('agent-chip--model');
+    expect(html).toContain('title="Model: DeepSeek-V3"');
+    expect(html).toContain('<span>DeepSeek-V3</span>');
   });
 });
 
@@ -149,9 +153,18 @@ describe('PlannerAgentCard (PA-182)', () => {
   });
 
   it('renders interrupt button and running dot while a Pocket Agent turn is busy', () => {
+    const plannerModels: PlannerModel[] = [
+      { id: 'pm-gpt4o', modelId: 'gpt-4o', label: 'GPT-4o Mini', createdAt: 1 } as PlannerModel,
+    ];
     const html = renderWithHost(
       <PlannerAgentCard
-        chat={makeChat({ busy: true, unread: false, skipToolApprovalsEnabled: true })}
+        chat={makeChat({
+          busy: true,
+          unread: false,
+          lastModelId: 'pm-gpt4o',
+          skipToolApprovalsEnabled: true,
+        })}
+        plannerModels={plannerModels}
         onOpen={() => {}}
         onApiError={() => {}}
       />,
@@ -161,6 +174,27 @@ describe('PlannerAgentCard (PA-182)', () => {
     expect(html).toContain('agent-card-stop');
     expect(html).toContain('Interrupt current turn');
     expect(html).toContain('Auto-approve');
+    expect(html).toContain('agent-chip--model');
+    expect(html).toContain('title="Model: GPT-4o Mini (gpt-4o)"');
+    expect(html).toContain('<span>GPT-4o Mini</span>');
+  });
+
+  it('falls back to workspace defaultModelId when chat.lastModelId is null', () => {
+    const plannerModels: PlannerModel[] = [
+      { id: 'pm-sonnet', modelId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', createdAt: 1 } as PlannerModel,
+    ];
+    const html = renderWithHost(
+      <PlannerAgentCard
+        chat={makeChat({ lastModelId: null })}
+        plannerModels={plannerModels}
+        defaultModelId="pm-sonnet"
+        onOpen={() => {}}
+        onApiError={() => {}}
+      />,
+    );
+
+    expect(html).toContain('agent-chip--model');
+    expect(html).toContain('<span>Sonnet 4.6</span>');
   });
 });
 

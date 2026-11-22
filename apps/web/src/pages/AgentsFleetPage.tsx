@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   isTerminalStatus,
   type PlannerChat,
+  type PlannerModel,
+  type PlannerWorkspace,
   type ProjectInfo,
   type SessionInfo,
 } from '@pocketagent/protocol';
@@ -70,6 +72,8 @@ export function AgentsFleetPage({
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [plannerChats, setPlannerChats] = useState<PlannerChat[]>([]);
+  const [plannerModels, setPlannerModels] = useState<PlannerModel[]>([]);
+  const [plannerWorkspaces, setPlannerWorkspaces] = useState<PlannerWorkspace[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const [groupByProject, setGroupByProjectState] = useState(loadFleetGroupByProject);
@@ -131,11 +135,14 @@ export function AgentsFleetPage({
 
   const load = useCallback(async () => {
     try {
-      const [sessionsRes, projectsRes, plannerRes] = await Promise.allSettled([
-        api.listSessions(),
-        api.listProjects(),
-        api.listPlannerChats(),
-      ]);
+      const [sessionsRes, projectsRes, plannerRes, modelsRes, workspacesRes] =
+        await Promise.allSettled([
+          api.listSessions(),
+          api.listProjects(),
+          api.listPlannerChats(),
+          api.listPlannerModels(),
+          api.listPlannerWorkspaces(),
+        ]);
 
       if (sessionsRes.status === 'rejected') {
         throw sessionsRes.reason;
@@ -151,6 +158,12 @@ export function AgentsFleetPage({
       }
       if (plannerRes.status === 'fulfilled') {
         setPlannerChats(plannerRes.value.chats);
+      }
+      if (modelsRes.status === 'fulfilled') {
+        setPlannerModels(modelsRes.value.models);
+      }
+      if (workspacesRes.status === 'fulfilled') {
+        setPlannerWorkspaces(workspacesRes.value.workspaces);
       }
       setError(null);
     } catch (err) {
@@ -226,6 +239,11 @@ export function AgentsFleetPage({
     }
   }, [api, finishedAgents, load, onApiError]);
 
+  const plannerDefaultModelByWorkspace = useMemo(
+    () => new Map(plannerWorkspaces.map((w) => [w.id, w.defaultModelId ?? null])),
+    [plannerWorkspaces],
+  );
+
   const renderCard = (item: FleetKanbanItem): JSX.Element => {
     if (item.kind === 'session') {
       return (
@@ -243,10 +261,15 @@ export function AgentsFleetPage({
       );
     }
     if (item.kind === 'planner') {
+      const defaultModelId = item.chat.workspaceId
+        ? (plannerDefaultModelByWorkspace.get(item.chat.workspaceId) ?? null)
+        : null;
       return (
         <PlannerAgentCard
           key={item.id}
           chat={item.chat}
+          plannerModels={plannerModels}
+          defaultModelId={defaultModelId}
           active={active}
           onOpen={(chatId) => onOpenPlannerChat?.(chatId)}
           onApiError={onApiError}

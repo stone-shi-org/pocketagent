@@ -223,6 +223,13 @@ export const SessionInfo = z.object({
    * stay disclosed persistently across visits and reloads.
    */
   agentMode: z.string().nullable().optional(),
+  /**
+   * PA-182: human-readable label for the session's active model (e.g.
+   * `Opus 4.6`, `Gemini 3 Pro (High)`), resolved from the live or cached
+   * `ModelInfo` catalog with fallback to the wire model id. Null/absent for
+   * terminal sessions or when no model has been reported yet.
+   */
+  model: z.string().nullable().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 

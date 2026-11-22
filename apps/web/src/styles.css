@@ -5749,6 +5749,18 @@ button.chat-rate-limit-badge {
   background: rgb(10 102 255 / 10%);
   border-color: rgb(10 102 255 / 25%);
 }
+.agent-chip--model {
+  color: var(--text);
+  background: var(--bg-elev);
+  border-color: var(--border-strong);
+  max-width: 190px;
+  overflow: hidden;
+}
+.agent-chip--model > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .agent-card-time {
   margin-left: auto;
   font-size: 11px;
