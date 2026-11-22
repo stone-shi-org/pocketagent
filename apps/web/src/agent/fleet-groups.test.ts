@@ -387,6 +387,28 @@ describe('PA-182: sessionFleetDotState & activeFleetPlannerChats', () => {
     ]);
     expect(active.map((c) => c.id)).toEqual(['running', 'approval', 'unread']);
   });
+
+  it('excludes unread Pocket Agent scheduled-job chats (and their unread subagent chats) while keeping running/approval ones', () => {
+    const active = activeFleetPlannerChats([
+      plannerChat({ id: 'cron-unread', cronJobId: 'job-1', unread: true, lastActivityAt: 500 }),
+      plannerChat({
+        id: 'cron-sub-unread',
+        parentChatId: 'cron-unread',
+        unread: true,
+        lastActivityAt: 450,
+      }),
+      plannerChat({ id: 'cron-running', cronJobId: 'job-2', busy: true, lastActivityAt: 400 }),
+      plannerChat({
+        id: 'cron-approval',
+        cronJobId: 'job-3',
+        busy: true,
+        awaitingApproval: true,
+        lastActivityAt: 350,
+      }),
+      plannerChat({ id: 'regular-unread', unread: true, lastActivityAt: 300 }),
+    ]);
+    expect(active.map((c) => c.id)).toEqual(['cron-running', 'cron-approval', 'regular-unread']);
+  });
 });
 
 describe('PA-182: buildFleetKanban', () => {

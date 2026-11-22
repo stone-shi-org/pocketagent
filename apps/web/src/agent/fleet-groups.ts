@@ -360,15 +360,40 @@ export function sessionFleetDotState(
   );
 }
 
+function isScheduledPlannerChat(
+  chat: PlannerChat,
+  chatById: ReadonlyMap<string, PlannerChat>,
+): boolean {
+  let cur: PlannerChat | undefined = chat;
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur.id)) {
+    if (cur.cronJobId) return true;
+    seen.add(cur.id);
+    cur = cur.parentChatId ? chatById.get(cur.parentChatId) : undefined;
+  }
+  return false;
+}
+
 /**
  * PA-182: Pocket Agent chats eligible for the Agents board. Unlike coding
  * sessions, Pocket Agent chats have no persistent process — historical chats
  * live in SQLite forever — so only chats with an active attention state
  * (`approval`, `running`, or `unread`) appear on the board.
+ *
+ * Scheduled-job Pocket Agent chats (`cronJobId`, and subagent chats spawned by
+ * them) are excluded once finished (`unread`) so recurring unattended runs do
+ * not pile up in Idle / Ready — they stay visible only while running (or
+ * parked on an approval).
  */
 export function activeFleetPlannerChats(chats: readonly PlannerChat[]): PlannerChat[] {
+  const chatById = new Map(chats.map((c) => [c.id, c]));
   return chats
-    .filter((chat) => plannerChatDotState(chat) !== null)
+    .filter((chat) => {
+      const dot = plannerChatDotState(chat);
+      if (dot === null) return false;
+      if (dot === 'unread' && isScheduledPlannerChat(chat, chatById)) return false;
+      return true;
+    })
     .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
 }
 
