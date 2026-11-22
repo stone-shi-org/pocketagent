@@ -277,42 +277,103 @@ describe('AgySession (ACP)', () => {
     expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'ran echo approved' });
   });
 
-  it('keeps a background task alive after end_turn, stays busy until it completes, and forwards idle reactive updates', async () => {
+  it('keeps a background task alive after end_turn, defers turn_complete, stays busy until reactive wakeup settles, and forwards idle updates', async () => {
     const taskFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-bg-')), 'task.done');
     const env = {
       ...(process.env as Record<string, string>),
       AGY_FIXTURE_BACKGROUND_TASK_FILE: taskFile,
     };
 
-    session = new AgySession(makeSpec({ env }));
+    session = new AgySession(makeSpec({ env, reactiveSettleMs: 120 }));
     await session.start();
     const events = collect(session);
     let idleEmitted = 0;
     session.on('idle', () => idleEmitted++);
 
     session.prompt('BACKGROUND_TASK');
-    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    await waitFor(() => session!.backgroundCommands.length > 0);
 
-    // Turn resolved before background task finished (matching real agy acp v1.5.14),
-    // and `busy` MUST stay true while the in-flight background tool call is still running
-    // so RunQueue and restart drain do not treat the checkout as idle.
+    // `session/prompt` resolved before the background task finished (matching real
+    // agy acp v1.5.14). `turn_complete` MUST be deferred and `busy` MUST stay true
+    // so RunExecutor does not settle early and RunQueue does not release the tree.
     expect(fs.existsSync(taskFile)).toBe(false);
     expect(session.busy).toBe(true);
     expect(session.backgroundCommands).toEqual(['sleep 1 && echo bg']);
+    expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
     expect(idleEmitted).toBe(0);
 
     // Background task survives and completes while the ACP process stays up.
     await waitFor(() => fs.existsSync(taskFile), { timeout: 5_000 });
     expect(fs.readFileSync(taskFile, 'utf8')).toBe('FINISHED');
 
-    // Reactive tool_result and follow-up text arrive while idle, and `busy` clears + emits 'idle'.
+    // Reactive tool_result and follow-up text arrive, then turn_complete fires once and `busy` clears.
     await waitFor(() => events.some((e) => e.kind === 'tool_result'));
     await waitFor(() => events.some((e) => e.kind === 'text' && e.text === 'Background task finished.'), {
       timeout: 3_000,
     });
     await waitFor(() => session?.busy === false, { timeout: 3_000 });
+    expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(1);
     expect(session.backgroundCommands).toEqual([]);
     expect(idleEmitted).toBe(1);
+  });
+
+  it('stays continuously busy across multi-step reactive wakeups with >500ms LLM gaps (no premature turn_complete or idle flap)', async () => {
+    const env = {
+      ...(process.env as Record<string, string>),
+      AGY_FIXTURE_REACTIVE_GAP_MS: '650',
+    };
+
+    session = new AgySession(makeSpec({ env, reactiveSettleMs: 150 }));
+    await session.start();
+    const events = collect(session);
+    let idleEmitted = 0;
+    let sawIdleBeforeFinalText = false;
+    session.on('idle', () => {
+      idleEmitted++;
+      if (!events.some((e) => e.kind === 'text' && e.text === 'All reactive steps done.')) {
+        sawIdleBeforeFinalText = true;
+      }
+    });
+
+    session.prompt('BACKGROUND_TASK_MULTI_STEP');
+    await waitFor(() => session!.backgroundCommands.includes('pnpm test'));
+    expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+
+    await waitFor(() => events.some((e) => e.kind === 'text' && e.text === 'All reactive steps done.'), {
+      timeout: 6_000,
+    });
+    await waitFor(() => session?.busy === false, { timeout: 3_000 });
+
+    expect(sawIdleBeforeFinalText).toBe(false);
+    expect(idleEmitted).toBe(1);
+    expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(1);
+    expect(events.some((e) => e.kind === 'tool_use' && e.summary === 'Run git commit')).toBe(true);
+  });
+
+  it('retains non-execute background-capable tools (schedule) across end_turn and supports legacy fallback without usage_update', async () => {
+    session = new AgySession(makeSpec({ reactiveSettleMs: 100, reactiveFallbackFlushMs: 180 }));
+    await session.start();
+    const events = collect(session);
+    let idleEmitted = 0;
+    session.on('idle', () => idleEmitted++);
+
+    // 1. `schedule` (kind: "other") must not be pruned at end_turn.
+    session.prompt('BACKGROUND_SCHEDULE');
+    await waitFor(() => session!.backgroundCommands.includes('Run schedule'));
+    expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+    await waitFor(() => session?.busy === false, { timeout: 3_000 });
+    expect(events.some((e) => e.kind === 'text' && e.text === 'Timer completed.')).toBe(true);
+    expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(1);
+    expect(idleEmitted).toBe(1);
+
+    // 2. Older agy build emitting reactive text without usage_update settles via reactiveFallbackFlushMs.
+    session.prompt('BACKGROUND_TASK_LEGACY');
+    await waitFor(() => events.some((e) => e.kind === 'text' && e.text === 'Legacy reactive reply.'), {
+      timeout: 3_000,
+    });
+    await waitFor(() => session?.busy === false, { timeout: 3_000 });
+    expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(2);
+    expect(idleEmitted).toBe(2);
   });
 
   it('clears in-flight tool calls on turn error and prunes non-execute calls at end_turn so busy never gets stuck', async () => {
@@ -787,14 +848,16 @@ describe('AgySession (ACP)', () => {
           AGY_FIXTURE_PROMPT_LOG: promptLogOff,
         },
         shouldAppendSpokenSummary: () => voiceOn,
+        reactiveSettleMs: 120,
       }),
     );
     await session.start();
     const eventsOff = collect(session);
 
     session.prompt('BACKGROUND_TASK');
-    await waitFor(() => eventsOff.some((e) => e.kind === 'turn_complete'));
+    await waitFor(() => session!.backgroundCommands.length > 0);
     expect(session.busy).toBe(true);
+    expect(eventsOff.some((e) => e.kind === 'turn_complete')).toBe(false);
     expect(fs.existsSync(taskFileOff)).toBe(false);
 
     // Toggle voice OFF and send another turn while the background task is still running.
@@ -842,14 +905,16 @@ describe('AgySession (ACP)', () => {
           AGY_FIXTURE_PROMPT_LOG: promptLogOn,
         },
         shouldAppendSpokenSummary: () => voiceOn,
+        reactiveSettleMs: 120,
       }),
     );
     await session.start();
     const eventsOn = collect(session);
 
     session.prompt('BACKGROUND_TASK');
-    await waitFor(() => eventsOn.some((e) => e.kind === 'turn_complete'));
+    await waitFor(() => session!.backgroundCommands.length > 0);
     expect(session.busy).toBe(true);
+    expect(eventsOn.some((e) => e.kind === 'turn_complete')).toBe(false);
     expect(fs.existsSync(taskFileOn)).toBe(false);
 
     voiceOn = true;

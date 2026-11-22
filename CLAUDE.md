@@ -4230,17 +4230,30 @@ These are load-bearing. Several were bugs first.
        unless `spec.skipPermissions` is already true.
      - `--dangerously-skip-permissions` is spawn-time only so `applyGlobalSkipPermissions` is a
        no-op (same posture as terminal sessions).
-  2. **Background tasks survive turns and keep `busy` honest:** `agy acp` resolves `session/prompt`
-     with `end_turn` while a background `run_command` is still running, keeps the task alive because
-     the process stays up, and pushes reactive `session/update` notifications asynchronously when it
-     finishes. `AgySession` tracks in-flight tool calls (`inFlightToolCalls`, storing `kind` and
-     `title`, pruning non-`execute` calls at `end_turn` and clearing all entries on turn error/retry
-     so stale ids cannot strand `busy`) and idle reactive streaming (`idleFlushTimer`) in
-     `updateBusy()`. When `busy` flips `true -> false`, `AgySession` emits `'idle'`, which
-     `SessionManager` maps to `notifyTreeIdle` so `RunQueue` wakes immediately after background work
-     drains. `POST /api/admin/restart` drain (`midTurnSessions`) sees the session as busy while
-     background work runs, and `interrupt()` cancels reactive work and parked permissions (emitting
-     `permission_resolved`).
+  2. **Background tasks survive turns, defer `turn_complete`, and keep `busy` honest across
+     reactive wakeups:** `agy acp` resolves `session/prompt` with `end_turn` while a background
+     task (`run_command`, `schedule`, `invoke_subagent`, `run_workflow`) is still running, keeps
+     the task alive because the process stays up, and pushes reactive `session/update`
+     notifications asynchronously when it finishes. `AgySession` tracks in-flight tool calls
+     (`inFlightToolCalls`, storing `kind`, `name`, and `title`, retaining background-capable calls
+     across `end_turn` while pruning synchronous `read`/`edit`/`search` calls, and clearing all
+     entries on turn error/retry so stale ids cannot strand `busy`). When background-capable tool
+     calls remain at `end_turn`, `AgySession` **defers `turn_complete`** (`pendingTurnComplete`)
+     instead of emitting it early (so `RunExecutor` does not settle a webhook/cron run while
+     background work is still running) and drives an explicit reactive state machine
+     (`awaiting_background` → `awaiting_llm` → `running_tool` / `settling` → `idle`). After a
+     background or reactive tool completes, `AgySession` stays `busy` in `awaiting_llm` across
+     multi-second silent LLM thinking gaps (with a 120s total-silence safety watchdog, reset on
+     any update and never armed while a tool or approval is active) rather than using a short
+     500ms idle timer — settling only after `usage_update` (emitted at the end of every `agy acp`
+     LLM step, 2–15ms before any follow-up `tool_call`, with a 750ms confirmation window and a
+     2.5s `agent_message_chunk` fallback for older binaries). Only when reactive work genuinely
+     settles does `AgySession` emit the deferred `turn_complete` and flip `busy` `true -> false`
+     (`'idle'`), which `SessionManager` maps to `notifyTreeIdle` so `RunQueue` wakes the next
+     waiter only after the checkout is actually free. `POST /api/admin/restart` drain
+     (`midTurnSessions`) sees the session as busy while background/reactive work runs, and
+     `interrupt()` cancels reactive work and parked permissions (emitting `permission_resolved`
+     and the deferred `turn_complete` as `cancelled`).
      - **Known limitation & decision (long-running background commands, PA-183):** A dev server or
        file watcher started in the background never finishes, so it intentionally keeps `busy`
        true (blocking `RunQueue` on that working tree and `POST /api/admin/restart` until `force`)

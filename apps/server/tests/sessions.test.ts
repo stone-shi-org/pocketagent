@@ -16,6 +16,8 @@ import { createPiAdapter } from '../src/agents/pi.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
 import { clampTitle, CreateSessionRequest, isAutoApprovingAgentMode, MAX_SESSION_TITLE_CHARS } from '@pocketagent/protocol';
 import { RunExecutor } from '../src/runs/executor.js';
+import { RunQueue } from '../src/runs/queue.js';
+import { treeRootOf } from '../src/git/worktree-paths.js';
 import { MCP_TOOLS } from '../src/mcp-server/tools.js';
 import { AgySession } from '../src/sessions/agy-session.js';
 import { titleOf } from '../src/webhooks/index.js';
@@ -548,9 +550,10 @@ describe('agy adapter: structured, forced skip-permissions', () => {
       if (session.transport !== 'structured') throw new Error('expected structured session');
 
       session.prompt('BACKGROUND_TASK');
-      await waitFor(() =>
+      await waitFor(() => (t.context.sessions.toInfo(session).backgroundCommands?.length ?? 0) > 0);
+      expect(
         session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
-      );
+      ).toBe(false);
 
       const info = t.context.sessions.toInfo(session);
       expect(info.busy).toBe(true);
@@ -569,8 +572,124 @@ describe('agy adapter: structured, forced skip-permissions', () => {
       await session.interrupt();
       expect(t.context.sessions.toInfo(session).busy).toBe(false);
       expect(t.context.sessions.toInfo(session).backgroundCommands).toBeUndefined();
+      expect(
+        session.buffer.replayAfter(0).events.some(
+          (e) => e.event.kind === 'turn_complete' && e.event.stopReason === 'cancelled',
+        ),
+      ).toBe(true);
     } finally {
       delete process.env.AGY_FIXTURE_BACKGROUND_TASK_FILE;
+    }
+  });
+
+  it('keeps RunQueue locked and RunExecutor unsettled across agy multi-step reactive wakeups', async () => {
+    process.env.AGY_FIXTURE_REACTIVE_GAP_MS = '650';
+    try {
+      const executor = new RunExecutor({
+        sessions: t.context.sessions,
+        workspaces: t.context.workspaces,
+        worktrees: t.context.worktrees,
+      });
+      const queue = new RunQueue({
+        busyTreeRoots: () => t.context.sessions.busyTreeRoots(),
+      });
+      const treeKey = treeRootOf(t.projectDir);
+
+      // Mirror WebhookService wiring: wake queue whenever a session becomes idle.
+      const offTreeIdle = t.context.sessions.onTreeIdle(() => queue.pump());
+      try {
+
+      let run1SettledAt: number | null = null;
+      let run2StartedAt: number | null = null;
+      let run2SettledAt: number | null = null;
+      let run1SessionId: string | null = null;
+
+      expect(queue.tryAcquire(treeKey, 'run-1')).toEqual({ granted: true });
+      const run1 = await executor.start(
+        'run-1',
+        {
+          cwd: t.projectDir,
+          agent: 'agy',
+          title: 'First agy run',
+          prompt: 'BACKGROUND_TASK_MULTI_STEP',
+          skipPermissions: true,
+          worktree: { mode: 'none' },
+        },
+        {
+          onCwd() {},
+          onSessionStarted(sid) {
+            run1SessionId = sid;
+            queue.started(treeKey, 'run-1');
+          },
+          onAgentSessionId() {},
+          onSettled() {
+            run1SettledAt = Date.now();
+            queue.release(treeKey, 'run-1');
+          },
+        },
+      );
+      expect(run1.ok).toBe(true);
+
+      // Second run arrives for the same tree while run-1 is in its background/reactive phase.
+      expect(queue.tryAcquire(treeKey, 'run-2').granted).toBe(false);
+      const noopStore = {
+        pending: () => [],
+        onQueued() {},
+        onDequeued() {},
+      };
+      queue.register(noopStore);
+      queue.enqueue(
+        {
+          id: 'run-2',
+          key: treeKey,
+          enqueuedAt: Date.now(),
+          run: async () => {
+            run2StartedAt = Date.now();
+            const res = await executor.start(
+              'run-2',
+              {
+                cwd: t.projectDir,
+                agent: 'agy',
+                title: 'Second queued run',
+                prompt: 'hello second',
+                skipPermissions: true,
+                worktree: { mode: 'none' },
+              },
+              {
+                onCwd() {},
+                onSessionStarted() {
+                  queue.started(treeKey, 'run-2');
+                },
+                onAgentSessionId() {},
+                onSettled() {
+                  run2SettledAt = Date.now();
+                  queue.release(treeKey, 'run-2');
+                },
+              },
+            );
+            expect(res.ok).toBe(true);
+          },
+        },
+        noopStore,
+      );
+
+      // Wait until both runs finish; run-2 must NOT start until run-1's full reactive chain settled.
+      await waitFor(() => run2SettledAt !== null, { timeout: 10_000 });
+      expect(run1SettledAt).not.toBeNull();
+      expect(run2StartedAt).not.toBeNull();
+      expect(run2StartedAt!).toBeGreaterThanOrEqual(run1SettledAt!);
+
+      const run1Session = run1SessionId ? t.context.sessions.get(run1SessionId) : null;
+      if (run1Session && run1Session.transport === 'structured') {
+        const evs = run1Session.buffer.replayAfter(0).events.map((e) => e.event);
+        expect(evs.some((e) => e.kind === 'text' && e.text === 'All reactive steps done.')).toBe(true);
+        expect(evs.filter((e) => e.kind === 'turn_complete')).toHaveLength(1);
+      }
+      } finally {
+        offTreeIdle();
+      }
+    } finally {
+      delete process.env.AGY_FIXTURE_REACTIVE_GAP_MS;
     }
   });
 });

@@ -69,6 +69,25 @@ export interface AgySessionSpec {
    */
   handshakeTimeoutMs?: number;
   /**
+   * How long (ms) to wait after a reactive `usage_update` (with no in-flight
+   * tools or parked permissions) before concluding no `tool_call` follows and
+   * settling the reactive turn. Live `agy acp` emits `tool_call` 2–15ms after
+   * `usage_update`; defaults to 750ms.
+   */
+  reactiveSettleMs?: number;
+  /**
+   * Fallback quiet window (ms) after reactive `agent_message_chunk` output
+   * when an older/fixture `agy` build does not emit `usage_update`. Defaults
+   * to 2_500ms.
+   */
+  reactiveFallbackFlushMs?: number;
+  /**
+   * Safety watchdog (ms) while waiting in `awaiting_llm` after a reactive tool
+   * finishes with zero ACP updates at all. Reset on every `session/update` and
+   * never armed while a tool or permission is active. Defaults to 120_000ms.
+   */
+  reactiveLlmWatchdogMs?: number;
+  /**
    * PA-75: the Pocket Agent chat that created this session via
    * `start_subagent_session`, or null for human/trigger sessions.
    */
@@ -112,6 +131,38 @@ interface ActiveTurn {
   readonly attempt: number;
   readonly startedAt: number;
   interrupted: boolean;
+}
+
+type ReactivePhase =
+  | 'idle'
+  | 'awaiting_background'
+  | 'awaiting_llm'
+  | 'running_tool'
+  | 'settling';
+
+interface PendingTurnComplete {
+  readonly stopReason: string;
+  readonly startedAt: number;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly cacheReadTokens: number | null;
+  readonly cacheWriteTokens: number | null;
+}
+
+/**
+ * Tools in `agy` that can genuinely run in the background and outlive
+ * `session/prompt`'s `end_turn` before waking the agent reactively.
+ * Synchronous read/edit/search tools are still pruned at `end_turn` so a
+ * missing terminal `tool_call_update` can never strand `busy === true`.
+ */
+function isBackgroundCapableToolCall(kind: string | null, name: string | null): boolean {
+  return (
+    kind === 'execute' ||
+    name === 'run_command' ||
+    name === 'schedule' ||
+    name === 'invoke_subagent' ||
+    name === 'run_workflow'
+  );
 }
 
 /**
@@ -161,17 +212,25 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   /**
    * Tool calls started via `tool_call` that have not yet reached a terminal
    * `tool_call_update` (`completed` / `failed` / `cancelled`), mapped to their
-   * ACP `kind` (`execute`, `edit`, `read`, …) and human-readable `title`.
-   * Because `agy acp` resolves `session/prompt` with `end_turn` while a
-   * background `run_command` is still running, tracking in-flight `execute`
-   * calls keeps `busy` honest and lets the UI and drain-state blockers name
-   * which background command is holding the checkout so a human can interrupt
-   * it knowingly. Non-`execute` calls are pruned at `end_turn`, and all entries
-   * are cleared on turn error/retry so a missing terminal update can never
-   * strand `busy === true`.
+   * ACP `kind` (`execute`, `edit`, `read`, …), tool `name`, and human-readable
+   * `title`. Because `agy acp` resolves `session/prompt` with `end_turn` while
+   * a background task (`run_command`, `schedule`, `invoke_subagent`,
+   * `run_workflow`) is still running, keeping background-capable calls across
+   * `end_turn` keeps `busy` honest, defers `turn_complete` until reactive work
+   * actually finishes, and lets the UI and drain-state blockers name which
+   * background command is holding the checkout so a human can interrupt it
+   * knowingly. Synchronous non-background calls are pruned at `end_turn`, and
+   * all entries are cleared on turn error/retry so a missing terminal update
+   * can never strand `busy === true`.
    */
-  private readonly inFlightToolCalls = new Map<string, { kind: string | null; title: string | null }>();
+  private readonly inFlightToolCalls = new Map<
+    string,
+    { kind: string | null; name: string | null; title: string | null }
+  >();
   private lastNotifiedBackgroundCommands = '';
+  private reactivePhase: ReactivePhase = 'idle';
+  private reactiveTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingTurnComplete: PendingTurnComplete | null = null;
   private _bypassedBySettings = false;
   /**
    * Sticky latch: once this session has ever run bypassed via `settings.json`,
@@ -222,9 +281,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private streamedThought = '';
   private messageSeq = 0;
   private thoughtSeq = 0;
-  private idleFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   private static readonly DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
+  private static readonly DEFAULT_REACTIVE_SETTLE_MS = 750;
+  private static readonly DEFAULT_REACTIVE_FALLBACK_FLUSH_MS = 2_500;
+  private static readonly DEFAULT_REACTIVE_LLM_WATCHDOG_MS = 120_000;
   private static readonly MAX_TURN_RETRIES = 2;
   private static readonly RETRY_BACKOFF_MS = [1000, 3000];
   private static readonly TRANSIENT_ERROR_PATTERN =
@@ -324,16 +385,17 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     return this._supportsSystemPromptAppend;
   }
   /**
-   * Titles of in-flight `execute` tool calls keeping this session busy after a
-   * turn has ended (e.g. a dev server or watcher running in the background).
+   * Titles of in-flight background-capable tool calls keeping this session
+   * busy after a turn's `session/prompt` resolved (e.g. a dev server, long
+   * build/test command, timer, or subagent running in the background).
    * Empty while a prompt turn is active or when idle.
    */
   get backgroundCommands(): string[] {
     if (this.closed || this.activeTurn !== null) return [];
     const titles: string[] = [];
     for (const entry of this.inFlightToolCalls.values()) {
-      if (entry.kind === 'execute') {
-        titles.push(entry.title ?? 'background command');
+      if (isBackgroundCapableToolCall(entry.kind, entry.name)) {
+        titles.push(entry.title ?? entry.name ?? 'background command');
       }
     }
     return titles;
@@ -748,7 +810,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   /**
    * Recompute `busy` from every active signal: a draining prompt queue, an
    * active prompt RPC, an in-flight background tool call, a parked permission
-   * request, or reactive idle output still streaming.
+   * request, or a reactive post-background wakeup still running/settling.
    */
   private updateBusy(): void {
     const busy =
@@ -757,7 +819,8 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         this.activeTurn !== null ||
         this.inFlightToolCalls.size > 0 ||
         this.pending.size > 0 ||
-        this.idleFlushTimer !== null);
+        this.reactivePhase !== 'idle' ||
+        this.reactiveTimer !== null);
     this.setBusy(busy);
   }
 
@@ -930,9 +993,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       return;
     }
 
-    // Track in-flight tool calls so `busy` stays honest when a background
-    // `run_command` outlives `session/prompt`'s `end_turn` and the UI / drain
-    // blockers can name which background command is holding the session.
+    // Track in-flight tool calls and reactive post-background turns so `busy`
+    // stays honest across both background execution and subsequent multi-step
+    // reactive LLM inference gaps, and the UI / drain blockers can name which
+    // background command is holding the session.
     if (kind === 'tool_call') {
       const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
       const callKind = typeof update.kind === 'string' ? update.kind : null;
@@ -945,10 +1009,16 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           ? update.args
           : {};
       const callTitle = rawTitle ?? (toolName ? summarizeAgyTool(toolName, rawInput) : null);
-      if (callId) this.inFlightToolCalls.set(callId, { kind: callKind, title: callTitle });
+      if (callId) {
+        this.inFlightToolCalls.set(callId, { kind: callKind, name: toolName, title: callTitle });
+      }
       this.flushStreamedThought();
       this.flushStreamedText();
-      if (!this.activeTurn) this.emitBackgroundCommandsIfChanged();
+      if (!this.activeTurn) {
+        this.clearReactiveTimer();
+        this.reactivePhase = 'running_tool';
+        this.emitBackgroundCommandsIfChanged();
+      }
       this.updateBusy();
     } else if (kind === 'tool_call_update') {
       const callId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
@@ -957,8 +1027,19 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         if (status === 'completed' || status === 'failed' || status === 'cancelled') {
           this.inFlightToolCalls.delete(callId);
           if (!this.activeTurn) {
-            this.scheduleIdleFlush();
             this.emitBackgroundCommandsIfChanged();
+            if (this.inFlightToolCalls.size > 0 || this.pending.size > 0) {
+              this.clearReactiveTimer();
+              if (this.reactivePhase === 'idle' || this.reactivePhase === 'settling') {
+                this.reactivePhase = 'running_tool';
+              }
+            } else {
+              // The background task or reactive tool just finished: `agy` now
+              // invokes the LLM reactively, which can take 3-30+ seconds before
+              // its first chunk or next tool_call. Never drop `busy` on a 500ms
+              // timer here.
+              this.enterAwaitingLlm();
+            }
           }
           this.updateBusy();
         } else {
@@ -986,38 +1067,104 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     for (const event of events) {
       if (event.kind === 'thinking_delta') {
         this.streamedThought += event.text;
-        if (!this.activeTurn) {
-          this.scheduleIdleFlush();
+        if (!this.activeTurn && this.inFlightToolCalls.size === 0 && this.pending.size === 0) {
+          this.enterAwaitingLlm();
         }
       } else if (event.kind === 'text_delta') {
         this.flushStreamedThought();
         this.streamedText += event.text;
-        if (!this.activeTurn) {
-          this.scheduleIdleFlush();
+        if (!this.activeTurn && this.inFlightToolCalls.size === 0 && this.pending.size === 0) {
+          // Fallback settle window for older/fixture agy builds that omit
+          // `usage_update`; superseded by `reactiveSettleMs` once `usage_update`
+          // arrives at the end of the LLM step.
+          this.scheduleReactiveSettle(
+            this.spec.reactiveFallbackFlushMs ?? AgySession.DEFAULT_REACTIVE_FALLBACK_FLUSH_MS,
+          );
+        }
+      } else if (event.kind === 'context_usage') {
+        // Verified live against agy acp v1.5.14: `usage_update` is emitted once
+        // at the end of every LLM step, 2–15ms before any `tool_call` from that
+        // step (or with nothing after it on a final reply). Ignore unrelated
+        // `usage_update` frames when completely idle (e.g. from `session/set_mode`).
+        if (
+          !this.activeTurn &&
+          this.reactivePhase !== 'idle' &&
+          this.inFlightToolCalls.size === 0 &&
+          this.pending.size === 0
+        ) {
+          this.scheduleReactiveSettle(
+            this.spec.reactiveSettleMs ?? AgySession.DEFAULT_REACTIVE_SETTLE_MS,
+          );
         }
       }
       this.emitEvent(event);
     }
   }
 
-  private scheduleIdleFlush(): void {
-    if (this.idleFlushTimer) clearTimeout(this.idleFlushTimer);
-    this.idleFlushTimer = setTimeout(() => {
-      this.idleFlushTimer = null;
-      if (!this.activeTurn && !this.closed) {
-        this.flushStreamedThought();
-        this.flushStreamedText();
+  private enterAwaitingLlm(): void {
+    this.clearReactiveTimer();
+    this.reactivePhase = 'awaiting_llm';
+    const watchdogMs =
+      this.spec.reactiveLlmWatchdogMs ?? AgySession.DEFAULT_REACTIVE_LLM_WATCHDOG_MS;
+    this.reactiveTimer = setTimeout(() => {
+      this.reactiveTimer = null;
+      if (!this.activeTurn && !this.closed && this.inFlightToolCalls.size === 0 && this.pending.size === 0) {
+        this.finishReactiveTurn();
+      } else {
+        this.updateBusy();
       }
-      this.updateBusy();
-    }, 500);
-    this.idleFlushTimer.unref?.();
+    }, watchdogMs);
+    this.reactiveTimer.unref?.();
     this.updateBusy();
   }
 
-  private clearIdleFlush(): void {
-    if (this.idleFlushTimer) {
-      clearTimeout(this.idleFlushTimer);
-      this.idleFlushTimer = null;
+  private scheduleReactiveSettle(delayMs: number): void {
+    this.clearReactiveTimer();
+    this.reactivePhase = 'settling';
+    this.reactiveTimer = setTimeout(() => {
+      this.reactiveTimer = null;
+      if (!this.activeTurn && !this.closed && this.inFlightToolCalls.size === 0 && this.pending.size === 0) {
+        this.finishReactiveTurn();
+      } else {
+        this.updateBusy();
+      }
+    }, delayMs);
+    this.reactiveTimer.unref?.();
+    this.updateBusy();
+  }
+
+  private finishReactiveTurn(): void {
+    this.clearReactiveTimer();
+    this.reactivePhase = 'idle';
+    this.flushStreamedThought();
+    this.flushStreamedText();
+    this.emitPendingTurnComplete();
+    this.updateBusy();
+  }
+
+  private emitPendingTurnComplete(override?: { stopReason: string; isError: boolean }): void {
+    const pending = this.pendingTurnComplete;
+    if (!pending) return;
+    this.pendingTurnComplete = null;
+    this.emitEvent({
+      kind: 'turn_complete',
+      stopReason: override?.stopReason ?? pending.stopReason,
+      isError: override?.isError ?? false,
+      numTurns: 1,
+      durationMs: Date.now() - pending.startedAt,
+      costUsd: null,
+      inputTokens: pending.inputTokens,
+      outputTokens: pending.outputTokens,
+      ...(pending.cacheReadTokens !== null ? { cacheReadTokens: pending.cacheReadTokens } : {}),
+      ...(pending.cacheWriteTokens !== null ? { cacheWriteTokens: pending.cacheWriteTokens } : {}),
+      completedAt: Date.now(),
+    });
+  }
+
+  private clearReactiveTimer(): void {
+    if (this.reactiveTimer) {
+      clearTimeout(this.reactiveTimer);
+      this.reactiveTimer = null;
     }
   }
 
@@ -1046,12 +1193,20 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (child !== this.child) return;
     this.child = null;
     this.appliedSystemPromptAppend = null;
-    this.clearIdleFlush();
+    this.clearReactiveTimer();
+    this.reactivePhase = 'idle';
     this.inFlightToolCalls.clear();
     this.emitBackgroundCommandsIfChanged();
 
     // Clear any parked permission sheets so the browser never keeps stale approvals.
     this.clearPendingPermissions();
+    if (!this.activeTurn && !this.closed) {
+      this.flushStreamedThought();
+      this.flushStreamedText();
+      this.emitPendingTurnComplete({ stopReason: 'ERROR', isError: true });
+    } else {
+      this.pendingTurnComplete = null;
+    }
     this.updateBusy();
 
     const reason =
@@ -1083,9 +1238,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this._lastActivityAt = Date.now();
     this.setBusy(true);
 
-    this.clearIdleFlush();
+    this.clearReactiveTimer();
+    this.reactivePhase = 'idle';
     this.flushStreamedThought();
     this.flushStreamedText();
+    this.emitPendingTurnComplete();
 
     this.emitEvent({
       kind: 'user_prompt',
@@ -1223,11 +1380,14 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       })) as Record<string, unknown> | null;
 
       if (this.activeTurn === turn) this.activeTurn = null;
-      // Only command-type calls (`kind: "execute"`) can genuinely outlive
-      // `end_turn` as background tasks; prune everything else so a missing
-      // terminal update on a read/edit/search tool can never strand `busy`.
+      // Only background-capable tool calls (`run_command`, `schedule`,
+      // `invoke_subagent`, `run_workflow`) can genuinely outlive `end_turn`;
+      // prune synchronous read/edit/search tools so a missing terminal update
+      // can never strand `busy`.
       for (const [callId, entry] of [...this.inFlightToolCalls]) {
-        if (entry.kind !== 'execute') this.inFlightToolCalls.delete(callId);
+        if (!isBackgroundCapableToolCall(entry.kind, entry.name)) {
+          this.inFlightToolCalls.delete(callId);
+        }
       }
       this.emitBackgroundCommandsIfChanged();
       this.flushStreamedThought();
@@ -1247,24 +1407,48 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           ? usage.cachedWriteTokens
           : null;
 
-      this.emitEvent({
-        kind: 'turn_complete',
-        stopReason,
-        isError: false,
-        numTurns: 1,
-        durationMs: Date.now() - turn.startedAt,
-        costUsd: null,
-        inputTokens,
-        outputTokens,
-        ...(cacheReadTokens !== null ? { cacheReadTokens } : {}),
-        ...(cacheWriteTokens !== null ? { cacheWriteTokens } : {}),
-        completedAt: Date.now(),
-      });
+      if (this.inFlightToolCalls.size > 0 && stopReason !== 'cancelled') {
+        // `agy acp` resolves `session/prompt` early while background work is
+        // still running, then wakes up reactively when it completes. Defer
+        // `turn_complete` until the background task + reactive wakeup actually
+        // finish so `RunExecutor` does not settle the run early and `RunQueue`
+        // keeps holding the working tree.
+        this.clearReactiveTimer();
+        this.reactivePhase = 'awaiting_background';
+        this.pendingTurnComplete = {
+          stopReason,
+          startedAt: turn.startedAt,
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          cacheWriteTokens,
+        };
+      } else {
+        this.clearReactiveTimer();
+        this.reactivePhase = 'idle';
+        this.pendingTurnComplete = null;
+        this.emitEvent({
+          kind: 'turn_complete',
+          stopReason,
+          isError: false,
+          numTurns: 1,
+          durationMs: Date.now() - turn.startedAt,
+          costUsd: null,
+          inputTokens,
+          outputTokens,
+          ...(cacheReadTokens !== null ? { cacheReadTokens } : {}),
+          ...(cacheWriteTokens !== null ? { cacheWriteTokens } : {}),
+          completedAt: Date.now(),
+        });
+      }
     } catch (err) {
       if (this.activeTurn === turn) this.activeTurn = null;
-      // Clear any in-flight tool calls on error/retry so stale ids from a
-      // failed attempt can never strand `busy === true`.
+      // Clear any in-flight tool calls and reactive state on error/retry so
+      // stale ids from a failed attempt can never strand `busy === true`.
       this.inFlightToolCalls.clear();
+      this.clearReactiveTimer();
+      this.reactivePhase = 'idle';
+      this.pendingTurnComplete = null;
       this.emitBackgroundCommandsIfChanged();
       if (this.closed) return;
 
@@ -1378,8 +1562,14 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       /* pipe already closed */
     }
     this.inFlightToolCalls.clear();
-    this.clearIdleFlush();
+    this.clearReactiveTimer();
+    this.reactivePhase = 'idle';
     this.emitBackgroundCommandsIfChanged();
+    if (!this.activeTurn) {
+      this.flushStreamedThought();
+      this.flushStreamedText();
+      this.emitPendingTurnComplete({ stopReason: 'cancelled', isError: false });
+    }
     this.updateBusy();
     this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
   }
@@ -1440,6 +1630,13 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     };
 
     this.pending.set(id, { event, rpcId, options });
+    if (!this.activeTurn) {
+      // Never arm or expire a reactive timer while parked on a human approval.
+      this.clearReactiveTimer();
+      if (this.reactivePhase === 'idle' || this.reactivePhase === 'settling') {
+        this.reactivePhase = 'running_tool';
+      }
+    }
     this.updateBusy();
     this.emitEvent(event);
     this.emit('permission', this.pendingPermissions());
@@ -1455,7 +1652,16 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     if (!entry) return false;
     this.pending.delete(id);
     this._lastActivityAt = Date.now();
-    this.updateBusy();
+    if (
+      !this.activeTurn &&
+      this.pending.size === 0 &&
+      this.inFlightToolCalls.size === 0 &&
+      this.reactivePhase !== 'idle'
+    ) {
+      this.enterAwaitingLlm();
+    } else {
+      this.updateBusy();
+    }
 
     const outcome = selectAcpPermissionOutcome(entry.options, decision);
     try {
@@ -1491,7 +1697,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.closed = true;
     this.queue.length = 0;
     this.inFlightToolCalls.clear();
-    this.clearIdleFlush();
+    this.clearReactiveTimer();
+    this.reactivePhase = 'idle';
+    this.pendingTurnComplete = null;
     this.clearPendingPermissions();
     this.updateBusy();
     this.setStatus('killed');
@@ -1559,7 +1767,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   dispose(): void {
     this.closed = true;
     this.queue.length = 0;
-    this.clearIdleFlush();
+    this.clearReactiveTimer();
+    this.reactivePhase = 'idle';
+    this.pendingTurnComplete = null;
     this.clearPendingPermissions();
     this.removeAllListeners();
   }

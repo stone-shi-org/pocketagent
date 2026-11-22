@@ -459,6 +459,7 @@ function runAcpServer() {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'started' },
       });
+      notifyUpdate({ sessionUpdate: 'usage_update', used: 11000, size: 1048576 });
       // Resolve turn BEFORE background task completes — matching real agy acp v1.5.14.
       send({
         jsonrpc: '2.0',
@@ -480,7 +481,162 @@ function runAcpServer() {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'Background task finished.' },
         });
+        notifyUpdate({ sessionUpdate: 'usage_update', used: 11300, size: 1048576 });
       }, 250);
+      activeBgTimers.add(bgTimer);
+      return;
+    }
+
+    if (text === 'BACKGROUND_TASK_MULTI_STEP') {
+      // Mirrors the real agy acp v1.5.14 reactive wakeup captured on PA-184:
+      // 1) session/prompt resolves while background command is still running
+      // 2) background command finishes -> long silent LLM gap (>500ms) ->
+      //    usage_update + follow-up tool_call + tool_call_update(completed)
+      // 3) second silent LLM gap (>500ms) -> agent_message_chunk + usage_update
+      const gapMs = Number(process.env.AGY_FIXTURE_REACTIVE_GAP_MS ?? '650');
+      const bgCallId = `call_bg_multi_${turnCounter}`;
+      const step2CallId = `call_step2_multi_${turnCounter}`;
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: bgCallId,
+        name: 'run_command',
+        rawInput: { CommandLine: 'pnpm test', WaitMsBeforeAsync: 500 },
+        status: 'in_progress',
+        kind: 'execute',
+        title: 'pnpm test',
+      });
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'waiting for tests' },
+      });
+      notifyUpdate({ sessionUpdate: 'usage_update', used: 20000, size: 1048576 });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 80, outputTokens: 15 } },
+      });
+      const scheduleBg = (fn, delay) => {
+        const timer = setTimeout(() => {
+          activeBgTimers.delete(timer);
+          fn();
+        }, delay);
+        activeBgTimers.add(timer);
+      };
+      scheduleBg(() => {
+        notifyUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: bgCallId,
+          name: 'run_command',
+          status: 'completed',
+          rawOutput: { output: 'ok\n' },
+        });
+        // Silent LLM inference gap #1 (exceeds old 500ms idleFlushTimer).
+        scheduleBg(() => {
+          notifyUpdate({ sessionUpdate: 'usage_update', used: 21000, size: 1048576 });
+          scheduleBg(() => {
+            notifyUpdate({
+              sessionUpdate: 'tool_call',
+              toolCallId: step2CallId,
+              name: 'run_command',
+              rawInput: { CommandLine: 'git commit' },
+              status: 'in_progress',
+              kind: 'execute',
+              title: 'git commit',
+            });
+            scheduleBg(() => {
+              notifyUpdate({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: step2CallId,
+                name: 'run_command',
+                status: 'completed',
+                rawOutput: { output: 'committed\n' },
+              });
+              // Silent LLM inference gap #2.
+              scheduleBg(() => {
+                notifyUpdate({
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'All reactive steps done.' },
+                });
+                notifyUpdate({ sessionUpdate: 'usage_update', used: 22000, size: 1048576 });
+              }, gapMs);
+            }, 30);
+          }, 15);
+        }, gapMs);
+      }, 150);
+      return;
+    }
+
+    if (text === 'BACKGROUND_TASK_LEGACY') {
+      // Simulates an older agy build that emits agent_message_chunk without usage_update.
+      const toolCallId = `call_bg_legacy_${turnCounter}`;
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        name: 'run_command',
+        rawInput: { CommandLine: 'echo legacy' },
+        status: 'in_progress',
+        kind: 'execute',
+        title: 'echo legacy',
+      });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 30, outputTokens: 5 } },
+      });
+      const bgTimer = setTimeout(() => {
+        activeBgTimers.delete(bgTimer);
+        notifyUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          name: 'run_command',
+          status: 'completed',
+          rawOutput: { output: 'legacy\n' },
+        });
+        notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Legacy reactive reply.' },
+        });
+      }, 120);
+      activeBgTimers.add(bgTimer);
+      return;
+    }
+
+    if (text === 'BACKGROUND_SCHEDULE') {
+      // Non-execute background tool (`schedule` has ACP kind: "other").
+      const toolCallId = `call_sched_${turnCounter}`;
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        name: 'schedule',
+        rawInput: { DurationSeconds: 1, Prompt: 'timer fired' },
+        status: 'in_progress',
+        kind: 'other',
+        title: 'Run schedule',
+      });
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'waiting on timer' },
+      });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 20, outputTokens: 5 } },
+      });
+      const bgTimer = setTimeout(() => {
+        activeBgTimers.delete(bgTimer);
+        notifyUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          name: 'schedule',
+          status: 'completed',
+          rawOutput: { output: 'timer fired' },
+        });
+        notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Timer completed.' },
+        });
+        notifyUpdate({ sessionUpdate: 'usage_update', used: 12000, size: 1048576 });
+      }, 180);
       activeBgTimers.add(bgTimer);
       return;
     }
