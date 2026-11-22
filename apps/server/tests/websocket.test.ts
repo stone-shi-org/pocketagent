@@ -1,9 +1,16 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
-import { PROTOCOL_VERSION, SERVER_PROTOCOL_RANGE, type ServerMessage } from '@pocketagent/protocol';
+import {
+  PROTOCOL_VERSION,
+  SERVER_PROTOCOL_RANGE,
+  SPOKEN_SUMMARY_INSTRUCTION,
+  type ServerMessage,
+} from '@pocketagent/protocol';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
 
 const AGY_FIXTURE = path.resolve(
@@ -961,6 +968,231 @@ describe('websocket terminal transport', () => {
       } finally {
         ws.close();
         await agyApp.cleanup();
+      }
+    });
+  });
+
+  describe('agy spoken-summary via ACP systemPrompt.append (PA-185)', () => {
+    it('routes agy voice instructions through systemPrompt.append, obeys voiceSpokenSummaryEnabled, and uses delivery-time voice state for promptQueue', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-agy-sysprompt-'));
+      const promptLog = path.join(dir, 'prompts.jsonl');
+      const prevPromptLog = process.env.AGY_FIXTURE_PROMPT_LOG;
+      process.env.AGY_FIXTURE_PROMPT_LOG = promptLog;
+
+      const agyApp = await createTestApp({
+        POCKETAGENT_AGY_BIN: AGY_FIXTURE,
+        POCKETAGENT_LIVE_STT_URL: 'http://127.0.0.1:1',
+      });
+      await agyApp.app.listen({ host: '127.0.0.1', port: 0 });
+      const agyAddr = agyApp.app.server.address() as AddressInfo;
+      const ws = new WebSocket(`ws://127.0.0.1:${agyAddr.port}/api/ws?v=${PROTOCOL_VERSION}`, {
+        headers: { cookie: agyApp.cookie },
+      });
+      const messages: ServerMessage[] = [];
+      ws.on('message', (data) => {
+        messages.push(JSON.parse(data.toString()) as ServerMessage);
+      });
+
+      const readPromptLog = (): { sessionId: string; text: string; systemPromptAppend: string | null }[] =>
+        fs
+          .readFileSync(promptLog, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as { sessionId: string; text: string; systemPromptAppend: string | null });
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.once('open', () => resolve());
+          ws.once('error', (err) => reject(err));
+        });
+
+        const createSession = async (): Promise<string> => {
+          const res = await agyApp.app.inject({
+            method: 'POST',
+            url: '/api/sessions',
+            headers: { cookie: agyApp.cookie },
+            payload: {
+              agent: 'agy',
+              cwd: agyApp.projectDir,
+              cols: 80,
+              rows: 24,
+              transport: 'structured',
+            },
+          });
+          expect(res.statusCode, res.body).toBe(201);
+          return res.json().id as string;
+        };
+
+        const sessionId = await createSession();
+        const blockerId = await createSession();
+
+        ws.send(JSON.stringify({ type: 'attach', sessionId, afterSeq: 0 }));
+        await waitFor(() => messages.some((m) => m.type === 'attached' && m.session.id === sessionId));
+
+        const turnCount = (): number =>
+          messages.filter(
+            (m) => m.type === 'agent_event' && m.sessionId === sessionId && m.event.kind === 'turn_complete',
+          ).length;
+
+        // 1. Voice OFF: clean prompt text, no systemPrompt.append.
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'first off' }));
+        await waitFor(() => turnCount() === 1);
+
+        // 2. Toggle voice ON: prompt text stays clean (both in user_prompt event and ACP session/prompt),
+        // and SPOKEN_SUMMARY_INSTRUCTION is delivered via systemPrompt.append.
+        ws.send(JSON.stringify({ type: 'voice_mode', sessionId, enabled: true }));
+        await waitFor(() =>
+          messages.some((m) => m.type === 'voice_mode_changed' && m.sessionId === sessionId && m.enabled === true),
+        );
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'second on' }));
+        await waitFor(() => turnCount() === 2);
+
+        const userPrompts = messages
+          .filter(
+            (m): m is Extract<ServerMessage, { type: 'agent_event' }> =>
+              m.type === 'agent_event' && m.sessionId === sessionId && m.event.kind === 'user_prompt',
+          )
+          .map((m) => (m.event.kind === 'user_prompt' ? m.event.text : ''));
+        expect(userPrompts).toEqual(['first off', 'second on']);
+
+        // 3. Disabling `voiceSpokenSummaryEnabled` at runtime stops sending the instruction even while voice_mode is ON.
+        agyApp.context.config.voiceSpokenSummaryEnabled = false;
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'third setting off' }));
+        await waitFor(() => turnCount() === 3);
+        agyApp.context.config.voiceSpokenSummaryEnabled = true;
+
+        // 4. Queued prompt via PromptQueueService while voice is ON: delivered with systemPrompt.append.
+        const blocker = agyApp.context.sessions.get(blockerId);
+        if (!blocker || blocker.transport !== 'structured') throw new Error('expected structured blocker');
+        blocker.prompt('SLOW_CANCEL');
+        await waitFor(() => blocker.busy === true);
+
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'fourth queued on' }));
+        await waitFor(() => messages.some((m) => m.type === 'prompt_queued' && m.sessionId === sessionId));
+
+        await blocker.interrupt();
+        await waitFor(() => turnCount() === 4);
+
+        // 5. Queued prompt while voice is ON, then voice toggled OFF before delivery: delivery-time state governs.
+        const prevQueuedCount = messages.filter(
+          (m) => m.type === 'prompt_queued' && m.sessionId === sessionId,
+        ).length;
+        blocker.prompt('SLOW_CANCEL');
+        await waitFor(() => blocker.busy === true);
+
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'fifth toggled off while queued' }));
+        await waitFor(
+          () =>
+            messages.filter((m) => m.type === 'prompt_queued' && m.sessionId === sessionId).length ===
+            prevQueuedCount + 1,
+        );
+
+        ws.send(JSON.stringify({ type: 'voice_mode', sessionId, enabled: false }));
+        await waitFor(() =>
+          messages.some((m) => m.type === 'voice_mode_changed' && m.sessionId === sessionId && m.enabled === false),
+        );
+
+        await blocker.interrupt();
+        await waitFor(() => turnCount() === 5);
+
+        const agySession = agyApp.context.sessions.get(sessionId);
+        const targetAgentSessionId =
+          agySession && agySession.transport === 'structured' ? agySession.agentSessionId : null;
+        const logged = readPromptLog().filter((entry) => entry.sessionId === targetAgentSessionId);
+        expect(logged).toEqual([
+          { sessionId: targetAgentSessionId, text: 'first off', systemPromptAppend: null },
+          { sessionId: targetAgentSessionId, text: 'second on', systemPromptAppend: SPOKEN_SUMMARY_INSTRUCTION },
+          { sessionId: targetAgentSessionId, text: 'third setting off', systemPromptAppend: null },
+          {
+            sessionId: targetAgentSessionId,
+            text: 'fourth queued on',
+            systemPromptAppend: SPOKEN_SUMMARY_INSTRUCTION,
+          },
+          { sessionId: targetAgentSessionId, text: 'fifth toggled off while queued', systemPromptAppend: null },
+        ]);
+      } finally {
+        ws.close();
+        await agyApp.cleanup();
+        if (prevPromptLog === undefined) delete process.env.AGY_FIXTURE_PROMPT_LOG;
+        else process.env.AGY_FIXTURE_PROMPT_LOG = prevPromptLog;
+      }
+    });
+
+    it('falls back to per-prompt SPOKEN_SUMMARY_INSTRUCTION when agy does not advertise systemPrompt.append', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-agy-sysprompt-fallback-'));
+      const promptLog = path.join(dir, 'prompts.jsonl');
+      const prevPromptLog = process.env.AGY_FIXTURE_PROMPT_LOG;
+      const prevNoAppend = process.env.AGY_FIXTURE_NO_SYSTEM_PROMPT_APPEND;
+      process.env.AGY_FIXTURE_PROMPT_LOG = promptLog;
+      process.env.AGY_FIXTURE_NO_SYSTEM_PROMPT_APPEND = '1';
+
+      const agyApp = await createTestApp({
+        POCKETAGENT_AGY_BIN: AGY_FIXTURE,
+        POCKETAGENT_LIVE_STT_URL: 'http://127.0.0.1:1',
+      });
+      await agyApp.app.listen({ host: '127.0.0.1', port: 0 });
+      const agyAddr = agyApp.app.server.address() as AddressInfo;
+      const ws = new WebSocket(`ws://127.0.0.1:${agyAddr.port}/api/ws?v=${PROTOCOL_VERSION}`, {
+        headers: { cookie: agyApp.cookie },
+      });
+      const messages: ServerMessage[] = [];
+      ws.on('message', (data) => {
+        messages.push(JSON.parse(data.toString()) as ServerMessage);
+      });
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.once('open', () => resolve());
+          ws.once('error', (err) => reject(err));
+        });
+
+        const create = await agyApp.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: { cookie: agyApp.cookie },
+          payload: {
+            agent: 'agy',
+            cwd: agyApp.projectDir,
+            cols: 80,
+            rows: 24,
+            transport: 'structured',
+          },
+        });
+        expect(create.statusCode, create.body).toBe(201);
+        const sessionId = create.json().id as string;
+
+        ws.send(JSON.stringify({ type: 'attach', sessionId, afterSeq: 0 }));
+        await waitFor(() => messages.some((m) => m.type === 'attached' && m.session.id === sessionId));
+
+        ws.send(JSON.stringify({ type: 'voice_mode', sessionId, enabled: true }));
+        await waitFor(() =>
+          messages.some((m) => m.type === 'voice_mode_changed' && m.sessionId === sessionId && m.enabled === true),
+        );
+
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'legacy agy prompt' }));
+        await waitFor(() =>
+          messages.some(
+            (m) => m.type === 'agent_event' && m.sessionId === sessionId && m.event.kind === 'turn_complete',
+          ),
+        );
+
+        const logged = fs
+          .readFileSync(promptLog, 'utf8')
+          .trim()
+          .split('\n')
+          .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+        expect(logged).toHaveLength(1);
+        expect(logged[0]?.systemPromptAppend).toBeNull();
+        expect(logged[0]?.text).toContain('legacy agy prompt');
+        expect(logged[0]?.text).toContain(SPOKEN_SUMMARY_INSTRUCTION);
+      } finally {
+        ws.close();
+        await agyApp.cleanup();
+        if (prevPromptLog === undefined) delete process.env.AGY_FIXTURE_PROMPT_LOG;
+        else process.env.AGY_FIXTURE_PROMPT_LOG = prevPromptLog;
+        if (prevNoAppend === undefined) delete process.env.AGY_FIXTURE_NO_SYSTEM_PROMPT_APPEND;
+        else process.env.AGY_FIXTURE_NO_SYSTEM_PROMPT_APPEND = prevNoAppend;
       }
     });
   });

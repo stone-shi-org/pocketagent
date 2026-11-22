@@ -73,6 +73,15 @@ export interface AgySessionSpec {
    * `start_subagent_session`, or null for human/trigger sessions.
    */
   plannerChatId?: string | null;
+  /**
+   * PA-185: resolves whether the next turn should request a spoken `<speak>`
+   * summary via ACP `_meta.antigravity.systemPrompt.append` instead of
+   * appending `SPOKEN_SUMMARY_INSTRUCTION` to the prompt text. Evaluated live
+   * at handshake and right before each `session/prompt` so mid-session voice
+   * toggles and `voiceSpokenSummaryEnabled` setting changes take effect on the
+   * next turn (including prompts delivered later via `PromptQueueService`).
+   */
+  shouldAppendSpokenSummary?: () => boolean;
 }
 
 interface AcpPermissionOption {
@@ -183,6 +192,17 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    * never reverts `1 -> 0` if the user later switches back to `default`/`plan`.
    */
   private _everAutoApprovedByMode = false;
+  /**
+   * PA-185: true when `initialize` advertised
+   * `agentCapabilities._meta.antigravity.systemPrompt.append: true`.
+   */
+  private _supportsSystemPromptAppend = false;
+  /**
+   * The `systemPrompt.append` string currently applied to the active ACP
+   * session handle, or `null` when none is applied. Reconciled against
+   * `desiredSystemPromptAppend()` right before each `session/prompt`.
+   */
+  private appliedSystemPromptAppend: string | null = null;
   private _status: SessionStatus = 'starting';
   private _agentSessionId: string | null = null;
   private _startedAt: number | null = null;
@@ -299,6 +319,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   get everAutoApprovedByMode(): boolean {
     return this._everAutoApprovedByMode;
   }
+  /** True when the running `agy acp` process advertised `_meta.antigravity.systemPrompt.append: true` (PA-185). */
+  get supportsSystemPromptAppend(): boolean {
+    return this._supportsSystemPromptAppend;
+  }
   /**
    * Titles of in-flight `execute` tool calls keeping this session busy after a
    * turn has ended (e.g. a dev server or watcher running in the background).
@@ -394,8 +418,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       this.spec.handshakeTimeoutMs ?? AgySession.DEFAULT_HANDSHAKE_TIMEOUT_MS;
 
     let sessionRes: Record<string, unknown> | null;
+    let desiredAppend: string | null = null;
     try {
-      await this.rpcWithTimeout(
+      const initRes = await this.rpcWithTimeout(
         'initialize',
         {
           protocolVersion: 1,
@@ -407,19 +432,27 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         },
         handshakeTimeoutMs,
       );
+      this._supportsSystemPromptAppend = hasAgySystemPromptAppendCapability(initRes);
+      desiredAppend = this.desiredSystemPromptAppend();
 
       const isResume = this._agentSessionId !== null;
+      const openParams: Record<string, unknown> = isResume
+        ? { sessionId: this._agentSessionId, cwd: this.spec.cwd, mcpServers: [] }
+        : { cwd: this.spec.cwd, mcpServers: [] };
+      if (desiredAppend !== null) {
+        openParams._meta = buildSystemPromptAppendMeta(desiredAppend);
+      }
+
       sessionRes = (await this.rpcWithTimeout(
         isResume ? 'session/resume' : 'session/new',
-        isResume
-          ? { sessionId: this._agentSessionId, cwd: this.spec.cwd, mcpServers: [] }
-          : { cwd: this.spec.cwd, mcpServers: [] },
+        openParams,
         handshakeTimeoutMs,
       )) as Record<string, unknown> | null;
     } catch (err) {
       this.killChildNow(child);
       throw err;
     }
+    this.appliedSystemPromptAppend = desiredAppend;
 
     const sessionId =
       isRecord(sessionRes) && typeof sessionRes.sessionId === 'string'
@@ -503,6 +536,99 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         ? 'always-proceed'
         : (this._currentMode ?? currentModeId ?? 'default'),
     });
+  }
+
+  private desiredSystemPromptAppend(): string | null {
+    if (!this._supportsSystemPromptAppend) return null;
+    return this.spec.shouldAppendSpokenSummary?.() ? SPOKEN_SUMMARY_INSTRUCTION : null;
+  }
+
+  /**
+   * Re-apply `_meta.antigravity.systemPrompt.append` on the existing `agy acp`
+   * process between turns (PA-185).
+   *
+   * Verified live against `agy acp` v1.5.14:
+   * - OFF → ON: same-process `session/resume` with `_meta` (~3 ms, no
+   *   `session/close`) activates the append immediately and preserves running
+   *   background `run_command` processes.
+   * - ON → OFF: same-process `session/resume` without `session/close` leaves
+   *   the prior append active (even with `append: ""`), so clearing requires
+   *   `session/close` + `session/resume` omitting `_meta` (~3–4 ms, no process
+   *   respawn, no server-restart `SYSTEM_MESSAGE` in `transcript.jsonl`). The
+   *   caller must only pass `closeFirst = true` when `inFlightToolCalls.size === 0`
+   *   so background commands are never terminated.
+   */
+  private async reopenSessionForSystemPrompt(
+    append: string | null,
+    closeFirst: boolean,
+  ): Promise<void> {
+    if (!this.child || !this._agentSessionId) return;
+    const handshakeTimeoutMs =
+      this.spec.handshakeTimeoutMs ?? AgySession.DEFAULT_HANDSHAKE_TIMEOUT_MS;
+
+    if (closeFirst) {
+      await this.rpcWithTimeout(
+        'session/close',
+        { sessionId: this._agentSessionId },
+        handshakeTimeoutMs,
+      );
+    }
+
+    const resumeParams: Record<string, unknown> = {
+      sessionId: this._agentSessionId,
+      cwd: this.spec.cwd,
+      mcpServers: [],
+    };
+    if (append !== null) {
+      resumeParams._meta = buildSystemPromptAppendMeta(append);
+    }
+
+    const resumeRes = (await this.rpcWithTimeout(
+      'session/resume',
+      resumeParams,
+      handshakeTimeoutMs,
+    )) as Record<string, unknown> | null;
+    this.appliedSystemPromptAppend = append;
+
+    const currentModelId =
+      isRecord(resumeRes) && isRecord(resumeRes.models) && typeof resumeRes.models.currentModelId === 'string'
+        ? resumeRes.models.currentModelId
+        : null;
+    if (this._desiredModel && this._agentSessionId && this._desiredModel !== currentModelId) {
+      try {
+        await this.rpcWithTimeout(
+          'session/set_model',
+          { sessionId: this._agentSessionId, modelId: this._desiredModel },
+          handshakeTimeoutMs,
+        );
+      } catch (err) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `Failed to restore model (${this._desiredModel}): ${errText(err)}`,
+        });
+      }
+    }
+
+    const currentModeId =
+      isRecord(resumeRes) && isRecord(resumeRes.modes) && typeof resumeRes.modes.currentModeId === 'string'
+        ? resumeRes.modes.currentModeId
+        : null;
+    if (this._desiredMode && this._agentSessionId && this._desiredMode !== currentModeId) {
+      try {
+        await this.rpcWithTimeout(
+          'session/set_mode',
+          { sessionId: this._agentSessionId, modeId: this._desiredMode },
+          handshakeTimeoutMs,
+        );
+      } catch (err) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `Failed to restore mode (${this._desiredMode}): ${errText(err)}`,
+        });
+      }
+    }
   }
 
   /**
@@ -919,6 +1045,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   ): void {
     if (child !== this.child) return;
     this.child = null;
+    this.appliedSystemPromptAppend = null;
     this.clearIdleFlush();
     this.inFlightToolCalls.clear();
     this.emitBackgroundCommandsIfChanged();
@@ -989,27 +1116,81 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private async runTurn(prompt: QueuedPrompt, attempt: number): Promise<void> {
     if (this.closed) return;
 
+    const emitStartFailure = (err: unknown): void => {
+      this.emitEvent({ kind: 'notice', level: 'error', text: `Failed to run agy: ${errText(err)}` });
+      this.emitEvent({
+        kind: 'turn_complete',
+        stopReason: 'ERROR',
+        isError: true,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+        completedAt: Date.now(),
+      });
+    };
+
     // Respawn and resume if the child died between turns (or has no session id).
     if (!this.child || !this._agentSessionId) {
       if (this.child) this.killChildNow(this.child);
       try {
         await this.spawnAndHandshake(true);
       } catch (err) {
-        this.emitEvent({ kind: 'notice', level: 'error', text: `Failed to run agy: ${errText(err)}` });
-        this.emitEvent({
-          kind: 'turn_complete',
-          stopReason: 'ERROR',
-          isError: true,
-          numTurns: null,
-          durationMs: null,
-          costUsd: null,
-          inputTokens: null,
-          outputTokens: null,
-          completedAt: Date.now(),
-        });
+        emitStartFailure(err);
         return;
       }
     }
+
+    // PA-185: reconcile `_meta.antigravity.systemPrompt.append` between turns
+    // whenever voice mode or `voiceSpokenSummaryEnabled` changed since the
+    // session handle was opened. Older `agy` binaries that do not advertise
+    // the capability fall back to idempotent per-prompt injection.
+    let fallbackPromptAppend = false;
+    if (this._supportsSystemPromptAppend && this.child && this._agentSessionId) {
+      const desired = this.desiredSystemPromptAppend();
+      if (desired !== this.appliedSystemPromptAppend) {
+        if (desired !== null) {
+          try {
+            await this.reopenSessionForSystemPrompt(desired, false);
+          } catch {
+            if (this.inFlightToolCalls.size === 0 && !this.closed) {
+              try {
+                if (this.child) this.killChildNow(this.child);
+                await this.spawnAndHandshake(true);
+              } catch (err) {
+                emitStartFailure(err);
+                return;
+              }
+            } else {
+              fallbackPromptAppend = true;
+            }
+          }
+        } else if (this.inFlightToolCalls.size === 0) {
+          try {
+            await this.reopenSessionForSystemPrompt(null, true);
+          } catch {
+            if (!this.closed) {
+              try {
+                if (this.child) this.killChildNow(this.child);
+                await this.spawnAndHandshake(true);
+              } catch (err) {
+                emitStartFailure(err);
+                return;
+              }
+            }
+          }
+        }
+        // When `desired === null` and `inFlightToolCalls.size > 0`, defer
+        // `session/close` + `session/resume` until the background command
+        // drains so we never terminate it. `VoiceTtsService` is already off
+        // and `Transcript.tsx` strips `<speak>` unconditionally.
+      }
+    } else if (!this._supportsSystemPromptAppend && this.spec.shouldAppendSpokenSummary?.()) {
+      fallbackPromptAppend = true;
+    }
+
+    if (this.closed) return;
 
     const turn: ActiveTurn = {
       prompt,
@@ -1028,8 +1209,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         mimeType: prompt.image.mediaType,
       });
     }
-    if (prompt.text || contentBlocks.length === 0) {
-      contentBlocks.push({ type: 'text', text: prompt.text });
+    const textToSend = fallbackPromptAppend
+      ? appendSpokenSummaryInstruction(prompt.text)
+      : prompt.text;
+    if (textToSend || contentBlocks.length === 0) {
+      contentBlocks.push({ type: 'text', text: textToSend });
     }
 
     try {
@@ -1410,6 +1594,23 @@ function selectAcpPermissionOutcome(
     options.find((o) => o.kind?.startsWith('allow')) ??
     options.find((o) => o.optionId === 'allow');
   return opt ? { outcome: 'selected', optionId: opt.optionId } : { outcome: 'cancelled' };
+}
+
+function hasAgySystemPromptAppendCapability(initRes: unknown): boolean {
+  if (!isRecord(initRes)) return false;
+  const caps = initRes.agentCapabilities;
+  if (!isRecord(caps)) return false;
+  const meta = caps._meta;
+  if (!isRecord(meta)) return false;
+  const antigravity = meta.antigravity;
+  if (!isRecord(antigravity)) return false;
+  const systemPrompt = antigravity.systemPrompt;
+  if (!isRecord(systemPrompt)) return false;
+  return systemPrompt.append === true;
+}
+
+function buildSystemPromptAppendMeta(append: string): Record<string, unknown> {
+  return { antigravity: { systemPrompt: { append } } };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

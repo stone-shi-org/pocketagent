@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@pocketagent/protocol';
+import { SPOKEN_SUMMARY_INSTRUCTION, type AgentEvent } from '@pocketagent/protocol';
 import {
   formatAgySettingsAutoApproveNotice,
   readAgySettingsAutoApprove,
@@ -607,6 +607,315 @@ describe('AgySession (ACP)', () => {
     expect(session.autoApprovedByMode).toBe(true);
     expect(session.everAutoApprovedByMode).toBe(true);
     expect(events.some((e) => e.kind === 'mode_changed' && e.mode === 'accept-edits')).toBe(true);
+  });
+
+  it('sends SPOKEN_SUMMARY_INSTRUCTION via ACP systemPrompt.append when voice is on and nothing when off (PA-185)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sysprompt-init-'));
+    const rpcLogOn = path.join(dir, 'rpc-on.jsonl');
+    const promptLogOn = path.join(dir, 'prompt-on.jsonl');
+
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_RPC_LOG: rpcLogOn,
+          AGY_FIXTURE_PROMPT_LOG: promptLogOn,
+        },
+        shouldAppendSpokenSummary: () => true,
+      }),
+    );
+    await session.start();
+    expect(session.supportsSystemPromptAppend).toBe(true);
+
+    const eventsOn = collect(session);
+    session.prompt('explain tcp');
+    await waitFor(() => eventsOn.some((e) => e.kind === 'turn_complete'));
+
+    const rpcsOn = fs
+      .readFileSync(rpcLogOn, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { method: string; systemPromptAppend?: string });
+    expect(rpcsOn).toHaveLength(1);
+    expect(rpcsOn[0]).toMatchObject({
+      method: 'session/new',
+      systemPromptAppend: SPOKEN_SUMMARY_INSTRUCTION,
+    });
+
+    const promptsOn = fs
+      .readFileSync(promptLogOn, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+    expect(promptsOn).toEqual([
+      {
+        sessionId: session.agentSessionId,
+        text: 'explain tcp',
+        systemPromptAppend: SPOKEN_SUMMARY_INSTRUCTION,
+      },
+    ]);
+    session.terminate();
+
+    // Voice OFF: no `_meta.antigravity.systemPrompt.append` on session/new and no instruction in prompt text.
+    const rpcLogOff = path.join(dir, 'rpc-off.jsonl');
+    const promptLogOff = path.join(dir, 'prompt-off.jsonl');
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_RPC_LOG: rpcLogOff,
+          AGY_FIXTURE_PROMPT_LOG: promptLogOff,
+        },
+        shouldAppendSpokenSummary: () => false,
+      }),
+    );
+    await session.start();
+    const eventsOff = collect(session);
+    session.prompt('plain turn');
+    await waitFor(() => eventsOff.some((e) => e.kind === 'turn_complete'));
+
+    const rpcsOff = fs
+      .readFileSync(rpcLogOff, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { method: string; systemPromptAppend?: string });
+    expect(rpcsOff).toHaveLength(1);
+    expect(rpcsOff[0]?.systemPromptAppend).toBeUndefined();
+
+    const promptsOff = fs
+      .readFileSync(promptLogOff, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+    expect(promptsOff).toEqual([
+      {
+        sessionId: session.agentSessionId,
+        text: 'plain turn',
+        systemPromptAppend: null,
+      },
+    ]);
+  });
+
+  it('toggles systemPrompt.append mid-session without respawning and preserves model and mode (PA-185)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sysprompt-toggle-'));
+    const pidFile = path.join(dir, 'pid');
+    const rpcLog = path.join(dir, 'rpc.jsonl');
+    const promptLog = path.join(dir, 'prompt.jsonl');
+    let voiceOn = false;
+
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_PID_FILE: pidFile,
+          AGY_FIXTURE_RPC_LOG: rpcLog,
+          AGY_FIXTURE_PROMPT_LOG: promptLog,
+        },
+        shouldAppendSpokenSummary: () => voiceOn,
+      }),
+    );
+    await session.start();
+    const initialPid = fs.readFileSync(pidFile, 'utf8').trim();
+    const events = collect(session);
+
+    await session.setModel('claude-sonnet-4-6');
+    await session.setMode('plan');
+
+    // Turn 1: voice OFF.
+    session.prompt('turn one');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 1);
+
+    // Turn 2: toggle voice ON -> same-process `session/resume` with `_meta` (no `session/close`).
+    voiceOn = true;
+    session.prompt('turn two');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+
+    // Turn 3: toggle voice OFF -> same-process `session/close` + `session/resume` omitting `_meta`.
+    voiceOn = false;
+    session.prompt('REPORT_MODE');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 3);
+
+    // Single process throughout; no duplicate session_started emitted by voice toggles.
+    expect(fs.readFileSync(pidFile, 'utf8').trim()).toBe(initialPid);
+    expect(events.filter((e) => e.kind === 'session_started')).toHaveLength(0);
+
+    const rpcs = fs
+      .readFileSync(rpcLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { method: string; systemPromptAppend?: string });
+    expect(rpcs.map((r) => r.method)).toEqual([
+      'session/new',
+      'session/set_model',
+      'session/set_mode',
+      'session/resume',
+      'session/close',
+      'session/resume',
+    ]);
+    expect(rpcs[0]?.systemPromptAppend).toBeUndefined();
+    expect(rpcs[3]?.systemPromptAppend).toBe(SPOKEN_SUMMARY_INSTRUCTION);
+    expect(rpcs[5]?.systemPromptAppend).toBeUndefined();
+
+    const prompts = fs
+      .readFileSync(promptLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+    expect(prompts.map((p) => ({ text: p.text, hasAppend: p.systemPromptAppend === SPOKEN_SUMMARY_INSTRUCTION }))).toEqual([
+      { text: 'turn one', hasAppend: false },
+      { text: 'turn two', hasAppend: true },
+      { text: 'REPORT_MODE', hasAppend: false },
+    ]);
+    expect(events.some((e) => e.kind === 'text' && e.text === 'echo: turn two model=claude-sonnet-4-6')).toBe(true);
+    expect(events.some((e) => e.kind === 'text' && e.text === 'mode=plan')).toBe(true);
+  });
+
+  it('never kills a running background task on voice toggle, deferring session/close until idle (PA-185)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sysprompt-bg-'));
+    const taskFileOff = path.join(dir, 'task-off.done');
+    const rpcLogOff = path.join(dir, 'rpc-off.jsonl');
+    const promptLogOff = path.join(dir, 'prompt-off.jsonl');
+    let voiceOn = true;
+
+    // 1. ON -> OFF while a background command is running: must NOT send session/close until idle.
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_BACKGROUND_TASK_FILE: taskFileOff,
+          AGY_FIXTURE_RPC_LOG: rpcLogOff,
+          AGY_FIXTURE_PROMPT_LOG: promptLogOff,
+        },
+        shouldAppendSpokenSummary: () => voiceOn,
+      }),
+    );
+    await session.start();
+    const eventsOff = collect(session);
+
+    session.prompt('BACKGROUND_TASK');
+    await waitFor(() => eventsOff.some((e) => e.kind === 'turn_complete'));
+    expect(session.busy).toBe(true);
+    expect(fs.existsSync(taskFileOff)).toBe(false);
+
+    // Toggle voice OFF and send another turn while the background task is still running.
+    voiceOn = false;
+    session.prompt('during bg');
+    await waitFor(() => eventsOff.filter((e) => e.kind === 'turn_complete').length === 2);
+
+    // Background task must survive and complete (fake-agy cancels it if session/close ran).
+    await waitFor(() => fs.existsSync(taskFileOff), { timeout: 5_000 });
+    expect(fs.readFileSync(taskFileOff, 'utf8')).toBe('FINISHED');
+    await waitFor(() => session?.busy === false, { timeout: 3_000 });
+
+    // Once idle, the next turn clears systemPrompt.append via session/close + session/resume.
+    session.prompt('after bg idle');
+    await waitFor(() => eventsOff.filter((e) => e.kind === 'turn_complete').length === 3);
+
+    const rpcsOff = fs
+      .readFileSync(rpcLogOff, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { method: string; systemPromptAppend?: string });
+    expect(rpcsOff.map((r) => r.method)).toEqual(['session/new', 'session/close', 'session/resume']);
+
+    const promptsOff = fs
+      .readFileSync(promptLogOff, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+    expect(promptsOff[2]).toMatchObject({ text: 'after bg idle', systemPromptAppend: null });
+    session.terminate();
+
+    // 2. OFF -> ON while a background command is running: same-process session/resume (no close)
+    // activates systemPrompt.append AND preserves the running background task.
+    const taskFileOn = path.join(dir, 'task-on.done');
+    const rpcLogOn = path.join(dir, 'rpc-on.jsonl');
+    const promptLogOn = path.join(dir, 'prompt-on.jsonl');
+    voiceOn = false;
+
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_BACKGROUND_TASK_FILE: taskFileOn,
+          AGY_FIXTURE_RPC_LOG: rpcLogOn,
+          AGY_FIXTURE_PROMPT_LOG: promptLogOn,
+        },
+        shouldAppendSpokenSummary: () => voiceOn,
+      }),
+    );
+    await session.start();
+    const eventsOn = collect(session);
+
+    session.prompt('BACKGROUND_TASK');
+    await waitFor(() => eventsOn.some((e) => e.kind === 'turn_complete'));
+    expect(session.busy).toBe(true);
+    expect(fs.existsSync(taskFileOn)).toBe(false);
+
+    voiceOn = true;
+    session.prompt('turn on during bg');
+    await waitFor(() => eventsOn.filter((e) => e.kind === 'turn_complete').length === 2);
+
+    await waitFor(() => fs.existsSync(taskFileOn), { timeout: 5_000 });
+    expect(fs.readFileSync(taskFileOn, 'utf8')).toBe('FINISHED');
+
+    const rpcsOn = fs
+      .readFileSync(rpcLogOn, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { method: string; systemPromptAppend?: string });
+    expect(rpcsOn.map((r) => r.method)).toEqual(['session/new', 'session/resume']);
+    expect(rpcsOn[1]?.systemPromptAppend).toBe(SPOKEN_SUMMARY_INSTRUCTION);
+
+    const promptsOn = fs
+      .readFileSync(promptLogOn, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+    expect(promptsOn[1]).toMatchObject({
+      text: 'turn on during bg',
+      systemPromptAppend: SPOKEN_SUMMARY_INSTRUCTION,
+    });
+  });
+
+  it('reports supportsSystemPromptAppend=false and skips _meta when agy does not advertise it (PA-185)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sysprompt-unsupported-'));
+    const rpcLog = path.join(dir, 'rpc.jsonl');
+    const promptLog = path.join(dir, 'prompt.jsonl');
+
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_NO_SYSTEM_PROMPT_APPEND: '1',
+          AGY_FIXTURE_RPC_LOG: rpcLog,
+          AGY_FIXTURE_PROMPT_LOG: promptLog,
+        },
+        shouldAppendSpokenSummary: () => true,
+      }),
+    );
+    await session.start();
+    expect(session.supportsSystemPromptAppend).toBe(false);
+
+    const events = collect(session);
+    session.prompt('hello');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    const rpcs = fs
+      .readFileSync(rpcLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { method: string; systemPromptAppend?: string });
+    expect(rpcs).toHaveLength(1);
+    expect(rpcs[0]?.systemPromptAppend).toBeUndefined();
+
+    const prompts = fs
+      .readFileSync(promptLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { text: string; systemPromptAppend: string | null });
+    expect(prompts[0]?.systemPromptAppend).toBeNull();
+    expect(prompts[0]?.text).toContain(SPOKEN_SUMMARY_INSTRUCTION);
   });
 });
 

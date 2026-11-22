@@ -1978,21 +1978,48 @@ of `<speak>`. A model that emits the tag late therefore gets both halves
 spoken, with the markup stripped rather than pronounced — the accepted cost of
 not buffering every reply on the chance a tag shows up later.
 
-**The instruction is prompt text, not a system prompt, and that is the whole of
-PA-84's "does each backend need its own hook".** No coding-agent path here has
-system-prompt plumbing at all (only `planner/chats.ts` builds one, and Pocket
-Agent chats have no talk-back); an adapter's `buildCommand().args` never
-reaches a structured session, since `SessionManager` forwards only
-`executable`/`env` and each backend builds its own argv, so a CLI
-`--append-system-prompt` would only affect the *terminal* transport, which has
-no talk-back either; and the Claude SDK's `systemPrompt` option is fixed when
-`query()` is called, making it spawn-time and unable to follow a mid-session
-voice toggle. So the seam is `ws/index.ts`'s `case 'prompt'` — one chokepoint
-every structured backend passes through, already composing server-side text for
-the attached-image note — gated on `isVoiceModeEnabled`. It must stay *above*
-`promptQueue.submit`: a queued prompt is re-sent from its persisted text
-verbatim, so an instruction added later would be lost on exactly the deferred
-path. `SUBAGENT_RESULT_TRAILER` (PA-76) is the same append-then-extract shape.
+**The instruction is prompt text for most backends, and an ACP system-prompt append
+for `agy` (PA-185).** Originally (PA-84), no coding-agent path had system-prompt
+plumbing at all (only `planner/chats.ts` built one, and Pocket Agent chats had no
+talk-back); an adapter's `buildCommand().args` never reaches a structured session,
+since `SessionManager` forwards only `executable`/`env` and each backend builds its
+own argv, so a CLI `--append-system-prompt` would only affect the *terminal*
+transport, which has no talk-back either; and the Claude SDK's `systemPrompt` option
+is fixed when `query()` is called, making it spawn-time and unable to follow a
+mid-session voice toggle. So the seam for `claude`, `codex`, `opencode`, and `pi`
+stays `ws/index.ts`'s `case 'prompt'` — one chokepoint already composing server-side
+text for the attached-image note — gated on `isVoiceModeEnabled` and placed *above*
+`promptQueue.submit` (because a queued prompt is re-sent from its persisted text
+verbatim). `SUBAGENT_RESULT_TRAILER` (PA-76) is the same append-then-extract shape.
+
+**The `agy` exception (PA-185):** `agy acp` advertises
+`agentCapabilities._meta.antigravity.systemPrompt.append: true` in `initialize` and
+accepts `_meta: { antigravity: { systemPrompt: { append } } }` on `session/new` and
+`session/resume` (silently ignoring it on `session/prompt`, verified live against
+`agy acp` v1.5.14). When that capability is present, `ws/index.ts` skips
+`appendSpokenSummaryInstruction` for `AgySession`, keeping `user_prompt` events and
+agy's own `transcript.jsonl` completely free of instruction text, and `AgySession`
+reconciles the system-prompt append lazily right before each `session/prompt` from
+`config.voiceSpokenSummaryEnabled && sessions.isVoiceModeEnabled(id)`:
+- **OFF → ON:** same-process `session/resume` with `_meta` (~3 ms, no process
+  respawn, no `session/close`), which updates `systemPrompt.append` for the next
+  turn and leaves any running background `run_command` alive.
+- **ON → OFF:** same-process `session/resume` alone does not clear a prior append
+  (neither omitting `_meta` nor `append: ""` clears it), so clearing requires
+  same-process `session/close` + `session/resume` omitting `_meta` (~3–4 ms, no
+  process respawn, no server-restart system notice in `transcript.jsonl`, re-applying
+  model/mode if needed). Because `session/close` terminates session background tasks,
+  it only runs when `inFlightToolCalls.size === 0`; if a background command is in
+  flight, clearing is deferred until the next idle turn (`VoiceTtsService` is already
+  cancelled/off and `Transcript.tsx` strips `<speak>` unconditionally).
+- **Queued prompts (`promptQueue`):** because `AgySession` evaluates
+  `shouldAppendSpokenSummary()` at delivery time inside `runTurn()`, a prompt parked
+  by `PromptQueueService` still runs with the system-prompt append when voice stays
+  on, and if voice is toggled between queueing and delivery, the **delivery-time**
+  voice state governs — matching `VoiceTtsService`'s own delivery-time gate (no
+  wasted `<speak>` after toggle-off, and clean `<speak>` if turned on while waiting).
+- Older `agy` binaries that do not advertise `systemPrompt.append: true` fall back
+  to the PA-84 per-prompt path in `ws/index.ts`.
 
 **An absent tag speaks a filtered reply, never silence.** Skipping speech would
 be indistinguishable from a dead microphone — PA-85's own reasoning — and would
@@ -3950,11 +3977,19 @@ These are load-bearing. Several were bugs first.
   whether the *instruction* is appended: the knob can stop text being added to prompts,
   it may never restore narrating a code block. Three things hold the rest up. The tag
   must keep being requested **first**, or talk-back stops being incremental and goes
-  silent for the length of a turn. The injection must stay **above**
-  `promptQueue.submit` in `ws/index.ts`, because a queued prompt is re-sent from its
-  persisted text verbatim and would otherwise lose it on exactly the deferred path —
-  and `appendSpokenSummaryInstruction` is idempotent so that re-send cannot stack
-  copies. And `SpokenTextPipeline.reset()` must clear the extractor *and* the chunker:
+  silent for the length of a turn. For `claude`, `codex`, `opencode`, and `pi` (and
+  older `agy` binaries that do not advertise `_meta.antigravity.systemPrompt.append`),
+  the injection must stay **above** `promptQueue.submit` in `ws/index.ts`, because a
+  queued prompt is re-sent from its persisted text verbatim and would otherwise lose it
+  on exactly the deferred path — and `appendSpokenSummaryInstruction` is idempotent so
+  that re-send cannot stack copies. **Exception (`agy`, PA-185):** when `agy acp`
+  advertises `_meta.antigravity.systemPrompt.append: true`, `ws/index.ts` skips
+  per-prompt injection and `AgySession` reconciles `_meta.antigravity.systemPrompt.append`
+  right before `session/prompt` from delivery-time state (`voiceSpokenSummaryEnabled &&
+  isVoiceModeEnabled`) — using same-process `session/resume` for OFF → ON and
+  `session/close` + `session/resume` for ON → OFF only when `inFlightToolCalls.size ===
+  0` so background commands are never killed. And `SpokenTextPipeline.reset()` must
+  clear the extractor *and* the chunker:
   an extractor left mid-fence by a stop swallows the next turn's whole reply, which is
   the PA-83 shape of bug. PA-89 adds the fourth: untagged text is **held** by
   `SpokenTextPipeline` until `flush()`, because mid-turn there is no way to tell the
@@ -3963,8 +3998,8 @@ These are load-bearing. Several were bugs first.
   place that scratchpad ever appeared. `tool_use` therefore drops the held text and
   **must not cancel the pump**: tagged content has already been judged and may
   already be playing, and PA-84's tag-first rule exists precisely so it is. Asserted in
-  `apps/server/tests/voice-spoken-text-extractor.test.ts`, `voice-spoken-text.test.ts`
-  and `voice-tts-service.test.ts`.
+  `apps/server/tests/voice-spoken-text-extractor.test.ts`, `voice-spoken-text.test.ts`,
+  `voice-tts-service.test.ts`, `agy-session.test.ts`, and `websocket.test.ts`.
 - **A Gemini Live tool call gets exactly the planner's own gate, and Gemini can never approve**
   (PA-96). The bridge request carries calls only. Whether each runs is `gateToolCall`, the same
   function `processToolCalls` uses, and resolution is the same `applyApprovalDecision`. Gemini
@@ -4220,6 +4255,10 @@ These are load-bearing. Several were bugs first.
      conversation UUID (matching `~/.gemini/antigravity-cli/brain/<id>/`), model catalog, and
      mode catalog; `available_commands_update` advertises slash commands; `session/set_model` and
      `session/set_mode` switch models and modes live without respawning (re-applied on respawn);
+     `_meta.antigravity.systemPrompt.append` delivers PA-84's spoken-summary instruction on
+     `session/new` / `session/resume` instead of prompt text (PA-185, toggled between turns on the
+     same process via `session/resume` for OFF → ON and `session/close` + `session/resume` for
+     ON → OFF only when `inFlightToolCalls.size === 0`);
      `session_info_update` pushes AI-generated titles live (also persisted to
      `annotations/<id>.pbtxt` and `conversation_summaries.db`); `usage_update` emits generic
      `context_usage` (`{ usedTokens, contextWindow }`) for the live context-window meter;

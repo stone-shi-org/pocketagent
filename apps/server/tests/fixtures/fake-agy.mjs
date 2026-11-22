@@ -50,6 +50,7 @@ function runAcpServer() {
   let sessionId = null;
   let currentModel = 'auto';
   let currentMode = 'default';
+  let systemPromptAppend = null;
   let serverReqId = 1;
   let turnCounter = 0;
 
@@ -57,6 +58,8 @@ function runAcpServer() {
   const pendingClientReplies = new Map();
   /** Active in-flight prompt state, for `session/cancel`. */
   let activeCancel = null;
+  /** In-flight background task timers, cleared by `session/close` to mirror real agy acp. */
+  const activeBgTimers = new Set();
 
   const AVAILABLE_MODELS = [
     { modelId: 'auto', name: 'Gemini Pro Next' },
@@ -132,6 +135,7 @@ function runAcpServer() {
       if (process.env.AGY_FIXTURE_HANG_INIT === '1') {
         return; // Simulate a wedged CLI that never responds to initialize.
       }
+      const supportsSystemPromptAppend = process.env.AGY_FIXTURE_NO_SYSTEM_PROMPT_APPEND !== '1';
       send({
         jsonrpc: '2.0',
         id,
@@ -141,6 +145,9 @@ function runAcpServer() {
             loadSession: true,
             promptCapabilities: { image: true, audio: false, embeddedContext: true },
             sessionCapabilities: { resume: {}, close: {}, load: {}, list: {}, additionalDirectories: {} },
+            ...(supportsSystemPromptAppend
+              ? { _meta: { antigravity: { tier: true, systemPrompt: { append: true } } } }
+              : {}),
           },
           agentInfo: { name: 'Fake Antigravity ACP Server', version: '1.5.14' },
         },
@@ -158,8 +165,23 @@ function runAcpServer() {
         return;
       }
       sessionId = method === 'session/resume' && params.sessionId ? params.sessionId : crypto.randomUUID();
+      const nextAppend = params?._meta?.antigravity?.systemPrompt?.append;
+      // Mirror real `agy acp` v1.5.14 semantics (PA-185 spike):
+      // - `session/new` starts fresh with `nextAppend` (or null).
+      // - `session/resume` updates `systemPromptAppend` when a non-empty string
+      //   is passed, but omitting `_meta` or passing `""` without a prior
+      //   `session/close` leaves the previous append intact.
+      if (method === 'session/new') {
+        systemPromptAppend = typeof nextAppend === 'string' && nextAppend.length > 0 ? nextAppend : null;
+      } else if (typeof nextAppend === 'string' && nextAppend.length > 0) {
+        systemPromptAppend = nextAppend;
+      }
       if (process.env.AGY_FIXTURE_RPC_LOG) {
-        fs.appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({ method, sessionId }) + '\n');
+        const logEntry = { method, sessionId };
+        if (typeof nextAppend === 'string') {
+          logEntry.systemPromptAppend = nextAppend;
+        }
+        fs.appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify(logEntry) + '\n');
       }
       send({
         jsonrpc: '2.0',
@@ -214,6 +236,11 @@ function runAcpServer() {
     }
 
     if (method === 'session/close') {
+      // Closing the session handle clears any session-level system prompt
+      // append and terminates in-flight background tasks (mirroring real agy acp).
+      systemPromptAppend = null;
+      for (const timer of activeBgTimers) clearTimeout(timer);
+      activeBgTimers.clear();
       if (process.env.AGY_FIXTURE_RPC_LOG) {
         fs.appendFileSync(process.env.AGY_FIXTURE_RPC_LOG, JSON.stringify({ method, sessionId }) + '\n');
       }
@@ -227,6 +254,12 @@ function runAcpServer() {
         .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
         .map((b) => b.text)
         .join('');
+      if (process.env.AGY_FIXTURE_PROMPT_LOG) {
+        fs.appendFileSync(
+          process.env.AGY_FIXTURE_PROMPT_LOG,
+          JSON.stringify({ sessionId, text, systemPromptAppend }) + '\n',
+        );
+      }
       void handlePrompt(id, text);
       return;
     }
@@ -433,7 +466,8 @@ function runAcpServer() {
         result: { stopReason: 'end_turn', usage: { inputTokens: 50, outputTokens: 10 } },
       });
       // Complete background task asynchronously while process stays alive between turns.
-      setTimeout(() => {
+      const bgTimer = setTimeout(() => {
+        activeBgTimers.delete(bgTimer);
         if (taskFile) fs.writeFileSync(taskFile, 'FINISHED');
         notifyUpdate({
           sessionUpdate: 'tool_call_update',
@@ -447,6 +481,7 @@ function runAcpServer() {
           content: { type: 'text', text: 'Background task finished.' },
         });
       }, 250);
+      activeBgTimers.add(bgTimer);
       return;
     }
 

@@ -254,6 +254,13 @@ export interface ManagerOptions {
    * omit it; absent means the toggle is refused.
    */
   fleetMcp?: () => { url: string; token: string } | null;
+  /**
+   * PA-185: whether spoken-summary instructions are currently enabled in
+   * server settings (`config.voiceSpokenSummaryEnabled`), read live because
+   * that toggle takes effect without a server restart (PA-84). Optional so
+   * unit tests can omit it (defaults to `true`, matching the config default).
+   */
+  voiceSpokenSummaryEnabled?: () => boolean;
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -1338,6 +1345,8 @@ export class SessionManager {
       skipPermissions: args.skipPermissions === true,
       bypassedBySettings,
       ...(settingsAutoApproveNotice ? { settingsAutoApproveNotice } : {}),
+      shouldAppendSpokenSummary: () =>
+        (this.opts.voiceSpokenSummaryEnabled?.() ?? true) && this.isVoiceModeEnabled(args.id),
     });
 
     this.insertRow(session, args.createdAt);

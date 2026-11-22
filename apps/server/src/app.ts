@@ -547,6 +547,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     agyTitleFor: (agentSessionId) => agyTranscripts.titleFor(agentSessionId),
     codexTitleFor: (agentSessionId) => codexTranscripts.titleFor(agentSessionId),
     fleetMcp: () => fleetMcp.credential(),
+    voiceSpokenSummaryEnabled: () => config.voiceSpokenSummaryEnabled,
   });
   if (sessions.getGlobalSkipPermissions()) {
     app.log.warn(
