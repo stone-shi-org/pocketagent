@@ -9,6 +9,7 @@ import { createTerminal } from '../terminal/create-terminal.js';
 import { MobileKeyBar, ctrlSequence } from '../components/MobileKeyBar.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
+import { TopbarDisclosureBadge } from '../components/TopbarDisclosureBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyIdle, ensureNotificationPermission } from '../agent/notifications.js';
 import { getTakeOverSizePref, setTakeOverSizePref } from '../agent/adopted-size-prefs.js';
@@ -550,6 +551,22 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
             {session ? `${session.agentDisplayName} · ${session.workspaceLabel}` : 'Loading…'}
           </span>
         </div>
+        {session?.skipPermissionsEnabled && (
+          <TopbarDisclosureBadge
+            variant="danger"
+            icon="shield"
+            label="Auto-approve"
+            tooltip="Approvals are bypassed for this session — tool calls run unattended."
+          />
+        )}
+        {session?.providerDisclosure && (
+          <TopbarDisclosureBadge
+            variant="warn"
+            icon="info"
+            label="Notice"
+            tooltip={session.providerDisclosure}
+          />
+        )}
         <div className="row" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
           <ConnectionBadge state={connection} />
           <StatusBadge status={status} />
@@ -569,12 +586,6 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           </button>
         )}
       </header>
-
-      {session?.skipPermissionsEnabled && (
-        <div className="skip-permissions-banner" role="status">
-          Approvals are bypassed for this session — tool calls run unattended.
-        </div>
-      )}
 
       {fatal && <div className="notice">{fatal}</div>}
 

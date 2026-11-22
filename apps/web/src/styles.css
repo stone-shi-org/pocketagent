@@ -445,6 +445,8 @@ input[type='number']::-webkit-outer-spin-button {
 /* ---------- Top bar ---------- */
 
 .topbar {
+  position: relative;
+  z-index: 20;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -454,6 +456,79 @@ input[type='number']::-webkit-outer-spin-button {
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
   min-height: 54px;
+}
+
+/* Compact header badges for standing session disclosures (skip-permissions and
+   providerDisclosure): always visible in the title bar without consuming
+   vertical chat space, with full details in a hover/focus/tap tooltip below. */
+.topbar-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.topbar-badge--danger {
+  background: #fdeceb;
+  border: 1px solid #f6c9c6;
+  color: #a3221a;
+}
+.topbar-badge--danger:hover,
+.topbar-badge--danger:focus-visible {
+  background: #fbd8d5;
+}
+.topbar-badge--warn {
+  background: #fff6e6;
+  border: 1px solid #f0d9ac;
+  color: var(--warn);
+}
+.topbar-badge--warn:hover,
+.topbar-badge--warn:focus-visible {
+  background: #ffecc9;
+}
+.topbar-badge-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: min(340px, calc(100vw - 32px));
+  padding: 8px 11px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--on-ink);
+  box-shadow: var(--shadow-md);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+.topbar-badge:hover .topbar-badge-tooltip,
+.topbar-badge:focus-visible .topbar-badge-tooltip,
+.topbar-badge.open .topbar-badge-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (max-width: 520px) {
+  .topbar-badge {
+    padding: 6px;
+  }
+  .topbar-badge-label {
+    display: none;
+  }
 }
 
 .topbar .title {

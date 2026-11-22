@@ -27,6 +27,7 @@ import { PromptBox } from '../components/PromptBox.js';
 import { codePromptHistoryKey } from '../agent/prompt-history.js';
 import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
+import { TopbarDisclosureBadge } from '../components/TopbarDisclosureBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
@@ -961,6 +962,25 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
             {modelLabel ? ` · ${modelLabel}` : ''}
           </span>
         </div>
+        {session?.skipPermissionsEnabled && (
+          <TopbarDisclosureBadge
+            variant="danger"
+            icon="shield"
+            label="Auto-approve"
+            tooltip="Approvals are bypassed for this session — tool calls run unattended."
+          />
+        )}
+        {/* Shown on every visit, not once at creation: whoever opens this chat
+            later did not see the moment it was started, and standing provider /
+            approval disclosures stay true for the session's whole life. */}
+        {session?.providerDisclosure && (
+          <TopbarDisclosureBadge
+            variant="warn"
+            icon="info"
+            label="Notice"
+            tooltip={session.providerDisclosure}
+          />
+        )}
         <div className="row" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
           <ConnectionBadge state={connection} />
           <StatusBadge status={status} />
@@ -972,22 +992,6 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
           </button>
         )}
       </header>
-
-      {session?.skipPermissionsEnabled && (
-        <div className="skip-permissions-banner" role="status">
-          Approvals are bypassed for this session — tool calls run unattended.
-        </div>
-      )}
-
-      {/* Shown on every visit, not once at creation: whoever opens this chat
-          later did not see the moment it was started, and "which company is
-          reading this repository" does not stop being true. Same doctrine as
-          the bypass banner immediately above. */}
-      {session?.providerDisclosure && (
-        <div className="provider-banner" role="status">
-          {session.providerDisclosure}
-        </div>
-      )}
 
       {/* PA-169: same doctrine — this session can start work on other
           machines for as long as it lives, so it says so on every visit. */}
