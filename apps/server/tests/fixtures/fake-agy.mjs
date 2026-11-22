@@ -49,6 +49,7 @@ function send(obj) {
 function runAcpServer() {
   let sessionId = null;
   let currentModel = 'auto';
+  let currentMode = 'default';
   let serverReqId = 1;
   let turnCounter = 0;
 
@@ -166,7 +167,7 @@ function runAcpServer() {
         result: {
           sessionId,
           models: { availableModels: AVAILABLE_MODELS, currentModelId: currentModel },
-          modes: { currentModeId: 'default', availableModes: AVAILABLE_MODES },
+          modes: { currentModeId: currentMode, availableModes: AVAILABLE_MODES },
         },
       });
       // Push available_commands_update right after session/new|resume, just like real agy acp.
@@ -189,6 +190,25 @@ function runAcpServer() {
           JSON.stringify({ method, modelId: currentModel }) + '\n',
         );
       }
+      send({ jsonrpc: '2.0', id, result: {} });
+      return;
+    }
+
+    if (method === 'session/set_mode') {
+      const modeId = typeof params.modeId === 'string' ? params.modeId : '';
+      if (!AVAILABLE_MODES.some((m) => m.id === modeId)) {
+        send({ jsonrpc: '2.0', id, error: { code: -32602, message: `Invalid mode: ${modeId}` } });
+        return;
+      }
+      currentMode = modeId;
+      if (process.env.AGY_FIXTURE_RPC_LOG) {
+        fs.appendFileSync(
+          process.env.AGY_FIXTURE_RPC_LOG,
+          JSON.stringify({ method, modeId: currentMode }) + '\n',
+        );
+      }
+      notifyUpdate({ sessionUpdate: 'current_mode_update', currentModeId: currentMode });
+      notifyUpdate({ sessionUpdate: 'usage_update', used: 0, size: 1048576 });
       send({ jsonrpc: '2.0', id, result: {} });
       return;
     }
@@ -430,10 +450,45 @@ function runAcpServer() {
       return;
     }
 
-    // Default turn: thought + tool_call + tool_call_update + text chunks + per-turn usage.
+    if (text === 'REPORT_MODE') {
+      notifyUpdate({ sessionUpdate: 'usage_update', used: 650117, size: 1048576 });
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `mode=${currentMode}` },
+      });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 20, outputTokens: 5 } },
+      });
+      return;
+    }
+
+    if (text === 'SERVER_MODE_CHANGE') {
+      currentMode = 'accept-edits';
+      notifyUpdate({ sessionUpdate: 'current_mode_update', currentModeId: currentMode });
+      notifyUpdate({ sessionUpdate: 'usage_update', used: 120000, size: 1048576 });
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'switched mode' },
+      });
+      send({
+        jsonrpc: '2.0',
+        id: rpcId,
+        result: { stopReason: 'end_turn', usage: { inputTokens: 30, outputTokens: 5 } },
+      });
+      return;
+    }
+
+    // Default turn: thought + tool_call + tool_call_update + usage_update + text chunks + per-turn usage.
     notifyUpdate({
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text: 'thinking about it' },
+    });
+    notifyUpdate({
+      sessionUpdate: 'usage_update',
+      used: 50000 * turnCounter,
+      size: 1048576,
     });
     const callId = `call_${turnCounter}`;
     notifyUpdate({

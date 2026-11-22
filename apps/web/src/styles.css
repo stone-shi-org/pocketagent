@@ -1028,6 +1028,84 @@ input[type='number']::-webkit-outer-spin-button {
   opacity: 0.6;
 }
 
+/* PA-184: Composer mode chip next to `.model-chip` (e.g. agy Default/Plan/Accept edits/Auto). */
+.mode-chip {
+  flex: none;
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 112px;
+  padding: 6px 6px 6px 8px;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mode-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mode-chip:hover:not(:disabled),
+.mode-chip[aria-expanded='true'] {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.mode-chip--warn {
+  background: #fdeceb;
+  border-color: #f6c9c6;
+  color: #a3221a;
+  font-weight: 600;
+}
+
+.mode-chip--warn:hover:not(:disabled),
+.mode-chip--warn[aria-expanded='true'] {
+  background: #fbd8d5;
+  color: #a3221a;
+}
+
+.mode-chip--plan {
+  background: #eef4fc;
+  border-color: #c5daf4;
+  color: #1f4f85;
+  font-weight: 600;
+}
+
+.mode-chip--plan:hover:not(:disabled),
+.mode-chip--plan[aria-expanded='true'] {
+  background: #e1ecfb;
+  color: #1f4f85;
+}
+
+.mode-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mode-name-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mode-auto-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #fdeceb;
+  border: 1px solid #f6c9c6;
+  color: #a3221a;
+  white-space: nowrap;
+}
+
 /* PA-113: The composer's thinking toggle button next to the model picker. */
 .thinking-chip {
   flex: none;
@@ -1809,6 +1887,14 @@ input[type='number']::-webkit-outer-spin-button {
     align-self: center;
   }
 
+  .promptbar .mode-chip {
+    max-width: 82px;
+    padding: 4px 6px;
+    font-size: 11.5px;
+    margin-bottom: 0;
+    align-self: center;
+  }
+
   .promptbar .thinking-chip {
     max-width: 80px;
     padding: 4px 6px;
@@ -1880,6 +1966,71 @@ input[type='number']::-webkit-outer-spin-button {
 }
 .agent-strip::-webkit-scrollbar { display: none; }
 .agent-strip:empty { display: none; }
+
+/* PA-184: Session header mode picker chip and live context-window meter. */
+.mode-header-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.mode-header-chip--warn {
+  background: #fdeceb;
+  border-color: #f6c9c6;
+  color: #a3221a;
+  font-weight: 600;
+}
+
+.mode-header-chip--plan {
+  background: #eef4fc;
+  border-color: #c5daf4;
+  color: #1f4f85;
+  font-weight: 600;
+}
+
+.context-meter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.context-meter-track {
+  display: inline-block;
+  width: 36px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.context-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.context-meter-chip--warn {
+  color: var(--warn);
+}
+
+.context-meter-chip--warn .context-meter-fill {
+  background: var(--warn);
+}
+
+.context-meter-chip--danger {
+  color: #a3221a;
+  font-weight: 600;
+}
+
+.context-meter-chip--danger .context-meter-fill {
+  background: #d93025;
+}
 
 /* Session-level rather than turn-level: a quota refusal is still relevant
    after the failed turn scrolls away. The button exposes the same detail to

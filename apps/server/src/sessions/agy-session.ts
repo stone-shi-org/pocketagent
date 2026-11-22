@@ -2,12 +2,16 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
-import type {
-  AgentEvent,
-  PermissionDecision,
-  PermissionRequestEvent,
-  PromptImage,
-  SessionStatus,
+import {
+  SPOKEN_SUMMARY_INSTRUCTION,
+  appendSpokenSummaryInstruction,
+  isAutoApprovingAgentMode,
+  type AgentEvent,
+  type AgentModeInfo,
+  type PermissionDecision,
+  type PermissionRequestEvent,
+  type PromptImage,
+  type SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
 import { formatAgySettingsAutoApproveNotice, readAgySettingsAutoApprove } from '../agents/agy.js';
@@ -15,6 +19,7 @@ import {
   extractAgyPath,
   isAgyQuotaError,
   normalizeAgyAcpModels,
+  normalizeAgyAcpModes,
   normalizeAgyAcpUpdate,
   summarizeAgyTool,
 } from './normalize.js';
@@ -36,6 +41,8 @@ export interface AgySessionSpec {
   executablePath?: string;
   /** Initial model to switch to right after handshake, or absent for default. */
   model?: string;
+  /** Initial operating mode (`default`, `plan`, `accept-edits`, `auto`) to apply right after handshake. */
+  mode?: string;
   /**
    * Explicit, off-by-default opt-in to `--dangerously-skip-permissions`.
    * Controls the CLI flag ONLY. When false/absent, `agy acp` is spawned
@@ -166,6 +173,16 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private _everBypassedBySettings = false;
 
   private _desiredModel: string | null = null;
+  private _availableModes: AgentModeInfo[] = [];
+  private _desiredMode: string | null = null;
+  private _currentMode: string | null = null;
+  /**
+   * Sticky latch (PA-184): once this session has ever entered an
+   * auto-approving mode (`auto`, `accept-edits`, or any mode outside
+   * `default`/`plan`), stays `true` so persisted `sessions.skip_permissions`
+   * never reverts `1 -> 0` if the user later switches back to `default`/`plan`.
+   */
+  private _everAutoApprovedByMode = false;
   private _status: SessionStatus = 'starting';
   private _agentSessionId: string | null = null;
   private _startedAt: number | null = null;
@@ -202,6 +219,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._agentSessionId = spec.resumeAgentSessionId ?? null;
     this._desiredModel = spec.model ?? null;
+    this._desiredMode = spec.mode ?? null;
     this._bypassedBySettings = spec.bypassedBySettings === true;
     this._everBypassedBySettings = this._bypassedBySettings;
   }
@@ -268,6 +286,18 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   /** Sticky: true if this session has ever run bypassed via host `settings.json`. */
   get everBypassedBySettings(): boolean {
     return this._everBypassedBySettings;
+  }
+  /** Active ACP operating mode (`default`, `plan`, `accept-edits`, `auto`), or null before handshake. */
+  get currentMode(): string | null {
+    return this._currentMode;
+  }
+  /** True when the currently active ACP mode auto-approves beyond `default` (fails closed). */
+  get autoApprovedByMode(): boolean {
+    return isAutoApprovingAgentMode(this._currentMode);
+  }
+  /** Sticky: true if this session has ever run in an auto-approving ACP mode. */
+  get everAutoApprovedByMode(): boolean {
+    return this._everAutoApprovedByMode;
   }
   /**
    * Titles of in-flight `execute` tool calls keeping this session busy after a
@@ -404,6 +434,12 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       this.emitEvent({ kind: 'models_available', models });
     }
 
+    const modes = isRecord(sessionRes) ? normalizeAgyAcpModes(sessionRes.modes) : [];
+    if (modes.length > 0) {
+      this._availableModes = modes;
+      this.emitEvent({ kind: 'modes_available', modes });
+    }
+
     const currentModelId =
       isRecord(sessionRes) && isRecord(sessionRes.models) && typeof sessionRes.models.currentModelId === 'string'
         ? sessionRes.models.currentModelId
@@ -431,14 +467,99 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       this.emitEvent({ kind: 'model_changed', model: this._desiredModel });
     }
 
+    if (this._desiredMode && this._agentSessionId && this._desiredMode !== currentModeId) {
+      try {
+        await this.rpcWithTimeout(
+          'session/set_mode',
+          {
+            sessionId: this._agentSessionId,
+            modeId: this._desiredMode,
+          },
+          handshakeTimeoutMs,
+        );
+        this.applyModeState(this._desiredMode, false);
+      } catch (err) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `Failed to set initial mode (${this._desiredMode}): ${errText(err)}`,
+        });
+        this._desiredMode = currentModeId;
+        if (currentModeId) {
+          this.applyModeState(currentModeId, isRespawn);
+        }
+      }
+    } else if (currentModeId) {
+      this.applyModeState(currentModeId, false);
+    }
+
     this.emitEvent({
       kind: 'session_started',
       agentSessionId: this._agentSessionId,
       model: this._desiredModel ?? currentModelId,
       cwd: this.spec.cwd,
       tools: [],
-      permissionMode: this.spec.skipPermissions ? 'always-proceed' : (currentModeId ?? 'default'),
+      permissionMode: this.spec.skipPermissions
+        ? 'always-proceed'
+        : (this._currentMode ?? currentModeId ?? 'default'),
     });
+  }
+
+  /**
+   * Commit a confirmed mode transition, latching `_everAutoApprovedByMode`
+   * when the mode auto-approves beyond `default` and deduplicating against
+   * `current_mode_update` notifications that race with `session/set_mode`.
+   */
+  private applyModeState(mode: string, notifyStatus: boolean): void {
+    const trimmed = mode.trim();
+    if (!trimmed) return;
+    if (isAutoApprovingAgentMode(trimmed)) {
+      this._everAutoApprovedByMode = true;
+    }
+    if (this._currentMode === trimmed) return;
+    this._currentMode = trimmed;
+    this._desiredMode = trimmed;
+    this.emitEvent({ kind: 'mode_changed', mode: trimmed });
+    if (notifyStatus && this._status === 'running') {
+      this.emit('status', this._status);
+    }
+  }
+
+  /**
+   * Switch the active operating mode live via ACP `session/set_mode` — no
+   * process recycle needed, so any background tasks remain untouched.
+   */
+  async setMode(mode: string): Promise<void> {
+    if (!this.isAlive()) return;
+    const trimmed = mode.trim();
+    if (!trimmed) return;
+    if (
+      this._availableModes.length > 0 &&
+      !this._availableModes.some((m) => m.id === trimmed)
+    ) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Unknown agy mode: ${trimmed}`,
+      });
+      return;
+    }
+    if (this.child && this._agentSessionId) {
+      try {
+        await this.rpc('session/set_mode', {
+          sessionId: this._agentSessionId,
+          modeId: trimmed,
+        });
+      } catch (err) {
+        this.emitEvent({
+          kind: 'notice',
+          level: 'warn',
+          text: `Failed to switch mode to ${trimmed}: ${errText(err)}`,
+        });
+        return;
+      }
+    }
+    this.applyModeState(trimmed, true);
   }
 
   /**
@@ -669,6 +790,16 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       if (title && title !== this._derivedTitle) {
         this._derivedTitle = title;
         this.emit('title', title);
+      }
+      return;
+    }
+
+    if (kind === 'current_mode_update') {
+      const events = normalizeAgyAcpUpdate(update);
+      for (const ev of events) {
+        if (ev.kind === 'mode_changed') {
+          this.applyModeState(ev.mode, true);
+        }
       }
       return;
     }

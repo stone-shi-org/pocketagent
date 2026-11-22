@@ -4176,6 +4176,23 @@ These are load-bearing. Several were bugs first.
        `permissions.allow` rules in `~/.gemini/antigravity-cli/settings.json` and Permission
        Grants can auto-approve matching commands or tools under `request-review` without
        PocketAgent seeing a `session/request_permission` prompt (`strict` ignores allow rules).
+     - **Per-session agent mode (`session/set_mode`, PA-184):** `agy acp` advertises modes
+       (`default`, `accept-edits`, `auto`, `plan`) on `session/new` / `session/resume` and
+       switches them live via `session/set_mode` without respawning (`modes_available` /
+       `mode_changed` events and `ClientMessage` `type: 'mode'`, protocol v18). Confirmed live
+       against `agy acp` v1.5.14 across `mode × settings.json toolPermission`: `auto`
+       auto-approves both file edits and terminal commands under unset/`"request-review"` (zero
+       prompts); `accept-edits` overrides `"strict"` to auto-approve in-workspace edits; `plan`
+       is read-only planning (still prompts on commands). Only `default` and `plan` are treated
+       as non-escalating (`isAutoApprovingAgentMode` in `packages/protocol/src/agent-events.ts`
+       fails closed on `accept-edits`, `auto`, and any unknown future mode). Entering an
+       auto-approving mode sets `AgySession.autoApprovedByMode` (surfacing `agentMode` and
+       `skipPermissionsEnabled: true` persistently on `SessionInfo` and the topbar disclosure
+       badge) and latches sticky `everAutoApprovedByMode` into `sessions.skip_permissions = 1`
+       (`MAX(skip_permissions, ?)`). Auto-approving modes are unreachable from MCP (omitted from
+       MCP tool schemas; `POST /api/sessions` returns `403 mode_forbidden` when
+       `request.mcpPrincipal` requests one) and refused by `RunExecutor` for unattended triggers
+       unless `spec.skipPermissions` is already true.
      - `--dangerously-skip-permissions` is spawn-time only so `applyGlobalSkipPermissions` is a
        no-op (same posture as terminal sessions).
   2. **Background tasks survive turns and keep `busy` honest:** `agy acp` resolves `session/prompt`
@@ -4200,13 +4217,19 @@ These are load-bearing. Several were bugs first.
      are bounded by `handshakeTimeoutMs` (default 15s), and any failed or timed-out handshake
      immediately kills the spawned child process.
   4. **Live session API & workspace binding:** `session/new` / `session/resume` provide the
-     conversation UUID (matching `~/.gemini/antigravity-cli/brain/<id>/`) and model catalog,
-     `available_commands_update` advertises slash commands, `session/set_model` switches models
-     live without respawning, `session_info_update` pushes AI-generated titles live (also persisted
-     to `annotations/<id>.pbtxt` and `conversation_summaries.db`), `session/prompt` returns
-     per-turn token usage directly, and `--add-dir <cwd>` binds agy to the session's directory.
-     Asserted in `apps/server/tests/agy-session.test.ts` against a long-lived fake ACP stdio
-     server fixture.
+     conversation UUID (matching `~/.gemini/antigravity-cli/brain/<id>/`), model catalog, and
+     mode catalog; `available_commands_update` advertises slash commands; `session/set_model` and
+     `session/set_mode` switch models and modes live without respawning (re-applied on respawn);
+     `session_info_update` pushes AI-generated titles live (also persisted to
+     `annotations/<id>.pbtxt` and `conversation_summaries.db`); `usage_update` emits generic
+     `context_usage` (`{ usedTokens, contextWindow }`) for the live context-window meter;
+     `session/prompt` returns per-turn token usage directly; and `--add-dir <cwd>` binds agy to
+     the session's directory. Conversation listing and `/history` remain file-based in
+     `AgyTranscriptStore` (PA-184 No-Go on `session/list` / `session/load`: `session/list` ignores
+     `{ cwd }`, takes ~835–940 ms cold, and returns raw truncated first prompts, while
+     `session/load` would require a long-lived daemon to avoid spawning on `GET`).
+     Asserted in `apps/server/tests/agy-session.test.ts` and `apps/server/tests/sessions.test.ts`
+     against a long-lived fake ACP stdio server fixture.
 - **`cols`/`rows` are `nonnegative()`, not `positive()`** — a structured session has no
   character grid and reports 0. Requiring a positive value silently invalidated every
   `attached` frame for structured sessions.

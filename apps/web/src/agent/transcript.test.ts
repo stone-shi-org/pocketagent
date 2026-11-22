@@ -718,3 +718,40 @@ describe('browser handoff events (PA-178)', () => {
     expect(s.browserHelp).toEqual([]);
   });
 });
+
+describe('modes and context usage events (PA-184)', () => {
+  it('tracks modes_available, mode_changed, and live context_usage', async () => {
+    const { formatContextUsage, resolveCurrentMode } = await import('./transcript.js');
+    const modes = [
+      { id: 'default', name: 'Default', description: 'Ask per settings.' },
+      { id: 'plan', name: 'Plan', description: 'Plan before executing.' },
+      { id: 'auto', name: 'Auto', description: 'Approve edits and safe commands.' },
+    ];
+    let s = applyEvents(emptyTranscript(), [
+      { kind: 'modes_available', modes },
+      { kind: 'mode_changed', mode: 'plan' },
+      { kind: 'context_usage', usedTokens: 650117, contextWindow: 1048576 },
+    ]);
+    expect(s.modes).toEqual(modes);
+    expect(s.mode).toBe('plan');
+    expect(resolveCurrentMode(s.modes, s.mode)?.name).toBe('Plan');
+    expect(s.contextUsage).toEqual({ usedTokens: 650117, contextWindow: 1048576 });
+
+    expect(formatContextUsage({ usedTokens: 650117, contextWindow: 1048576 })).toEqual({
+      percent: 62,
+      label: '62% of context',
+      detail: '650,117 / 1,048,576 tokens (62% of context)',
+      level: 'normal',
+    });
+    expect(formatContextUsage({ usedTokens: 100, contextWindow: 1048576 }).label).toBe('<1% of context');
+    expect(formatContextUsage({ usedTokens: 0, contextWindow: 1048576 }).label).toBe('0% of context');
+    expect(formatContextUsage({ usedTokens: 800000, contextWindow: 1000000 }).level).toBe('warn');
+    expect(formatContextUsage({ usedTokens: 920000, contextWindow: 1000000 }).level).toBe('danger');
+
+    // Conversation reset clears contextUsage while keeping session-level modes/mode.
+    s = applyEvent(s, { kind: 'conversation_reset', newConversationId: 'new-conv-1' });
+    expect(s.contextUsage).toBeNull();
+    expect(s.modes).toEqual(modes);
+    expect(s.mode).toBe('plan');
+  });
+});

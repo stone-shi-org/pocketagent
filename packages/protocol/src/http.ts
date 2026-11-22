@@ -90,6 +90,14 @@ export const CreateSessionRequest = z.object({
    */
   effort: EffortLevel.nullable().optional(),
   /**
+   * PA-184: initial operating mode for a structured session whose backend
+   * supports modes (e.g. `agy acp`'s `default`, `plan`, `accept-edits`,
+   * `auto`). Auto-approving modes (`auto`, `accept-edits`, or any mode outside
+   * `default`/`plan`) are refused for MCP principals (`403`) and for unattended
+   * triggers unless their own `skipPermissions` decision already covers it.
+   */
+  mode: z.string().min(1).max(64).optional(),
+  /**
    * PA-169: attach the Hub's `/mcp` (list hosts, dispatch to one, wait) to
    * this session, so its agent can send work to other machines. Structured
    * Claude sessions only, on a host the Hub has offered it to

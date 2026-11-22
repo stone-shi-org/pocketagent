@@ -9,7 +9,9 @@ import {
   type KeyboardEvent,
 } from 'react';
 import {
+  isAutoApprovingAgentMode,
   LIMITS,
+  type AgentModeInfo,
   type EffortLevel,
   type ModelInfo,
   type PromptImage,
@@ -26,7 +28,7 @@ import {
   type PendingFile,
 } from '../agent/file-attachment.js';
 import { PendingFileChips } from './FileChips.js';
-import { resolveCurrentModel } from '../agent/transcript.js';
+import { resolveCurrentMode, resolveCurrentModel } from '../agent/transcript.js';
 import { getVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import type { RecordedUtterance } from '../audio/capture.js';
 import { unlockAudioContext } from '../audio/audio-context.js';
@@ -231,6 +233,15 @@ interface Props {
   /** Switch effort level. Same next-prompt timing as `onSetModel`. */
   onSetEffort?: (effort: EffortLevel | null) => void;
   /**
+   * PA-184: operating modes this agent advertises (`default`, `plan`,
+   * `accept-edits`, `auto`). Undefined/empty hides the mode picker.
+   */
+  modes?: AgentModeInfo[];
+  /** Currently active mode id, if known yet. */
+  currentMode?: string | null;
+  /** Switch the session's operating mode live without respawning. */
+  onSetMode?: (mode: string) => void;
+  /**
    * PA-113: Whether reasoning/thinking is enabled.
    */
   thinking?: boolean;
@@ -368,6 +379,9 @@ export function PromptBox({
   onSetModel,
   effort = null,
   onSetEffort,
+  modes = [],
+  currentMode = null,
+  onSetMode,
   thinking = true,
   onToggleThinking,
   busy = false,
@@ -518,6 +532,9 @@ export function PromptBox({
   // immediately reopen it, a no-op that looks like the picker is stuck).
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const modelChipRef = useRef<HTMLButtonElement>(null);
+  const [modePickerOpen, setModePickerOpen] = useState(false);
+  const modePickerRef = useRef<HTMLDivElement>(null);
+  const modeChipRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     try {
@@ -576,14 +593,29 @@ export function PromptBox({
   // (the chip button, a picker row, or nothing) — the textarea's own
   // `onKeyDown` only ever saw Escape while the textarea itself was focused.
   useEffect(() => {
-    if (!modelPickerOpen) return;
+    if (!modelPickerOpen && !modePickerOpen) return;
     function onKeyDown(event: globalThis.KeyboardEvent): void {
-      if (event.key === 'Escape') setModelPickerOpen(false);
+      if (event.key === 'Escape') {
+        setModelPickerOpen(false);
+        setModePickerOpen(false);
+      }
     }
     function onPointerDown(event: PointerEvent): void {
       const target = event.target as Node;
-      if (modelPickerRef.current?.contains(target) || modelChipRef.current?.contains(target)) return;
-      setModelPickerOpen(false);
+      if (
+        modelPickerOpen &&
+        !modelPickerRef.current?.contains(target) &&
+        !modelChipRef.current?.contains(target)
+      ) {
+        setModelPickerOpen(false);
+      }
+      if (
+        modePickerOpen &&
+        !modePickerRef.current?.contains(target) &&
+        !modeChipRef.current?.contains(target)
+      ) {
+        setModePickerOpen(false);
+      }
     }
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('pointerdown', onPointerDown);
@@ -591,7 +623,7 @@ export function PromptBox({
       document.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('pointerdown', onPointerDown);
     };
-  }, [modelPickerOpen]);
+  }, [modelPickerOpen, modePickerOpen]);
 
   /** What `onSend` is handed for the files: ready ids, or nothing. */
   function sendableIds(): string[] | undefined {
@@ -856,6 +888,11 @@ export function PromptBox({
     setModelPickerOpen(false);
   }
 
+  function pickMode(mode: AgentModeInfo): void {
+    onSetMode?.(mode.id);
+    setModePickerOpen(false);
+  }
+
   // The model this session is actually on — or, once the list has caught up
   // with `session_started`/`models_available` but no explicit selection has
   // been confirmed yet (agy never reports one in `init` — see
@@ -865,9 +902,14 @@ export function PromptBox({
   const currentModelInfo = resolveCurrentModel(models, currentModel);
   const currentModelLabel = currentModelInfo?.displayName ?? null;
   const effortLevels = currentModelInfo?.supportsEffort ? currentModelInfo.supportedEffortLevels : [];
+  const currentModeInfo = resolveCurrentMode(modes, currentMode);
+  const currentModeLabel = currentModeInfo?.name ?? currentMode ?? null;
+  const currentModeId = currentModeInfo?.id ?? currentMode ?? null;
+  const currentModeAutoApproves = isAutoApprovingAgentMode(currentModeId);
   // The slash picker is text-triggered and spans the full width; showing both
   // at once would overlap it, so a `/` in progress wins.
   const modelPickerVisible = modelPickerOpen && !pickerOpen && !mentionOpen && models.length > 0;
+  const modePickerVisible = modePickerOpen && !pickerOpen && !mentionOpen && modes.length > 0;
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     // Guard against IME composition: Enter/Tab during IME conversion must not
@@ -1012,6 +1054,36 @@ export function PromptBox({
           }}
           onClose={() => setMicPickerOpen(false)}
         />
+      )}
+      {modePickerVisible && (
+        <div className="model-picker mode-picker" role="listbox" aria-label="Agent modes" ref={modePickerRef}>
+          {modes.map((mode) => {
+            const isCurrent = mode.id === currentModeId;
+            const autoApproves = isAutoApprovingAgentMode(mode.id);
+            return (
+              <button
+                key={mode.id}
+                type="button"
+                role="option"
+                aria-selected={isCurrent}
+                className={isCurrent ? 'active' : ''}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pickMode(mode);
+                }}
+              >
+                <span className="model-row">
+                  <span className="mode-name-group">
+                    <span className="model-name">{mode.name}</span>
+                    {autoApproves && <span className="mode-auto-tag">Auto-approves</span>}
+                  </span>
+                  {isCurrent && <Icon name="check" size={14} />}
+                </span>
+                {mode.description && <span className="model-desc">{mode.description}</span>}
+              </button>
+            );
+          })}
+        </div>
       )}
       {modelPickerVisible && (
         <div className="model-picker" role="listbox" aria-label="Models" ref={modelPickerRef}>
@@ -1179,6 +1251,7 @@ export function PromptBox({
               setText(e.target.value);
               setDismissed(false);
               setModelPickerOpen(false);
+              setModePickerOpen(false);
               historyIndexRef.current = -1;
             }}
             onKeyDown={onKeyDown}
@@ -1345,11 +1418,32 @@ export function PromptBox({
           </div>
         ) : (
           <div className="promptbar-tools-right">
+            {modes.length > 0 && (
+              <button
+                type="button"
+                className={`mode-chip${currentModeAutoApproves ? ' mode-chip--warn' : currentModeId === 'plan' ? ' mode-chip--plan' : ''}`}
+                onClick={() => {
+                  setModelPickerOpen(false);
+                  setModePickerOpen((v) => !v);
+                }}
+                disabled={disabled}
+                aria-haspopup="listbox"
+                aria-expanded={modePickerOpen}
+                aria-label={`Mode: ${currentModeLabel ?? 'default'}. Choose a different mode.`}
+                ref={modeChipRef}
+              >
+                <span>{currentModeLabel ?? 'Default'}</span>
+                <Icon name="chevron-down" size={14} />
+              </button>
+            )}
             {models.length > 0 && (
               <button
                 type="button"
                 className="model-chip"
-                onClick={() => setModelPickerOpen((v) => !v)}
+                onClick={() => {
+                  setModePickerOpen(false);
+                  setModelPickerOpen((v) => !v);
+                }}
                 disabled={disabled}
                 aria-haspopup="listbox"
                 aria-expanded={modelPickerOpen}

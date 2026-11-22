@@ -41,6 +41,11 @@ function canSetEffort(
 ): session is StructuredLikeSession & { setEffort: (effort: string | null) => Promise<void> } {
   return typeof (session as { setEffort?: unknown }).setEffort === 'function';
 }
+function canSetMode(
+  session: StructuredLikeSession,
+): session is StructuredLikeSession & { setMode: (mode: string) => Promise<void> } {
+  return typeof (session as { setMode?: unknown }).setMode === 'function';
+}
 
 /**
  * Authoritative half of "adopted panes are not resized unless the user
@@ -876,6 +881,17 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
             break;
           }
           void session.setEffort(message.effort);
+          break;
+        }
+
+        case 'mode': {
+          const session = requireStructured(message.sessionId);
+          if (!session) break;
+          if (!canSetMode(session)) {
+            sendError('bad_message', 'This agent does not support switching modes.', message.sessionId);
+            break;
+          }
+          void session.setMode(message.mode);
           break;
         }
       }

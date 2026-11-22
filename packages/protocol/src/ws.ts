@@ -68,8 +68,15 @@ import type { ProtocolRange } from './protocol-negotiation.js';
  * key, and the prompt would go out with its files missing and nobody told.
  * A v17 bundle therefore must not reach a v16 server, which the range check
  * guarantees; a v16 bundle never sends the field, so the floor stays put.
+ * v18 added the `mode` client message and the `modes_available`/`mode_changed`/
+ * `context_usage` agent events (PA-184), for live per-session agent mode
+ * switching and live context-window telemetry on structured sessions. `agy`
+ * emits `modes_available` and `context_usage` automatically on startup and
+ * during turns (including inside `AttachedMessage.agentReplay`), so an older
+ * bundle's `ServerMessage.safeParse()` would reject the whole `attached` frame
+ * and hang on connecting; `PROTOCOL_MIN_SUPPORTED` therefore moves to 18 too.
  */
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 
 /**
  * Oldest version the server still accepts on `/api/ws` (PA-61).
@@ -91,7 +98,7 @@ export const PROTOCOL_VERSION = 17;
  * that: the range is reported on `/health`, negotiated per host, and a host
  * outside it is one unusable row rather than a dead app.
  */
-export const PROTOCOL_MIN_SUPPORTED = 15;
+export const PROTOCOL_MIN_SUPPORTED = 18;
 
 /**
  * What this server reports on `/health` and `HostInfo.protocol`.
@@ -315,6 +322,17 @@ export const SetEffortMessage = z.object({
 });
 
 /**
+ * Switch the operating mode a structured session uses (e.g. `agy acp`'s
+ * `default`, `accept-edits`, `auto`, `plan`) live with no process respawn
+ * (PA-184).
+ */
+export const SetModeMessage = z.object({
+  type: z.literal('mode'),
+  sessionId: SessionId,
+  mode: z.string().min(1).max(64),
+});
+
+/**
  * Take a queued prompt out of the queue, or send it regardless.
  *
  * `force` is the deliberate escape hatch: the queue exists to stop two agents
@@ -373,6 +391,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   ResolveQueuedPromptMessage,
   SetModelMessage,
   SetEffortMessage,
+  SetModeMessage,
   VoiceModeMessage,
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;

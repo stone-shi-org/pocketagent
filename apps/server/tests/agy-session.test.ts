@@ -182,6 +182,7 @@ describe('AgySession (ACP)', () => {
     expect(kinds).toEqual([
       'user_prompt',
       'thinking_delta',
+      'context_usage',
       'thinking',
       'tool_use',
       'tool_result',
@@ -189,6 +190,10 @@ describe('AgySession (ACP)', () => {
       'text',
       'turn_complete',
     ]);
+    expect(events.find((e) => e.kind === 'context_usage')).toMatchObject({
+      usedTokens: 50_000,
+      contextWindow: 1_048_576,
+    });
 
     expect(events.find((e) => e.kind === 'tool_use')).toMatchObject({
       name: 'run_command',
@@ -497,6 +502,111 @@ describe('AgySession (ACP)', () => {
       const text = fs.readFileSync(rpcLog, 'utf8');
       return text.includes('session/close');
     });
+  });
+
+  it('advertises modes, switches mode live with no respawn, latches auto-approval, and streams context_usage', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-mode-live-'));
+    const pidFile = path.join(dir, 'pid');
+    const rpcLog = path.join(dir, 'rpc.log');
+    const env = { ...process.env, AGY_FIXTURE_PID_FILE: pidFile, AGY_FIXTURE_RPC_LOG: rpcLog } as Record<
+      string,
+      string
+    >;
+
+    session = new AgySession(makeSpec({ env }));
+    const events: AgentEvent[] = [];
+    session.on('event', (_seq, ev) => events.push(ev));
+    const statusChanges: string[] = [];
+    session.on('status', (st) => statusChanges.push(st));
+
+    await session.start();
+    const initialPid = fs.readFileSync(pidFile, 'utf8').trim();
+
+    expect(session.currentMode).toBe('default');
+    expect(session.autoApprovedByMode).toBe(false);
+    expect(session.everAutoApprovedByMode).toBe(false);
+
+    const modesAvail = events.find((e) => e.kind === 'modes_available');
+    expect(modesAvail).toBeDefined();
+    if (modesAvail?.kind === 'modes_available') {
+      expect(modesAvail.modes.map((m) => m.id)).toEqual(['default', 'accept-edits', 'auto', 'plan']);
+    }
+
+    // Switch live to `plan` (safe direction — never latches auto-approval).
+    await session.setMode('plan');
+    expect(session.currentMode).toBe('plan');
+    expect(session.autoApprovedByMode).toBe(false);
+    expect(session.everAutoApprovedByMode).toBe(false);
+    // No respawn occurred.
+    expect(fs.readFileSync(pidFile, 'utf8').trim()).toBe(initialPid);
+    // No duplicate mode_changed when both RPC and `current_mode_update` fire.
+    expect(events.filter((e) => e.kind === 'mode_changed' && e.mode === 'plan')).toHaveLength(1);
+
+    // Confirm fake-agy observed `plan` and emits live `context_usage`.
+    session.prompt('REPORT_MODE');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    expect(events.some((e) => e.kind === 'text' && e.text === 'mode=plan')).toBe(true);
+    expect(
+      events.some(
+        (e) => e.kind === 'context_usage' && e.usedTokens === 650117 && e.contextWindow === 1048576,
+      ),
+    ).toBe(true);
+
+    // Switch live to `auto` -> latches `autoApprovedByMode` and sticky `everAutoApprovedByMode`.
+    statusChanges.length = 0;
+    await session.setMode('auto');
+    expect(session.currentMode).toBe('auto');
+    expect(session.autoApprovedByMode).toBe(true);
+    expect(session.everAutoApprovedByMode).toBe(true);
+    expect(statusChanges).toContain('running');
+
+    // Switching back to `default` clears live `autoApprovedByMode` but keeps sticky `everAutoApprovedByMode`.
+    await session.setMode('default');
+    expect(session.currentMode).toBe('default');
+    expect(session.autoApprovedByMode).toBe(false);
+    expect(session.everAutoApprovedByMode).toBe(true);
+    expect(fs.readFileSync(pidFile, 'utf8').trim()).toBe(initialPid);
+  });
+
+  it('applies initial spec.mode on handshake and preserves mode across between-turn respawn', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-mode-respawn-'));
+    const pidFile = path.join(dir, 'pid');
+    const env = { ...process.env, AGY_FIXTURE_PID_FILE: pidFile } as Record<string, string>;
+
+    session = new AgySession(makeSpec({ env, mode: 'plan' }));
+    const events: AgentEvent[] = [];
+    session.on('event', (_seq, ev) => events.push(ev));
+
+    await session.start();
+    const firstPid = fs.readFileSync(pidFile, 'utf8').trim();
+    expect(session.currentMode).toBe('plan');
+
+    session.prompt('CRASH_BETWEEN_TURNS');
+    await waitFor(() => events.some((e) => e.kind === 'notice' && e.text.includes('stopped between turns')));
+
+    session.prompt('REPORT_MODE');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+    const secondPid = fs.readFileSync(pidFile, 'utf8').trim();
+    expect(secondPid).not.toBe(firstPid);
+    expect(events.some((e) => e.kind === 'text' && e.text === 'mode=plan')).toBe(true);
+  });
+
+  it('handles server-initiated current_mode_update and latches auto-approval', async () => {
+    session = new AgySession(makeSpec());
+    const events: AgentEvent[] = [];
+    session.on('event', (_seq, ev) => events.push(ev));
+
+    await session.start();
+    expect(session.currentMode).toBe('default');
+    expect(session.everAutoApprovedByMode).toBe(false);
+
+    session.prompt('SERVER_MODE_CHANGE');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(session.currentMode).toBe('accept-edits');
+    expect(session.autoApprovedByMode).toBe(true);
+    expect(session.everAutoApprovedByMode).toBe(true);
+    expect(events.some((e) => e.kind === 'mode_changed' && e.mode === 'accept-edits')).toBe(true);
   });
 });
 

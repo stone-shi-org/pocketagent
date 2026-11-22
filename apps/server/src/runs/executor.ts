@@ -7,7 +7,7 @@ import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
 import type { PlannerChatService } from '../planner/chats.js';
 import { PlannerChatError } from '../planner/chats.js';
-import type { AgentEvent } from '@pocketagent/protocol';
+import { isAutoApprovingAgentMode, type AgentEvent } from '@pocketagent/protocol';
 
 /**
  * The worktree → session → prompt composite, shared by every trigger that
@@ -40,6 +40,12 @@ export interface RunSpec {
    * uses, and the reason this is `?:` rather than `| undefined`.
    */
   effort?: string | null;
+  /**
+   * PA-184: optional initial operating mode for agents that advertise modes
+   * (e.g. `agy acp`'s `default`, `plan`, `accept-edits`, `auto`). Any
+   * auto-approving mode is refused unless `skipPermissions` is true.
+   */
+  mode?: string | null;
   worktree:
     | { mode: 'none' }
     | { mode: 'current-branch' }
@@ -314,6 +320,15 @@ export class RunExecutor {
     }
     sink.onCwd(cwd);
 
+    // PA-184: unattended triggers (cron, webhooks) may only select a mode that
+    // auto-approves beyond `default` when their own `skipPermissions` decision
+    // already covers it.
+    if (spec.mode && isAutoApprovingAgentMode(spec.mode) && !spec.skipPermissions) {
+      return fail(
+        `Cannot start unattended run in auto-approving mode "${spec.mode}" unless skip-permissions is enabled.`,
+      );
+    }
+
     // 3. Start the session. `create()` surfaces a missing agent binary as
     //    `agent_unavailable` for us, so there is no separate preflight.
     let session: StructuredLikeSession;
@@ -331,6 +346,7 @@ export class RunExecutor {
         ...(spec.model !== undefined && spec.model !== null ? { model: spec.model } : {}),
         // Only pass the key at all when the caller set it — see `RunSpec.effort`.
         ...('effort' in spec ? { effort: spec.effort } : {}),
+        ...(spec.mode ? { mode: spec.mode } : {}),
         ...(resume !== undefined
           ? { resumeAgentSessionId: resume.agentSessionId, forkSession: false }
           : {}),

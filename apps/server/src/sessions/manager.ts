@@ -167,6 +167,11 @@ export interface CreateSessionInput {
   model?: string;
   effort?: EffortLevel | null;
   /**
+   * PA-184: initial operating mode for structured sessions whose backend
+   * advertises modes (`agy acp`: `default`, `plan`, `accept-edits`, `auto`).
+   */
+  mode?: string;
+  /**
    * PA-75: the Pocket Agent chat that created this session via
    * `start_subagent_session`, or null/undefined when started directly.
    */
@@ -1055,6 +1060,7 @@ export class SessionManager {
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
           ...(model !== undefined ? { model } : {}),
+          ...(input.mode !== undefined ? { mode: input.mode } : {}),
           ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
           skipPermissions,
         });
@@ -1294,6 +1300,7 @@ export class SessionManager {
     env: Record<string, string>;
     resumeAgentSessionId?: string;
     model?: string;
+    mode?: string;
     plannerChatId?: string | null;
     skipPermissions?: boolean;
   }): Promise<AgySession> {
@@ -1326,6 +1333,7 @@ export class SessionManager {
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
+      ...(args.mode !== undefined ? { mode: args.mode } : {}),
       plannerChatId: args.plannerChatId ?? null,
       skipPermissions: args.skipPermissions === true,
       bypassedBySettings,
@@ -2150,7 +2158,7 @@ export class SessionManager {
       skipPermissionsEnabled:
         session.spec.skipPermissions === true ||
         (session.transport === 'structured' && session.globalBypassActive) ||
-        (session instanceof AgySession && session.bypassedBySettings),
+        (session instanceof AgySession && (session.bypassedBySettings || session.autoApprovedByMode)),
       // Read off the adapter rather than persisted with the session: it is a
       // property of *how this agent runs*, not of a choice made at creation,
       // so it must follow the adapter's current configuration. Nothing is
@@ -2164,6 +2172,9 @@ export class SessionManager {
       approvalDisclosure: resolveApprovalDisclosure(this.opts.agents.get(session.spec.agent)),
       ...(session instanceof AgySession && session.backgroundCommands.length > 0
         ? { backgroundCommands: session.backgroundCommands }
+        : {}),
+      ...(session instanceof AgySession && session.currentMode !== null
+        ? { agentMode: session.currentMode }
         : {}),
       pendingApprovalsCount:
         session.transport === 'structured' &&
@@ -2261,7 +2272,7 @@ export class SessionManager {
         session.transport,
         session.agentSessionId,
         session.spec.skipPermissions === true ||
-        (session instanceof AgySession && session.everBypassedBySettings)
+        (session instanceof AgySession && (session.everBypassedBySettings || session.everAutoApprovedByMode))
           ? 1
           : 0,
         session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
@@ -2298,12 +2309,13 @@ export class SessionManager {
         // title once one was found rather than reverting to the generic
         // creation-time name.
         this.displayTitle(session),
-        // Sticky record (PA-183): once a session has ever run bypassed (either
-        // via explicit `skipPermissions` or host `settings.json`), `skip_permissions`
-        // must stay 1 in SQLite so history never makes earlier bypassed turns
-        // look supervised if `toolPermission` is tightened mid-session.
+        // Sticky record (PA-183 / PA-184): once a session has ever run bypassed
+        // (via explicit `skipPermissions`, host `settings.json`, or an
+        // auto-approving agent mode like `auto` / `accept-edits`),
+        // `skip_permissions` must stay 1 in SQLite so history never makes
+        // earlier bypassed turns look supervised.
         session.spec.skipPermissions === true ||
-          (session instanceof AgySession && session.everBypassedBySettings)
+          (session instanceof AgySession && (session.everBypassedBySettings || session.everAutoApprovedByMode))
           ? 1
           : 0,
         session.id,

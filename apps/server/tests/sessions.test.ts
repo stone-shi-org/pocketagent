@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
+import { createTestApp, makeConfig, makeWorkspace, TEST_TOKEN, waitFor, sleep, type TestApp } from './helpers.js';
+import { buildApp } from '../src/app.js';
+import { openDatabase, readAgentDefaults, writeAgentDefaults } from '../src/db/index.js';
 import { buildChildEnv } from '../src/sessions/env.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createShellAdapter } from '../src/agents/shell.js';
@@ -12,8 +14,10 @@ import { createOpencodeAdapter } from '../src/agents/opencode.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
 import { createPiAdapter } from '../src/agents/pi.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
-import { readAgentDefaults, writeAgentDefaults } from '../src/db/index.js';
-import { clampTitle, CreateSessionRequest, MAX_SESSION_TITLE_CHARS } from '@pocketagent/protocol';
+import { clampTitle, CreateSessionRequest, isAutoApprovingAgentMode, MAX_SESSION_TITLE_CHARS } from '@pocketagent/protocol';
+import { RunExecutor } from '../src/runs/executor.js';
+import { MCP_TOOLS } from '../src/mcp-server/tools.js';
+import { AgySession } from '../src/sessions/agy-session.js';
 import { titleOf } from '../src/webhooks/index.js';
 import { formatCronRunTitle } from '../src/cron/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
@@ -1458,6 +1462,239 @@ describe('session title clamping & agy derived titles (PA-163)', () => {
       };
       expect(freshRow.title).toBe('Fresh Codex Thread Title');
       fresh.terminate();
+    });
+  });
+
+  describe('agy mode approval rules, sticky persistence, and unattended gating (PA-184)', () => {
+    let t: TestApp;
+    let fakeHome: string;
+    const origHome = process.env.HOME;
+
+    beforeEach(async () => {
+      fakeHome = fs.mkdtempSync('/tmp/pa-pa184-home-');
+      fs.mkdirSync(path.join(fakeHome, '.gemini', 'antigravity-cli'), { recursive: true });
+      fs.writeFileSync(
+        path.join(fakeHome, '.gemini', 'antigravity-cli', 'settings.json'),
+        JSON.stringify({ toolPermission: 'request-review' }),
+      );
+      process.env.HOME = fakeHome;
+      t = await createTestApp({ POCKETAGENT_AGY_BIN: AGY_FIXTURE });
+    });
+
+    afterEach(async () => {
+      await t.cleanup();
+      if (origHome === undefined) delete process.env.HOME;
+      else process.env.HOME = origHome;
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    });
+
+    it('fails closed on isAutoApprovingAgentMode', () => {
+      expect(isAutoApprovingAgentMode(undefined)).toBe(false);
+      expect(isAutoApprovingAgentMode(null)).toBe(false);
+      expect(isAutoApprovingAgentMode('default')).toBe(false);
+      expect(isAutoApprovingAgentMode('plan')).toBe(false);
+      expect(isAutoApprovingAgentMode('accept-edits')).toBe(true);
+      expect(isAutoApprovingAgentMode('auto')).toBe(true);
+      expect(isAutoApprovingAgentMode('future-auto-mode')).toBe(true);
+    });
+
+    it('discloses auto-approving modes persistently and keeps persisted skip_permissions sticky after switching back', async () => {
+      // Safe mode (`plan`) stays supervised.
+      const planRes = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(t),
+        payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24, transport: 'structured', mode: 'plan' },
+      });
+      expect(planRes.statusCode, planRes.body).toBe(201);
+      const planInfo = planRes.json();
+      expect(planInfo.agentMode).toBe('plan');
+      expect(planInfo.skipPermissionsEnabled).toBe(false);
+      const planRow = t.db.prepare('SELECT skip_permissions FROM sessions WHERE id = ?').get(planInfo.id) as {
+        skip_permissions: number;
+      };
+      expect(planRow.skip_permissions).toBe(0);
+
+      // Switching live from `plan` -> `accept-edits` discloses immediately and latches DB skip_permissions = 1.
+      const livePlan = t.context.sessions.get(planInfo.id);
+      if (!(livePlan instanceof AgySession)) throw new Error('expected AgySession');
+      await livePlan.setMode('accept-edits');
+      expect(t.context.sessions.toInfo(livePlan).agentMode).toBe('accept-edits');
+      expect(t.context.sessions.toInfo(livePlan).skipPermissionsEnabled).toBe(true);
+      const latchedRow = t.db.prepare('SELECT skip_permissions FROM sessions WHERE id = ?').get(planInfo.id) as {
+        skip_permissions: number;
+      };
+      expect(latchedRow.skip_permissions).toBe(1);
+
+      // Switching back to `default` clears live skipPermissionsEnabled but keeps persisted skip_permissions = 1.
+      await livePlan.setMode('default');
+      expect(t.context.sessions.toInfo(livePlan).agentMode).toBe('default');
+      expect(t.context.sessions.toInfo(livePlan).skipPermissionsEnabled).toBe(false);
+      const stickyRow = t.db.prepare('SELECT skip_permissions FROM sessions WHERE id = ?').get(planInfo.id) as {
+        skip_permissions: number;
+      };
+      expect(stickyRow.skip_permissions).toBe(1);
+      livePlan.terminate();
+    });
+
+    it('refuses auto-approving modes for MCP principals and unattended triggers without skipPermissions', async () => {
+      // 1. MCP tools do not expose an agent mode knob for starting sessions.
+      const startTool = MCP_TOOLS.find((tool) => tool.name === 'start_session');
+      const runTool = MCP_TOOLS.find((tool) => tool.name === 'run_coding_task');
+      expect(Object.keys(startTool?.input ?? {})).not.toContain('mode');
+      expect(Object.keys(runTool?.input ?? {})).not.toContain('mode');
+
+      // 2. Direct POST /api/sessions with an MCP principal rejects `auto` / `accept-edits` / unknown modes with 403,
+      //    while allowing `plan`.
+      const ws = makeWorkspace();
+      const db = openDatabase(':memory:');
+      const config = makeConfig({
+        POCKETAGENT_WORKSPACE_ROOTS: ws.root,
+        POCKETAGENT_AGY_BIN: AGY_FIXTURE,
+      });
+      const { app: mcpApp, context: mcpContext } = await buildApp({
+        config,
+        db,
+        plannerWorkspacesRoot: path.join(ws.root, 'planner-workspaces'),
+        plannerSkillsRoot: path.join(ws.root, 'planner-skills'),
+        attachmentStagingDir: path.join(ws.root, 'attachment-staging'),
+        browserOptions: { findExecutable: () => null },
+        legacyProviderEnv: {},
+        serveStatic: false,
+      });
+      mcpApp.addHook('preHandler', async (req) => {
+        if (req.headers['x-test-mcp'] === '1') {
+          req.mcpPrincipal = {
+            id: 'mcp-1',
+            label: 'test-mcp',
+            scopes: ['read', 'sessions'],
+          };
+        }
+      });
+      await mcpApp.ready();
+      try {
+        const login = await mcpApp.inject({
+          method: 'POST',
+          url: '/api/auth/login',
+          payload: { token: TEST_TOKEN },
+        });
+        const cookie = login.cookies[0] ? `${login.cookies[0].name}=${login.cookies[0].value}` : '';
+        const mcpHeaders = { cookie, 'x-test-mcp': '1' };
+
+        for (const forbiddenMode of ['auto', 'accept-edits', 'unknown-future']) {
+          const res = await mcpApp.inject({
+            method: 'POST',
+            url: '/api/sessions',
+            headers: mcpHeaders,
+            payload: {
+              agent: 'agy',
+              cwd: ws.project,
+              cols: 80,
+              rows: 24,
+              transport: 'structured',
+              mode: forbiddenMode,
+            },
+          });
+          expect(res.statusCode, `${forbiddenMode}: ${res.body}`).toBe(403);
+          expect(res.json().error.code).toBe('mode_forbidden');
+        }
+
+        const safeMcpRes = await mcpApp.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: mcpHeaders,
+          payload: {
+            agent: 'agy',
+            cwd: ws.project,
+            cols: 80,
+            rows: 24,
+            transport: 'structured',
+            mode: 'plan',
+          },
+        });
+        expect(safeMcpRes.statusCode, safeMcpRes.body).toBe(201);
+        expect(safeMcpRes.json().agentMode).toBe('plan');
+        mcpContext.sessions.terminate(safeMcpRes.json().id);
+      } finally {
+        await mcpApp.close();
+        ws.cleanup();
+      }
+
+      // 3. RunExecutor (cron & webhooks) rejects auto-approving modes unless skipPermissions is true.
+      const executor = new RunExecutor({
+        sessions: t.context.sessions,
+        workspaces: t.context.workspaces,
+        worktrees: t.context.worktrees,
+      });
+      const noopSink = () => {
+        let settledError: string | null = null;
+        return {
+          get error() {
+            return settledError;
+          },
+          onCwd() {},
+          onSessionStarted() {},
+          onAgentSessionId() {},
+          onSettled(_s: 'succeeded' | 'failed', err: string | null) {
+            settledError = err;
+          },
+        };
+      };
+
+      const refusedSink = noopSink();
+      const refused = await executor.start(
+        'run-refused',
+        {
+          cwd: t.projectDir,
+          agent: 'agy',
+          title: 'Unattended auto',
+          prompt: 'hello',
+          skipPermissions: false,
+          mode: 'auto',
+          worktree: { mode: 'none' },
+        },
+        refusedSink,
+      );
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toContain('auto-approving mode');
+
+      const allowedPlan = await executor.start(
+        'run-plan',
+        {
+          cwd: t.projectDir,
+          agent: 'agy',
+          title: 'Unattended plan',
+          prompt: 'REPORT_MODE',
+          skipPermissions: false,
+          mode: 'plan',
+          worktree: { mode: 'none' },
+        },
+        noopSink(),
+      );
+      expect(allowedPlan.ok).toBe(true);
+      if (allowedPlan.ok) {
+        expect(t.context.sessions.toInfo(allowedPlan.session).agentMode).toBe('plan');
+        allowedPlan.session.terminate();
+      }
+
+      const allowedAuto = await executor.start(
+        'run-auto',
+        {
+          cwd: t.projectDir,
+          agent: 'agy',
+          title: 'Unattended auto with skip',
+          prompt: 'REPORT_MODE',
+          skipPermissions: true,
+          mode: 'auto',
+          worktree: { mode: 'none' },
+        },
+        noopSink(),
+      );
+      expect(allowedAuto.ok).toBe(true);
+      if (allowedAuto.ok) {
+        expect(t.context.sessions.toInfo(allowedAuto.session).agentMode).toBe('auto');
+        allowedAuto.session.terminate();
+      }
     });
   });
 });

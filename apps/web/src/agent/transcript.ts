@@ -6,6 +6,7 @@ import {
 } from '@pocketagent/protocol';
 import type {
   AgentEvent,
+  AgentModeInfo,
   BrowserHelpRequestEvent,
   DocTurnChangedFile,
   EffortLevel,
@@ -163,6 +164,11 @@ export type TranscriptItem =
   | CommandOutputItem
   | CompactionItem;
 
+export interface ContextUsageState {
+  usedTokens: number;
+  contextWindow: number;
+}
+
 export interface TranscriptState {
   items: TranscriptItem[];
   /** Approvals still awaiting an answer, oldest first. */
@@ -188,6 +194,12 @@ export interface TranscriptState {
    * rather than guessing a specific level.
    */
   effort: EffortLevel | null;
+  /** Operating modes this agent advertises (`modes_available`). Empty when unsupported. */
+  modes: AgentModeInfo[];
+  /** Active operating mode id (`mode_changed`), or null until reported. */
+  mode: string | null;
+  /** Latest live context-window occupancy (`context_usage`), or null when unreported. */
+  contextUsage: ContextUsageState | null;
   /** The latest provider limit refusal for this structured session. */
   rateLimit: RateLimitEvent | null;
   /**
@@ -208,6 +220,9 @@ export function emptyTranscript(): TranscriptState {
     busy: false,
     totalCostUsd: 0,
     effort: null,
+    modes: [],
+    mode: null,
+    contextUsage: null,
     commands: [],
     models: [],
     rateLimit: null,
@@ -501,9 +516,21 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
     case 'effort_changed':
       return { ...state, effort: event.effort };
 
+    case 'modes_available':
+      return { ...state, modes: event.modes };
+
+    case 'mode_changed':
+      return { ...state, mode: event.mode };
+
+    case 'context_usage':
+      return {
+        ...state,
+        contextUsage: { usedTokens: event.usedTokens, contextWindow: event.contextWindow },
+      };
+
     // `/clear` and the SDK's other conversation-reset triggers: the whole
     // point is that history is gone, so this rebuilds from empty rather than
-    // filtering `items` — but model/commands/effort are session-level facts,
+    // filtering `items` — but model/commands/effort/modes are session-level facts,
     // not conversation history, and survive. `agentSessionId` moves to the
     // new conversation id, matching what `StructuredSession` now resumes
     // against (see structured-session.ts's own `conversation_reset` handler).
@@ -515,6 +542,8 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         commands: state.commands,
         models: state.models,
         effort: state.effort,
+        modes: state.modes,
+        mode: state.mode,
         rateLimit: state.rateLimit,
         items: [{ type: 'notice', key: `reset_${event.newConversationId}`, level: 'info', text: 'Conversation cleared.' }],
       };
@@ -586,6 +615,31 @@ export function resolveCurrentModel(models: ModelInfo[], model: string | null): 
     if (match) return match;
   }
   return models[0] ?? null;
+}
+
+/** Resolve the active `AgentModeInfo` entry, falling back to the first advertised mode. */
+export function resolveCurrentMode(modes: AgentModeInfo[], mode: string | null): AgentModeInfo | null {
+  if (mode) {
+    const exact = modes.find((m) => m.id === mode);
+    if (exact) return exact;
+  }
+  return modes[0] ?? null;
+}
+
+/** Format context-window occupancy for the session header meter (`62% of context`). */
+export function formatContextUsage(usage: ContextUsageState): {
+  percent: number;
+  label: string;
+  detail: string;
+  level: 'normal' | 'warn' | 'danger';
+} {
+  const ratio = usage.contextWindow > 0 ? usage.usedTokens / usage.contextWindow : 0;
+  const percent = Math.min(100, Math.max(0, Math.round(ratio * 100)));
+  const label =
+    usage.usedTokens > 0 && percent === 0 ? '<1% of context' : `${percent}% of context`;
+  const level = percent >= 90 ? 'danger' : percent >= 75 ? 'warn' : 'normal';
+  const detail = `${usage.usedTokens.toLocaleString('en-US')} / ${usage.contextWindow.toLocaleString('en-US')} tokens (${label})`;
+  return { percent, label, detail, level };
 }
 
 export function applyEvents(state: TranscriptState, events: AgentEvent[]): TranscriptState {

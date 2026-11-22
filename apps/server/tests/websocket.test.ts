@@ -1,8 +1,15 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
 import { PROTOCOL_VERSION, SERVER_PROTOCOL_RANGE, type ServerMessage } from '@pocketagent/protocol';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
+
+const AGY_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-agy.mjs',
+);
 
 interface Client {
   ws: WebSocket;
@@ -865,6 +872,96 @@ describe('websocket terminal transport', () => {
       client.send({ type: 'stop_speech', sessionId: id });
       const error = await client.next('error');
       expect(error.code).toBe('not_attached');
+    });
+  });
+
+  describe('mode handling (PA-184)', () => {
+    it('rejects mode switching on a non-structured (terminal) session', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+      client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+      await client.next('attached');
+
+      client.send({ type: 'mode', sessionId: id, mode: 'plan' });
+      const error = await client.next('error');
+      expect(error.code).toBe('bad_message');
+    });
+
+    it('switches agy mode live over WebSocket and broadcasts context_usage', async () => {
+      const agyApp = await createTestApp({ POCKETAGENT_AGY_BIN: AGY_FIXTURE });
+      await agyApp.app.listen({ host: '127.0.0.1', port: 0 });
+      const agyAddr = agyApp.app.server.address() as AddressInfo;
+      const ws = new WebSocket(`ws://127.0.0.1:${agyAddr.port}/api/ws?v=${PROTOCOL_VERSION}`, {
+        headers: { cookie: agyApp.cookie },
+      });
+      const messages: ServerMessage[] = [];
+      ws.on('message', (data) => {
+        messages.push(JSON.parse(data.toString()) as ServerMessage);
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.once('open', () => resolve());
+          ws.once('error', (err) => reject(err));
+        });
+
+        const create = await agyApp.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: { cookie: agyApp.cookie },
+          payload: {
+            agent: 'agy',
+            cwd: agyApp.projectDir,
+            cols: 80,
+            rows: 24,
+            transport: 'structured',
+          },
+        });
+        expect(create.statusCode, create.body).toBe(201);
+        const sessionId = create.json().id as string;
+
+        ws.send(JSON.stringify({ type: 'attach', sessionId, afterSeq: 0 }));
+        await waitFor(() => messages.some((m) => m.type === 'attached' && m.session.id === sessionId));
+        const attached = messages.find((m) => m.type === 'attached' && m.session.id === sessionId);
+        expect(
+          attached?.type === 'attached' &&
+            attached.agentReplay?.events.some((e) => e.event.kind === 'modes_available'),
+        ).toBe(true);
+
+        ws.send(JSON.stringify({ type: 'mode', sessionId, mode: 'accept-edits' }));
+        await waitFor(() =>
+          messages.some(
+            (m) =>
+              m.type === 'agent_event' &&
+              m.sessionId === sessionId &&
+              m.event.kind === 'mode_changed' &&
+              m.event.mode === 'accept-edits',
+          ),
+        );
+        await waitFor(() =>
+          messages.some(
+            (m) =>
+              m.type === 'status' &&
+              m.session.id === sessionId &&
+              m.session.agentMode === 'accept-edits' &&
+              m.session.skipPermissionsEnabled === true,
+          ),
+        );
+
+        ws.send(JSON.stringify({ type: 'prompt', sessionId, text: 'hello' }));
+        await waitFor(() =>
+          messages.some(
+            (m) =>
+              m.type === 'agent_event' &&
+              m.sessionId === sessionId &&
+              m.event.kind === 'context_usage' &&
+              m.event.usedTokens === 50_000 &&
+              m.event.contextWindow === 1_048_576,
+          ),
+        );
+      } finally {
+        ws.close();
+        await agyApp.cleanup();
+      }
     });
   });
 });

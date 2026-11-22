@@ -144,6 +144,7 @@ function sessionView(info: SessionInfo, deps: McpToolDeps): Record<string, unkno
     ...(info.backgroundCommands && info.backgroundCommands.length > 0
       ? { backgroundCommands: info.backgroundCommands }
       : {}),
+    ...(info.agentMode ? { agentMode: info.agentMode } : {}),
     startedByMcpClient: owner?.client_label ?? null,
   };
 }

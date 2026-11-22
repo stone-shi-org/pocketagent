@@ -7,6 +7,7 @@ import {
   extractPath,
   extractPiPath,
   normalizeAgyAcpModels,
+  normalizeAgyAcpModes,
   normalizeAgyAcpUpdate,
   normalizeAgyModelList,
   normalizeCodexEvent,
@@ -800,12 +801,65 @@ describe('normalizeAgyAcpUpdate', () => {
     ]);
   });
 
+  it('normalizes current_mode_update into mode_changed', () => {
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'current_mode_update',
+        currentModeId: 'plan',
+      }),
+    ).toEqual([{ kind: 'mode_changed', mode: 'plan' }]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'current_mode_update', currentModeId: '  ' })).toEqual([]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'current_mode_update' })).toEqual([]);
+  });
+
+  it('normalizes usage_update into provider-agnostic context_usage', () => {
+    expect(
+      normalizeAgyAcpUpdate({
+        sessionUpdate: 'usage_update',
+        used: 650117,
+        size: 1048576,
+      }),
+    ).toEqual([{ kind: 'context_usage', usedTokens: 650117, contextWindow: 1048576 }]);
+    expect(
+      normalizeAgyAcpUpdate({ sessionUpdate: 'usage_update', used: 0, size: 1048576 }),
+    ).toEqual([{ kind: 'context_usage', usedTokens: 0, contextWindow: 1048576 }]);
+    // Rejects invalid/non-positive window sizes or negative usage.
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'usage_update', used: -1, size: 1000 })).toEqual([]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'usage_update', used: 100, size: 0 })).toEqual([]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'usage_update', used: 100 })).toEqual([]);
+  });
+
   it('returns [] for unknown or session-level updates and malformed input', () => {
     expect(normalizeAgyAcpUpdate({ sessionUpdate: 'session_info_update', title: 'X' })).toEqual([]);
-    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'usage_update', used: 100, size: 1000 })).toEqual([]);
+    expect(normalizeAgyAcpUpdate({ sessionUpdate: 'config_option_update', configOptions: [] })).toEqual([]);
     expect(normalizeAgyAcpUpdate({ sessionUpdate: 'unknown_future_kind' })).toEqual([]);
     expect(normalizeAgyAcpUpdate(null)).toEqual([]);
     expect(normalizeAgyAcpUpdate('nonsense')).toEqual([]);
+  });
+});
+
+describe('normalizeAgyAcpModes', () => {
+  it('maps ACP session/new modes.availableModes into AgentModeInfo[]', () => {
+    expect(
+      normalizeAgyAcpModes({
+        currentModeId: 'default',
+        availableModes: [
+          { id: 'default', name: 'Default', description: 'Ask before edits and commands.' },
+          { id: 'plan', name: 'Plan', description: 'Plan carefully before executing.' },
+          { id: 'custom-only-id' },
+          { name: 'missing id' },
+        ],
+      }),
+    ).toEqual([
+      { id: 'default', name: 'Default', description: 'Ask before edits and commands.' },
+      { id: 'plan', name: 'Plan', description: 'Plan carefully before executing.' },
+      { id: 'custom-only-id', name: 'custom-only-id', description: '' },
+    ]);
+  });
+
+  it('returns [] for missing or malformed input', () => {
+    expect(normalizeAgyAcpModes(null)).toEqual([]);
+    expect(normalizeAgyAcpModes({})).toEqual([]);
   });
 });
 

@@ -3,6 +3,7 @@ import type { ProjectInfo } from '@pocketagent/protocol';
 import {
   CreateAdoptableSessionRequest,
   CreateSessionRequest,
+  isAutoApprovingAgentMode,
   ProjectRequest,
   RemoveChatRequest,
   WorkspaceRequest,
@@ -655,6 +656,17 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
+    // PA-184: an MCP client cannot start a session in an auto-approving agent
+    // mode (`auto`, `accept-edits`, or any mode outside `default`/`plan`).
+    if (body.mode !== undefined && isAutoApprovingAgentMode(body.mode) && request.mcpPrincipal) {
+      return reply.code(403).send({
+        error: {
+          code: 'mode_forbidden',
+          message: `An MCP client cannot start a session in an auto-approving mode ("${body.mode}"). Only "default" or "plan" is permitted.`,
+        },
+      });
+    }
+
     // Adopting a pane takes its working directory from the validated target,
     // not from the request body.
     let adopt: Parameters<typeof sessions.create>[0]['adopt'];
@@ -722,6 +734,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         skipPermissions: body.skipPermissions,
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.effort !== undefined ? { effort: body.effort } : {}),
+        ...(body.mode !== undefined ? { mode: body.mode } : {}),
         ...(adopt ? { adopt } : {}),
         ...(body.attachFleetMcp === true ? { attachFleetMcp: true } : {}),
       });

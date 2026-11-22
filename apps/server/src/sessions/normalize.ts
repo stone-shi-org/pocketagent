@@ -1,5 +1,11 @@
 import path from 'node:path';
-import { cleanCompactionErrorMessage, type AgentEvent, type ModelInfo, type SlashCommandInfo } from '@pocketagent/protocol';
+import {
+  cleanCompactionErrorMessage,
+  type AgentEvent,
+  type AgentModeInfo,
+  type ModelInfo,
+  type SlashCommandInfo,
+} from '@pocketagent/protocol';
 
 
 /** Tool results can be enormous; the UI only needs a readable preview. */
@@ -470,10 +476,25 @@ export function normalizeAgyAcpUpdate(
       const commands = normalizeSlashCommands(update.availableCommands);
       return [{ kind: 'commands_available', commands }];
     }
+    case 'current_mode_update': {
+      const mode = str(update.currentModeId)?.trim();
+      return mode ? [{ kind: 'mode_changed', mode }] : [];
+    }
+    case 'usage_update': {
+      const used = num(update.used);
+      const size = num(update.size);
+      if (used === null || size === null || !Number.isFinite(used) || !Number.isFinite(size)) {
+        return [];
+      }
+      const usedTokens = Math.round(used);
+      const contextWindow = Math.round(size);
+      if (usedTokens < 0 || contextWindow <= 0) return [];
+      return [{ kind: 'context_usage', usedTokens, contextWindow }];
+    }
     default:
-      // `session_info_update`, `usage_update`, `current_mode_update`,
-      // `config_option_update`, `plan`, and any future update types are either
-      // handled directly by `AgySession` or ignored safely here.
+      // `session_info_update`, `config_option_update`, `plan`, and any future
+      // update types are either handled directly by `AgySession` or ignored
+      // safely here.
       return [];
   }
 }
@@ -597,6 +618,27 @@ export function normalizeAgyAcpModels(models: unknown): ModelInfo[] {
       description: str(raw.description) ?? '',
       supportsEffort: false,
       supportedEffortLevels: [],
+    });
+  }
+  return result;
+}
+
+/**
+ * Parse `modes.availableModes` from `agy acp`'s `session/new` or
+ * `session/resume` response into PocketAgent's `AgentModeInfo[]`.
+ */
+export function normalizeAgyAcpModes(modes: unknown): AgentModeInfo[] {
+  if (!isRecord(modes) || !Array.isArray(modes.availableModes)) return [];
+  const result: AgentModeInfo[] = [];
+  for (const raw of modes.availableModes) {
+    if (!isRecord(raw)) continue;
+    const id = str(raw.id)?.trim();
+    if (!id) continue;
+    const name = str(raw.name)?.trim() || id;
+    result.push({
+      id,
+      name,
+      description: str(raw.description) ?? '',
     });
   }
   return result;

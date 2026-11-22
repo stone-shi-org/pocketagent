@@ -537,6 +537,12 @@ export class TerminalConnection {
     return this.send({ type: 'effort', sessionId: this.sessionId, effort });
   }
 
+  /** Switch a structured session's operating mode live (e.g. agy's `default`/`plan`/`accept-edits`/`auto`). */
+  sendMode(mode: string): boolean {
+    if (!this.sessionId) return false;
+    return this.send({ type: 'mode', sessionId: this.sessionId, mode });
+  }
+
   /** Detach and stop reconnecting. The server-side PTY keeps running. */
   close(): void {
     this.closedByUser = true;

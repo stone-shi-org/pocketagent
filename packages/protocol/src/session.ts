@@ -216,6 +216,13 @@ export const SessionInfo = z.object({
    * exact status dot state (`chatDotState`). Optional so older backends remain valid.
    */
   unread: z.boolean().optional(),
+  /**
+   * PA-184: active operating mode for a live session whose backend advertises
+   * modes (e.g. `agy acp`'s `default`, `plan`, `accept-edits`, `auto`), or
+   * `null`/absent otherwise. Surfaced on `SessionInfo` so auto-approving modes
+   * stay disclosed persistently across visits and reloads.
+   */
+  agentMode: z.string().nullable().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 

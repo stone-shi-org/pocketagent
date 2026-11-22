@@ -416,6 +416,75 @@ export const EffortChangedEvent = z.object({
 export type EffortChangedEvent = z.infer<typeof EffortChangedEvent>;
 
 /**
+ * One operating mode an agent can switch between mid-session (e.g. agy's ACP
+ * `default`, `accept-edits`, `auto`, `plan`). Modeled after `ModelInfo` so the
+ * browser renders whatever choices the backend itself advertises.
+ */
+export const AgentModeInfo = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  description: z.string(),
+});
+export type AgentModeInfo = z.infer<typeof AgentModeInfo>;
+
+/**
+ * Modes known not to escalate tool auto-approval beyond the host's base policy
+ * (confirmed live against `agy acp` v1.5.14: `default` follows `settings.json`,
+ * `plan` shifts agy into read-only planning; `accept-edits` overrides
+ * `toolPermission: "strict"` to auto-approve in-workspace edits, and `auto`
+ * auto-approves edits and workspace commands under unset/`request-review`).
+ *
+ * Fails closed: any non-empty mode outside this set (`auto`, `accept-edits`, or
+ * any unknown future mode) is treated as auto-approving so server enforcement,
+ * SQLite persistence, and browser disclosure share one rule.
+ */
+export const SAFE_AGENT_MODES: ReadonlySet<string> = new Set(['default', 'plan']);
+
+export function isAutoApprovingAgentMode(mode: string | null | undefined): boolean {
+  if (!mode) return false;
+  const normalized = mode.trim().toLowerCase();
+  if (!normalized) return false;
+  return !SAFE_AGENT_MODES.has(normalized);
+}
+
+/**
+ * Full list of operating modes usable right now (REPLACE semantics, matching
+ * `ModelsAvailableEvent` and `CommandsAvailableEvent`).
+ */
+export const ModesAvailableEvent = z.object({
+  kind: z.literal('modes_available'),
+  modes: z.array(AgentModeInfo),
+});
+export type ModesAvailableEvent = z.infer<typeof ModesAvailableEvent>;
+
+/**
+ * The session's active operating mode changed — either because the user picked
+ * one from the UI (`SetModeMessage`) or because the agent pushed an update on
+ * its own (e.g. ACP `current_mode_update`).
+ */
+export const ModeChangedEvent = z.object({
+  kind: z.literal('mode_changed'),
+  mode: z.string().min(1),
+});
+export type ModeChangedEvent = z.infer<typeof ModeChangedEvent>;
+
+/**
+ * Live context-window occupancy for a structured session (PA-184).
+ *
+ * Provider-agnostic by design: emitted from `agy acp`'s `usage_update` today,
+ * and shaped so Claude Agent SDK, Codex, and other structured backends can feed
+ * the same session context meter without protocol or UI changes.
+ */
+export const ContextUsageEvent = z.object({
+  kind: z.literal('context_usage'),
+  /** Tokens currently occupying the context window. */
+  usedTokens: z.number().int().nonnegative(),
+  /** Total context window capacity in tokens. */
+  contextWindow: z.number().int().positive(),
+});
+export type ContextUsageEvent = z.infer<typeof ContextUsageEvent>;
+
+/**
  * The agent's own context was reset — most commonly `/clear`, but the SDK's
  * own doc comment on `SDKConversationResetMessage` also lists plan-mode exit
  * and other fresh-session flows as triggers. `newConversationId` is the id a
@@ -560,6 +629,9 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   ModelsAvailableEvent,
   ModelChangedEvent,
   EffortChangedEvent,
+  ModesAvailableEvent,
+  ModeChangedEvent,
+  ContextUsageEvent,
   ConversationResetEvent,
   TtsAudioEvent,
   ContextCompactionEvent,

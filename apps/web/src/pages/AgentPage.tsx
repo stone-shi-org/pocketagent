@@ -9,13 +9,20 @@ import type {
   SessionInfo,
   SessionStatus,
 } from '@pocketagent/protocol';
-import { clampTitle, isTerminalStatus, usesClaudeTranscripts } from '@pocketagent/protocol';
+import {
+  clampTitle,
+  isAutoApprovingAgentMode,
+  isTerminalStatus,
+  usesClaudeTranscripts,
+} from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import {
   applyEvent,
   applyEvents,
   emptyTranscript,
+  formatContextUsage,
+  resolveCurrentMode,
   resolveCurrentModel,
   type TranscriptItem,
   type TranscriptState,
@@ -184,6 +191,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
     noticeTimerRef.current = setTimeout(() => setLiveListenNotice(null), LIVE_LISTEN_NOTICE_MS);
   }
   const [pickingAgent, setPickingAgent] = useState(false);
+  const [pickingMode, setPickingMode] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
   /** Prior conversation, kept apart from the live transcript on purpose: a
@@ -703,6 +711,10 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
     connRef.current?.sendEffort(effort);
   }, []);
 
+  const setMode = useCallback((mode: string) => {
+    connRef.current?.sendMode(mode);
+  }, []);
+
   const decide = useCallback(
     (decision: PermissionDecision, message?: string, answer?: AskUserQuestionAnswer) => {
       const request = transcript.pending[0];
@@ -949,6 +961,38 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
     [transcript.totalCostUsd],
   );
 
+  const effectiveMode = transcript.mode ?? session?.agentMode ?? null;
+  const currentModeInfo = useMemo(
+    () => resolveCurrentMode(transcript.modes, effectiveMode),
+    [transcript.modes, effectiveMode],
+  );
+  const currentModeId = currentModeInfo?.id ?? effectiveMode;
+  const currentModeLabel = currentModeInfo?.name ?? effectiveMode;
+  const modeAutoApproves = isAutoApprovingAgentMode(currentModeId);
+  const modeOptions = useMemo<SelectorOption[]>(
+    () =>
+      transcript.modes.map((m) => ({
+        value: m.id,
+        label: m.name,
+        detail: isAutoApprovingAgentMode(m.id)
+          ? `${m.description ? `${m.description} · ` : ''}Auto-approves without asking`
+          : m.description || undefined,
+      })),
+    [transcript.modes],
+  );
+  const contextUsageView = useMemo(
+    () => (transcript.contextUsage ? formatContextUsage(transcript.contextUsage) : null),
+    [transcript.contextUsage],
+  );
+
+  const autoApproveTooltip = modeAutoApproves
+    ? currentModeId === 'auto'
+      ? 'Mode: Auto — agy auto-approves file edits and safe commands without asking. Any session-wide skip-permissions or settings.json bypass also remains active.'
+      : currentModeId === 'accept-edits'
+        ? 'Mode: Accept edits — agy auto-approves file edits in the workspace without asking (even under strict settings). Any session-wide skip-permissions or settings.json bypass also remains active.'
+        : `Mode: ${currentModeLabel ?? currentModeId} — this mode may auto-approve tool calls without asking.`
+    : 'Approvals are bypassed for this session — tool calls run unattended.';
+
   return (
     <div className="terminal-page agent-page">
       <header className="topbar">
@@ -962,12 +1006,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
             {modelLabel ? ` · ${modelLabel}` : ''}
           </span>
         </div>
-        {session?.skipPermissionsEnabled && (
+        {(session?.skipPermissionsEnabled || modeAutoApproves) && (
           <TopbarDisclosureBadge
             variant="danger"
             icon="shield"
-            label="Auto-approve"
-            tooltip="Approvals are bypassed for this session — tool calls run unattended."
+            label={modeAutoApproves && currentModeLabel ? `Auto-approve · ${currentModeLabel}` : 'Auto-approve'}
+            tooltip={autoApproveTooltip}
           />
         )}
         {/* Shown on every visit, not once at creation: whoever opens this chat
@@ -1034,6 +1078,30 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
       )}
 
       <div className="agent-strip">
+        {alive && transcript.modes.length > 0 && (
+          <button
+            type="button"
+            className={`chip mode-header-chip${modeAutoApproves ? ' mode-header-chip--warn' : currentModeId === 'plan' ? ' mode-header-chip--plan' : ''}`}
+            onClick={() => setPickingMode(true)}
+            disabled={connection !== 'connected'}
+            aria-label={`Agent mode: ${currentModeLabel ?? 'Default'}. Switch mode.`}
+          >
+            <span>Mode: {currentModeLabel ?? 'Default'}</span>
+            <Icon name="chevron-down" size={12} />
+          </button>
+        )}
+        {contextUsageView && (
+          <span
+            className={`chip context-meter-chip context-meter-chip--${contextUsageView.level}`}
+            title={contextUsageView.detail}
+            aria-label={contextUsageView.detail}
+          >
+            <span className="context-meter-track" aria-hidden="true">
+              <span className="context-meter-fill" style={{ width: `${contextUsageView.percent}%` }} />
+            </span>
+            <span>{contextUsageView.label}</span>
+          </span>
+        )}
         {transcript.files.length > 0 && (
           <button type="button" className="chip" onClick={() => setShowFiles((v) => !v)}>
             {transcript.files.length} file{transcript.files.length === 1 ? '' : 's'} touched
@@ -1159,6 +1227,19 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
         />
       )}
 
+      {pickingMode && modeOptions.length > 0 && (
+        <PickerSheet
+          title="Agent mode"
+          value={currentModeId}
+          options={modeOptions}
+          onPick={(value) => {
+            setMode(value);
+            setPickingMode(false);
+          }}
+          onCancel={() => setPickingMode(false)}
+        />
+      )}
+
       <PromptBox
         sessionId={sessionId}
         historyKey={session?.cwd ? codePromptHistoryKey(session.cwd) : undefined}
@@ -1185,6 +1266,9 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed, active = t
         onSetModel={setModel}
         effort={transcript.effort}
         onSetEffort={setEffort}
+        modes={alive ? transcript.modes : []}
+        currentMode={effectiveMode}
+        onSetMode={setMode}
         thinking={supportsEffort ? thinkingEnabled : undefined}
         onToggleThinking={supportsEffort ? toggleThinking : undefined}
         busy={transcript.busy}

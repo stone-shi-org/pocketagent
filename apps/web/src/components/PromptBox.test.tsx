@@ -634,4 +634,47 @@ describe('PromptBox push-to-talk recording and transcribing preservation (PA-138
     expect(htmlTranscribing).toMatch(/<button[^>]+class="mic-btn[^"]*"[^>]*\sdisabled/);
     expect(htmlTranscribing).toMatch(/<button[^>]+class="mic-select-btn"[^>]*\sdisabled/);
   });
+
+  it('renders the agent mode chip next to the model chip with auto-approve and plan styling (PA-184)', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+    const modes = [
+      { id: 'default', name: 'Default', description: 'Ask per settings.' },
+      { id: 'accept-edits', name: 'Accept edits', description: 'Approve edits.' },
+      { id: 'auto', name: 'Auto', description: 'Approve safe commands.' },
+      { id: 'plan', name: 'Plan', description: 'Plan first.' },
+    ];
+    const models = [
+      { value: 'auto', displayName: 'Gemini Pro Next', description: '', supportsEffort: false, supportedEffortLevels: [] },
+    ];
+
+    const htmlAuto = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-mode-auto"
+        onSend={() => true}
+        disabled={false}
+        modes={modes}
+        currentMode="auto"
+        models={models}
+        currentModel="auto"
+      />,
+    );
+    expect(htmlAuto).toContain('class="mode-chip mode-chip--warn"');
+    expect(htmlAuto).toContain('<span>Auto</span>');
+    expect(htmlAuto.indexOf('mode-chip')).toBeLessThan(htmlAuto.indexOf('model-chip'));
+
+    const htmlPlan = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-mode-plan"
+        onSend={() => true}
+        disabled={false}
+        modes={modes}
+        currentMode="plan"
+        models={models}
+        currentModel="auto"
+      />,
+    );
+    expect(htmlPlan).toContain('class="mode-chip mode-chip--plan"');
+    expect(htmlPlan).toContain('<span>Plan</span>');
+  });
 });
